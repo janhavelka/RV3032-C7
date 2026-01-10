@@ -39,7 +39,13 @@ def get_git_info(project_root):
 
 def main():
     # Find project root (where library.json lives)
-    script_dir = Path(__file__).parent
+    try:
+        # When run from PlatformIO, __file__ is not defined
+        script_dir = Path(__file__).parent
+    except NameError:
+        # Use current working directory when called from PlatformIO
+        script_dir = Path.cwd() / "scripts"
+    
     project_root = script_dir.parent
     
     library_json = project_root / "library.json"
@@ -129,6 +135,10 @@ static constexpr const char* VERSION_FULL = "{version} ({git_commit}, {build_tim
     
     print(f"Generated {version_h} with version {version}")
 
+
+# PlatformIO pre-build hook (runs automatically)
+Import("env")
+main()
 
 if __name__ == "__main__":
     main()

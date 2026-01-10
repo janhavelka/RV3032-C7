@@ -40,6 +40,16 @@ struct Status {
   const char* msg = "";    ///< Static error message (never heap-allocated)
 
   /**
+   * @brief Default constructor
+   */
+  constexpr Status() = default;
+
+  /**
+   * @brief Constructor with all fields
+   */
+  constexpr Status(Err c, int32_t d, const char* m) : code(c), detail(d), msg(m) {}
+
+  /**
    * @brief Check if operation succeeded
    * @return true if code == Err::OK
    */

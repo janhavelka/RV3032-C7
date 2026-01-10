@@ -31,6 +31,12 @@ inline void log_begin(unsigned long baud = 115200) {
     if (LOG_LEVEL >= 1) Serial.printf("[E] " fmt "\n", ##__VA_ARGS__); \
   } while (0)
 
+/// @brief Log warning message (level >= 2)
+#define LOGW(fmt, ...) \
+  do { \
+    if (LOG_LEVEL >= 2) Serial.printf("[W] " fmt "\n", ##__VA_ARGS__); \
+  } while (0)
+
 /// @brief Log info message (level >= 2)
 #define LOGI(fmt, ...) \
   do { \

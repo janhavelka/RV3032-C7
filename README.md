@@ -33,8 +33,8 @@ Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock
 ```
 RV-3032   ESP32
 ------    -----
-SDA   ->  GPIO21 (or custom)
-SCL   ->  GPIO22 (or custom)
+SDA   ->  GPIO8 (or custom)
+SCL   ->  GPIO9 (or custom)
 VDD   ->  3.3V
 VSS   ->  GND
 VBAT  ->  CR2032 battery +
