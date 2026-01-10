@@ -38,4 +38,4 @@ wifi_credentials.h
 *.log
 
 # Auto-generated files
-include/YourLibrary/Version.h
+include/RV3032/Version.h
