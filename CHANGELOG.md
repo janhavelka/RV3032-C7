@@ -7,36 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-01-10
+
 ### Added
-- Initial library template structure
-- `begin(Config) -> Status`, `tick(now_ms)`, `end()` API pattern
-- Status/Err type with static error messages
-- Config injection pattern (no hardcoded pins)
-- Basic CLI example (`01_basic_bringup_cli`)
-- Compile-only skeleton example (`00_compile_only`)
+- Complete RV-3032-C7 RTC driver implementation
+- `begin(Config) -> Status`, `tick(now_ms)`, `end()` lifecycle API
+- Time/date operations: `readTime()`, `setTime()`, `readUnix()`, `setUnix()`
+- Unix timestamp support with automatic date conversion
+- Alarm functionality: configurable time matching and interrupt output
+- Periodic countdown timer with programmable frequency
+- External event input (EVI) with debouncing and timestamping
+- Programmable CLKOUT output (32.768 kHz to 1 Hz)
+- Frequency offset calibration in PPM (±200 ppm range)
+- Built-in temperature sensor reading (±3°C accuracy)
+- Battery backup modes: Off, Level (threshold), Direct (immediate)
+- EEPROM persistence for configuration (optional, off by default)
+- Status error model with detailed error codes
+- Static utility functions: `isValidDateTime()`, `computeWeekday()`, `parseBuildTime()`
+- Interactive CLI example (`01_basic_bringup_cli`) demonstrating all features
+- Comprehensive Doxygen documentation in public headers
+- Auto-generated version constants from library.json
 - GitHub Actions CI for ESP32-S2 and ESP32-S3
-- Doxygen-style documentation in public headers
 
 ### Changed
-- Nothing yet
-
-### Deprecated
-- Nothing yet
+- N/A (initial RV3032 release)
 
 ### Removed
-- Nothing yet
+- N/A (initial RV3032 release)
 
-### Fixed
-- Nothing yet
-
-### Security
-- Nothing yet
-
-## [0.1.0] - 2026-01-10
-
-### Added
-- Initial release with template structure
-- ESP32-S2 and ESP32-S3 support
-
-[Unreleased]: https://github.com/YOUR_USERNAME/esp32-platformio-library-template/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/YOUR_USERNAME/esp32-platformio-library-template/releases/tag/v0.1.0
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.0.0

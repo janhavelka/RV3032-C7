@@ -1,302 +1,351 @@
-# esp32-platformio-library-template
+# RV3032-C7
 
-A clean, robust **single-library** template for **ESP32 (S2/S3)** using **Arduino framework** with **PlatformIO**.
+Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module using **Arduino framework** with **PlatformIO**.
 
-[![CI](https://github.com/YOUR_USERNAME/esp32-platformio-library-template/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/esp32-platformio-library-template/actions/workflows/ci.yml)
+[![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
+
+## Features
+
+- **Ultra-low power RTC** with battery backup (<1µA typical)
+- **Temperature compensated** crystal oscillator (TCXO)
+- **Alarm functionality** with INT pin output
+- **Periodic countdown timer** with programmable frequency
+- **External event timestamping** (EVI pin)
+- **Programmable CLKOUT** output (32.768 kHz to 1 Hz)
+- **Frequency offset calibration** (±200 ppm range)
+- **Built-in temperature sensor** (±3°C accuracy)
+- **EEPROM** for persistent configuration
+- **Non-blocking API** with begin/tick/end lifecycle
+- **Unix timestamp** support
+- **No heap allocation** in steady state
+
+## Hardware
+
+**RV-3032-C7** specifications:
+- I2C interface (address: 0x51)
+- Supply voltage: 1.1V - 5.5V
+- Timekeeping current: <200 nA (typical)
+- Backup current: <45 nA (typical)
+- Temperature range: -40°C to +85°C
+- Accuracy: ±5 ppm (with calibration)
+
+**Typical wiring (ESP32):**
+```
+RV-3032   ESP32
+------    -----
+SDA   ->  GPIO21 (or custom)
+SCL   ->  GPIO22 (or custom)
+VDD   ->  3.3V
+VSS   ->  GND
+VBAT  ->  CR2032 battery +
+```
 
 ## Quickstart
 
-```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/esp32-platformio-library-template.git
-cd esp32-platformio-library-template
+```cpp
+#include <Wire.h>
+#include "RV3032/RV3032.h"
 
-# Build for ESP32-S3
-pio run -e ex_cli_s3
+RV3032::RV3032 rtc;
 
-# Upload and monitor
-pio run -e ex_cli_s3 -t upload && pio device monitor -e ex_cli_s3
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();  // Initialize I2C (default SDA=21, SCL=22)
+
+  // Configure RTC
+  RV3032::Config cfg;
+  cfg.wire = &Wire;
+  cfg.backupMode = RV3032::BackupSwitchMode::Level;
+
+  // Initialize RTC
+  RV3032::Status st = rtc.begin(cfg);
+  if (!st.ok()) {
+    Serial.printf("RTC init failed: %s\n", st.msg);
+    return;
+  }
+
+  // Set time from build timestamp (first boot only)
+  RV3032::DateTime now;
+  if (RV3032::RV3032::parseBuildTime(now)) {
+    rtc.setTime(now);
+  }
+}
+
+void loop() {
+  rtc.tick(millis());  // Cooperative update (non-blocking)
+
+  // Read time every second
+  RV3032::DateTime dt;
+  if (rtc.readTime(dt).ok()) {
+    Serial.printf("%04d-%02d-%02d %02d:%02d:%02d\n",
+                  dt.year, dt.month, dt.day,
+                  dt.hour, dt.minute, dt.second);
+  }
+  delay(1000);
+}
 ```
-
-## Supported Targets
-
-| Board                    | Environment       | Notes                    |
-| ------------------------ | ----------------- | ------------------------ |
-| ESP32-S3-MINI-1U-N4R2    | `ex_cli_s3`       | PSRAM enabled            |
-| ESP32-S2-MINI-2-N4       | `ex_cli_s2`       | No PSRAM                 |
 
 ## Versioning
 
-The library version is defined in [library.json](library.json). A pre-build script automatically generates `include/YourLibrary/Version.h` with version constants.
+The library version is defined in [library.json](library.json). A pre-build script automatically generates `include/RV3032/Version.h` with version constants.
 
 **Print version in your code:**
 ```cpp
-#include "YourLibrary/Version.h"
+#include "RV3032/Version.h"
 
-Serial.println(YourLibrary::VERSION);           // "0.1.0"
-Serial.println(YourLibrary::VERSION_FULL);      // "0.1.0 (a1b2c3d, 2026-01-10 15:30:00)"
-Serial.println(YourLibrary::BUILD_TIMESTAMP);   // "2026-01-10 15:30:00"
-Serial.println(YourLibrary::GIT_COMMIT);        // "a1b2c3d"
+Serial.println(RV3032::VERSION);           // "1.0.0"
+Serial.println(RV3032::VERSION_FULL);      // "1.0.0 (a1b2c3d, 2026-01-10 15:30:00)"
+Serial.println(RV3032::BUILD_TIMESTAMP);   // "2026-01-10 15:30:00"
+Serial.println(RV3032::GIT_COMMIT);        // "a1b2c3d"
 ```
-
-**Available constants:**
-- `VERSION`, `VERSION_MAJOR`, `VERSION_MINOR`, `VERSION_PATCH`, `VERSION_CODE`
-- `BUILD_DATE`, `BUILD_TIME`, `BUILD_TIMESTAMP`
-- `GIT_COMMIT`, `GIT_STATUS` (clean/dirty)
-- `VERSION_FULL` (version + build info)
 
 **Update version:** Edit `library.json` only. `Version.h` is auto-generated on every build.
 
 ## API
 
-The library follows a **begin/tick/end** lifecycle:
-
-```cpp
-#include "YourLibrary/YourLib.h"
-
-YourLibrary::YourLib lib;
-
-void setup() {
-  YourLibrary::Config cfg;
-cfg.ledPin = 48;
-cfg.intervalMs = 1000;
-  YourLibrary::Status st = lib.begin(cfg);
-  if (!st.ok()) {
-    // Handle error: st.code, st.msg, st.detail
-  }
-}
-
-void loop() {
-  lib.tick(millis());  // Non-blocking, call every iteration
-}
-
-// Optional cleanup
-void shutdown() {
-  lib.end();
-}
-```
+The library follows a **begin/tick/end** lifecycle with **Status** error handling:
 
 ### Core Methods
 
-| Method                            | Description                              |
-| --------------------------------- | ---------------------------------------- |
-| `Status begin(const Config&)`     | Initialize with configuration            |
-| `void tick(uint32_t now_ms)`      | Cooperative update, call from `loop()`   |
-| `void end()`                      | Stop and release resources               |
-| `bool isInitialized() const`      | Check if library is initialized          |
-| `const Config& getConfig() const` | Get current configuration                |
-| `uint32_t getNextTickMs() const`  | Get next scheduled tick time             |
+| Method | Description |
+|--------|-------------|
+| `Status begin(const Config&)` | Initialize RTC with configuration |
+| `void tick(uint32_t now_ms)` | Cooperative update, call from `loop()` |
+| `void end()` | Stop and release resources |
+| `bool isInitialized() const` | Check if RTC initialized |
+| `const Config& getConfig() const` | Get current configuration |
 
-## Config
+### Time/Date Operations
+
+| Method | Description |
+|--------|-------------|
+| `Status readTime(DateTime& out)` | Read current time and date |
+| `Status setTime(const DateTime& time)` | Set RTC time and date |
+| `Status readUnix(uint32_t& out)` | Read time as Unix timestamp |
+| `Status setUnix(uint32_t ts)` | Set time from Unix timestamp |
+
+### Alarm Operations
+
+| Method | Description |
+|--------|-------------|
+| `Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date)` | Set alarm time values |
+| `Status setAlarmMatch(bool minute, bool hour, bool date)` | Configure which components match |
+| `Status getAlarmConfig(AlarmConfig& out)` | Read alarm configuration |
+| `Status getAlarmFlag(bool& triggered)` | Check if alarm triggered |
+| `Status clearAlarmFlag()` | Clear alarm flag |
+| `Status enableAlarmInterrupt(bool enable)` | Enable/disable INT pin output |
+
+### Timer Operations
+
+| Method | Description |
+|--------|-------------|
+| `Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable)` | Configure countdown timer |
+| `Status getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled)` | Read timer configuration |
+
+### Clock Output
+
+| Method | Description |
+|--------|-------------|
+| `Status setClkoutEnabled(bool enabled)` | Enable/disable CLKOUT pin |
+| `Status setClkoutFrequency(ClkoutFrequency freq)` | Set output frequency (32.768 kHz to 1 Hz) |
+| `Status getClkoutEnabled(bool& enabled)` | Check if CLKOUT enabled |
+| `Status getClkoutFrequency(ClkoutFrequency& freq)` | Read output frequency |
+
+### Calibration
+
+| Method | Description |
+|--------|-------------|
+| `Status setOffsetPpm(float ppm)` | Set frequency offset in parts-per-million |
+| `Status getOffsetPpm(float& ppm)` | Read frequency offset |
+
+### Temperature Sensor
+
+| Method | Description |
+|--------|-------------|
+| `Status readTemperatureC(float& celsius)` | Read die temperature (±3°C accuracy) |
+
+### External Event Input
+
+| Method | Description |
+|--------|-------------|
+| `Status setEviEdge(bool rising)` | Set edge sensitivity (rising/falling) |
+| `Status setEviDebounce(EviDebounce debounce)` | Set debounce filter |
+| `Status setEviOverwrite(bool enable)` | Allow overwriting timestamps |
+| `Status getEviConfig(EviConfig& out)` | Read EVI configuration |
+
+### Status & Low-Level
+
+| Method | Description |
+|--------|-------------|
+| `Status readStatus(uint8_t& status)` | Read status register |
+| `Status clearStatus(uint8_t mask)` | Clear status flags |
+| `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
+| `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
+
+### Static Utility Functions
+
+| Method | Description |
+|--------|-------------|
+| `static bool isValidDateTime(const DateTime& time)` | Validate date/time structure |
+| `static uint8_t computeWeekday(uint16_t year, uint8_t month, uint8_t day)` | Calculate day of week |
+| `static bool parseBuildTime(DateTime& out)` | Parse __DATE__ and __TIME__ macros |
+
+## Configuration
 
 Configuration is injected via `Config` struct. The library **never hardcodes pins**.
 
 ```cpp
-struct Config {
-  int ledPin = -1;           // GPIO for LED (-1 = disabled)
-  int uartRxPin = -1;        // Example: UART RX pin
-  int uartTxPin = -1;        // Example: UART TX pin
-  uint32_t intervalMs = 1000; // Periodic tick interval
-};
+namespace RV3032 {
+  struct Config {
+    TwoWire* wire = nullptr;                     // I2C interface (required)
+    uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
+    BackupSwitchMode backupMode = Level;         // Battery backup mode
+    bool enableEepromWrites = false;             // Persistent config (EEPROM)
+    uint32_t eepromTimeoutMs = 200;              // EEPROM write timeout
+  };
+}
 ```
 
-See [include/YourLibrary/Config.h](include/YourLibrary/Config.h) for full definition.
+**Configuration rules:**
+- `wire` must be initialized (`Wire.begin()` called) before `begin()`
+- `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
+- `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss.
+- `eepromTimeoutMs`: Maximum wait time for EEPROM writes (default 200ms)
 
-### Pin Mapping
+## Error Handling
 
-The library **does not define pin defaults**. All pins are application-provided via `Config`.
-
-For convenience, examples use reference pin mappings defined in [examples/common/BoardPins.h](examples/common/BoardPins.h):
-
-| Signal    | GPIO | Note                               |
-| --------- | ---- | ---------------------------------- |
-| SDA       | 8    | I2C data line                      |
-| SCL       | 9    | I2C clock line                     |
-| SPI_MOSI  | 11   | SPI master out, slave in           |
-| SPI_SCK   | 12   | SPI serial clock                   |
-| SPI_MISO  | 13   | SPI master in, slave out           |
-| LED       | 48   | Onboard LED (48=S3, 18=S2 typical) |
-
-**These are example defaults for ESP32-S2 / ESP32-S3 reference hardware only.** Override for your board.
-
-## Error Model
-
-All fallible operations return `Status`:
+All library functions return `Status` struct:
 
 ```cpp
 struct Status {
-  Err code;           // Error category (OK, INVALID_CONFIG, TIMEOUT, etc.)
-  int32_t detail;     // Vendor/library-specific error code
-  const char* msg;    // Human-readable message (STATIC STRING ONLY)
+  Err code;           // Error category (OK, I2C_ERROR, TIMEOUT, ...)
+  int32_t detail;     // I2C error code or vendor detail
+  const char* msg;    // Static error message (never heap-allocated)
+
+  bool ok() const;    // Returns true if code == Err::OK
 };
 ```
 
-**Important:** `msg` must always point to a static string literal. Never allocate or construct strings dynamically. This ensures zero heap allocation in error paths.
+**Error codes:**
+- `OK` - Operation successful
+- `NOT_INITIALIZED` - Call `begin()` first
+- `INVALID_CONFIG` - Invalid configuration parameter
+- `I2C_ERROR` - I2C communication failure
+- `TIMEOUT` - Operation timed out (EEPROM write)
+- `INVALID_PARAM` - Invalid parameter value
+- `INVALID_DATETIME` - Invalid date/time value
+- `DEVICE_NOT_FOUND` - RTC not responding on I2C bus
+- `EEPROM_WRITE_FAILED` - EEPROM update failed
+- `REGISTER_READ_FAILED` - Register read failed
+- `REGISTER_WRITE_FAILED` - Register write failed
 
-### Error Codes
+**Example error handling:**
+```cpp
+RV3032::Status st = rtc.setTime(dt);
+if (!st.ok()) {
+  Serial.printf("Error: %s (code=%d, detail=%d)\n",
+                st.msg, static_cast<int>(st.code), st.detail);
+}
+```
 
-| Code                  | Meaning                                    |
-| --------------------- | ------------------------------------------ |
-| `OK`                  | Success                                    |
-| `INVALID_CONFIG`      | Invalid configuration parameter            |
-| `TIMEOUT`             | Operation timed out                        |
-| `RESOURCE_BUSY`       | Resource is busy                           |
-| `COMM_FAILURE`        | Communication or I/O error                 |
-| `NOT_INITIALIZED`     | Not initialized or not ready               |
-| `OUT_OF_MEMORY`       | Memory allocation failed                   |
-| `HARDWARE_FAULT`      | Hardware peripheral error                  |
-| `EXTERNAL_LIB_ERROR`  | Error from wrapped third-party code        |
-| `INTERNAL_ERROR`      | Internal logic error                       |
+## Behavioral Contracts
 
-## Threading & Timing Model
+**Threading Model:** Single-threaded by default. No FreeRTOS tasks created.
 
-- **Non-blocking:** `tick()` returns immediately; no delays in steady state.
-- **Single-threaded:** Call all methods from the same task/thread (typically Arduino `loop()`).
-- **Cooperative:** You control when work happens by calling `tick()`.
-- **Deterministic:** Predictable execution time; no hidden sleeps or waits.
+**Timing:** `tick()` completes in <1ms (no I2C operations). EEPROM operations use blocking wait (up to `Config::eepromTimeoutMs`).
 
-**ISR Safety:** Do not call library methods from ISRs. Set flags in ISRs and handle them in `tick()`.
+**Resource Ownership:** I2C interface passed via `Config`. No hardcoded pins or resources.
 
-## Design Notes
+**Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
 
-This library follows embedded best practices:
+**Error Handling:** All errors returned as `Status`. No silent failures.
 
-1. **Deterministic behavior:** No hidden delays, no unbounded loops.
-2. **Non-blocking:** All operations complete quickly or report busy.
-3. **Config injection:** Hardware pins and parameters come from `Config`, not hardcoded.
-4. **No hidden NVS:** No persistent storage side effects unless explicitly documented and opt-in.
-5. **Static error strings:** `Status.msg` is always a string literal, never heap-allocated.
-6. **No steady-state allocations:** All memory is allocated in `begin()`, none in `tick()`.
+**EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
+- `setClkoutEnabled()` / `setClkoutFrequency()`
+- `setOffsetPpm()`
+- Backup mode changes in `begin()`
+
+EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles.
+
+## Supported Targets
+
+| Board | Environment | Notes |
+|-------|-------------|-------|
+| ESP32-S3-MINI-1U-N4R2 | `ex_bringup_s3` | PSRAM enabled |
+| ESP32-S2-MINI-2-N4 | `ex_bringup_s2` | No PSRAM |
 
 ## Examples
 
-| Example                  | Description                                      |
-| ------------------------ | ------------------------------------------------ |
-| `00_compile_only`        | Minimal skeleton; verifies library compiles      |
-| `01_basic_bringup_cli`   | Interactive CLI for testing start/stop           |
+### 01_basic_bringup_cli
 
-### Building Examples
+Interactive CLI demonstrating all RTC features:
+- Time reading and setting
+- Alarm configuration
+- Timer operations
+- Clock output control
+- Calibration (offset adjustment)
+- Temperature monitoring
 
 ```bash
-# Compile-only skeleton (S3)
-pio run -e ex_compile_only_s3
-
-# CLI example (S2)
-pio run -e ex_cli_s2 -t upload
-pio device monitor -e ex_cli_s2
+# Build and upload
+pio run -e ex_bringup_s3 -t upload && pio device monitor -e ex_bringup_s3
 ```
 
-## Versioning Policy
+## Build
 
-This project follows [Semantic Versioning 2.0.0](https://semver.org/):
+```bash
+# Clone repository
+git clone https://github.com/janhavelka/RV3032-C7.git
+cd RV3032-C7
 
-- **MAJOR:** Breaking API changes
-- **MINOR:** New features, backward compatible
-- **PATCH:** Bug fixes, backward compatible
+# Build for ESP32-S3
+pio run -e ex_bringup_s3
 
-### Release Checklist
-
-1. Update version in `library.json`
-2. Update `CHANGELOG.md` (move Unreleased to new version)
-3. Commit: `git commit -m "chore: release v1.2.3"`
-4. Tag: `git tag v1.2.3`
-5. Push: `git push && git push --tags`
+# Upload and monitor
+pio run -e ex_bringup_s3 -t upload
+pio device monitor -e ex_bringup_s3
+```
 
 ## Project Structure
 
 ```
-├── include/YourLibrary/   # Public headers (library API)
-│   ├── Config.h          # Configuration struct
-│   ├── Status.h          # Error types
-│   └── YourLib.h         # Main library class
-├── src/                  # Implementation
-│   └── YourLib.cpp
-├── examples/
-│   ├── 00_compile_only/  # Minimal skeleton
-│   ├── 01_basic_bringup_cli/  # CLI demo
-│   └── common/           # Shared example utilities
-├── .github/workflows/    # CI configuration
-├── library.json          # PlatformIO library metadata
-└── platformio.ini        # Build environments
+include/RV3032/         - Public API headers (Doxygen documented)
+  ├── Status.h          - Error types
+  ├── Config.h          - Configuration struct
+  ├── RV3032.h          - Main library class
+  └── Version.h         - Auto-generated version constants
+src/
+  └── RV3032.cpp        - Implementation
+examples/
+  ├── 01_basic_bringup_cli/  - Interactive CLI example
+  └── common/                - Example-only helpers (Log.h, BoardPins.h)
+platformio.ini          - Build environments
+library.json            - PlatformIO metadata
+README.md               - This file
+CHANGELOG.md            - Version history
+AGENTS.md               - Coding guidelines
 ```
-
-## Extending This Template
-
-This template is designed to scale across diverse embedded projects. When adding new functionality:
-
-### Device Integration Patterns
-
-**RS485/Modbus:**
-- Use transaction-based state machine (Idle → Tx → Rx → Done)
-- Implement inter-character and frame timeouts via deadlines
-- Optional: RX drain task for high-throughput scenarios
-
-**GSM Modems / AT Commands:**
-- Command queue with retry logic and per-command timeouts
-- Handle unsolicited responses (+CMT, +CREG, etc.) in tick()
-- Some commands take 30+ seconds - use deadline-based waits
-
-**High-Rate ADC:**
-- ISR writes to ring buffer (minimal work)
-- Optional processing task drains buffer
-- Document buffer size requirements in Config
-
-**Stepper Motors:**
-- Non-blocking position tracking API
-- Use hardware timers or RMT for pulse generation
-- Never block waiting for motion completion
-
-**I2C/SPI Sensors:**
-- Short transactions in tick(), avoid long bus holds
-- Implement timeout + retry with exponential backoff
-- Abstract shared bus ownership if multiple devices
-
-**SD Card Logging:**
-- Buffer writes in RAM, flush periodically or on demand
-- Optional task for background flushing
-- Handle write failures gracefully (retry, report error)
-
-### FreeRTOS Tasks (When to Use)
-
-Default: **Do not use tasks.** Implement as non-blocking tick() pattern.
-
-Use tasks only when:
-- Continuous streaming required (ADC sampling, audio)
-- Blocking I/O simplifies correctness (UART RX, sockets)
-
-When adding tasks:
-- Keep them thin adapters calling library tick()
-- Document stack size, priority, and lifecycle in Config
-- Provide both task-based AND non-blocking APIs when possible
-- Update README threading model section
-
-### Modification Checklist
-
-Before extending:
-1. Does it increase predictability? (If no, reconsider)
-2. Add Doxygen docs to all new public APIs
-3. Update README with threading/timing impacts
-4. Keep Config struct board-agnostic (no hardcoded pins)
-5. Ensure tick() remains bounded and non-blocking
-6. Add entry to CHANGELOG.md
-
-## Assumptions
-
-- Target boards have at least 4MB flash.
-- Arduino framework provides `millis()` returning `uint32_t`.
-- Examples assume onboard LED on GPIO 48 (S3) - adjust in `BoardPins.h`.
-- Single-threaded by default; tasks are opt-in via Config.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+
+**Coding standards:**
+- Follow [AGENTS.md](AGENTS.md) guidelines
+- Non-blocking by default (begin/tick/end pattern)
+- Status error model (no exceptions)
+- No heap allocation in steady state
+- Doxygen documentation for public API
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) file.
 
-## See Also
+## References
 
-- [CHANGELOG.md](CHANGELOG.md) - Version history
-- [SECURITY.md](SECURITY.md) - Security policy
-- [AGENTS.md](AGENTS.md) - AI agent guidelines
+- [RV-3032-C7 Datasheet](https://www.microcrystal.com/en/products/real-time-clock-rtc-modules/rv-3032-c7/)
+- [Application Manual](https://www.microcrystal.com/fileadmin/Media/Products/RTC/App.Manual/RV-3032-C7_App-Manual.pdf)
+
+## Credits
+
+Based on original RtcManager implementation. Refactored to follow ESP32 embedded engineering best practices from [AGENTS.md](AGENTS.md).

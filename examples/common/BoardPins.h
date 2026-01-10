@@ -25,23 +25,11 @@ namespace pins {
 
 /// @brief I2C SDA pin (data line). Example default for ESP32-S2/S3.
 /// Override for your hardware.
-static constexpr int SDA = 8;
+static constexpr int I2C_SDA = 21;
 
 /// @brief I2C SCL pin (clock line). Example default for ESP32-S2/S3.
 /// Override for your hardware.
-static constexpr int SCL = 9;
-
-/// @brief SPI MOSI pin (master out, slave in). Example default for ESP32-S2/S3.
-/// Override for your hardware.
-static constexpr int SPI_MOSI = 11;
-
-/// @brief SPI SCK pin (serial clock). Example default for ESP32-S2/S3.
-/// Override for your hardware.
-static constexpr int SPI_SCK = 12;
-
-/// @brief SPI MISO pin (master in, slave out). Example default for ESP32-S2/S3.
-/// Override for your hardware.
-static constexpr int SPI_MISO = 13;
+static constexpr int I2C_SCL = 22;
 
 /// @brief LED pin. Example default for ESP32-S3 (RGB LED on GPIO48).
 /// Override for your hardware. Set to -1 to disable.

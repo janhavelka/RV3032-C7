@@ -1,36 +1,44 @@
 {
-  "name": "esp32-platformio-library-template",
-  "version": "0.1.0",
-  "description": "Robust ESP32 Arduino + PlatformIO single-library template with begin/tick/end lifecycle and Status error model.",
+  "name": "RV3032-C7",
+  "version": "1.0.0",
+  "description": "Robust ESP32 driver for Micro Crystal RV-3032-C7 real-time clock module with I2C interface, battery backup, alarms, and temperature compensation.",
   "keywords": [
     "esp32",
     "esp32-s2",
     "esp32-s3",
     "arduino",
     "platformio",
-    "embedded",
-    "library-template",
+    "rtc",
+    "real-time-clock",
+    "rv3032",
+    "i2c",
+    "time",
+    "alarm",
+    "battery-backup",
     "non-blocking"
   ],
   "authors": [
     {
-      "name": "Your Name",
-      "email": "your.email@example.com",
-      "url": "https://github.com/YOUR_USERNAME",
+      "name": "Jan Havelka",
+      "email": "jan@havelka.dev",
+      "url": "https://github.com/janhavelka",
       "maintainer": true
     }
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/esp32-platformio-library-template.git"
+    "url": "https://github.com/janhavelka/RV3032-C7.git"
   },
   "license": "MIT",
-  "homepage": "https://github.com/YOUR_USERNAME/esp32-platformio-library-template",
+  "homepage": "https://github.com/janhavelka/RV3032-C7",
   "frameworks": ["arduino"],
   "platforms": ["espressif32"],
-  "headers": ["YourLibrary/YourLib.h"],
+  "headers": ["RV3032/RV3032.h"],
   "build": {
     "includeDir": "include",
     "srcDir": "src"
+  },
+  "dependencies": {
+    "Wire": "*"
   }
 }
