@@ -56,8 +56,7 @@
 
 #pragma once
 
-#include <Arduino.h>
-#include <Wire.h>
+#include <stddef.h>
 #include "Status.h"
 #include "Config.h"
 
@@ -77,6 +76,32 @@ struct DateTime {
   uint8_t minute = 0;    ///< Minute (0-59)
   uint8_t second = 0;    ///< Second (0-59)
   uint8_t weekday = 0;   ///< Day of week (0-6, 0=Sunday, auto-calculated)
+};
+
+/**
+ * @struct StatusFlags
+ * @brief Decoded status register flags
+ */
+struct StatusFlags {
+  bool tempHigh = false;     ///< THF: Temperature high flag
+  bool tempLow = false;      ///< TLF: Temperature low flag
+  bool update = false;       ///< UF: Periodic time update flag
+  bool timer = false;        ///< TF: Periodic countdown timer flag
+  bool alarm = false;        ///< AF: Alarm flag
+  bool event = false;        ///< EVF: External event flag
+  bool powerOnReset = false; ///< PORF: Power-on reset flag
+  bool voltageLow = false;   ///< VLF: Voltage low flag
+};
+
+/**
+ * @struct ValidityFlags
+ * @brief Power and validity-related flags
+ */
+struct ValidityFlags {
+  bool powerOnReset = false;   ///< PORF: Power-on reset flag
+  bool voltageLow = false;     ///< VLF: Voltage low flag
+  bool backupSwitched = false; ///< BSF: Backup switchover flag
+  bool timeInvalid = false;    ///< True when PORF or VLF indicates invalid time
 };
 
 /**
@@ -148,8 +173,8 @@ struct EviConfig {
  * Single-threaded by default. No FreeRTOS tasks created.
  * 
  * @par Timing
- * tick() completes in <1ms (no I2C operations). Long EEPROM operations
- * use blocking wait (up to Config::eepromTimeoutMs).
+ * tick() completes in <1ms. When EEPROM commits are pending, tick()
+ * performs at most one I2C transaction per call and never blocks.
  * 
  * @par Resource Ownership
  * I2C interface passed via Config. No hardcoded pins or resources.
@@ -175,7 +200,7 @@ class RV3032 {
    * @brief Cooperative update (non-blocking)
    * 
    * @param now_ms Current time in milliseconds (from millis())
-   * @note Currently no periodic operations. Reserved for future features.
+ * @note Processes pending EEPROM commits when enabled. Performs bounded work.
    */
   void tick(uint32_t now_ms);
 
@@ -328,7 +353,7 @@ class RV3032 {
    * @brief Enable or disable clock output
    * 
    * @param enabled true to enable CLKOUT pin, false to disable
-   * @return Status::Ok() on success, error otherwise
+   * @return Status::Ok() on success, BUSY if EEPROM commit pending, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
    */
   Status setClkoutEnabled(bool enabled);
@@ -345,7 +370,7 @@ class RV3032 {
    * @brief Set clock output frequency
    * 
    * @param freq Desired output frequency
-   * @return Status::Ok() on success, error otherwise
+   * @return Status::Ok() on success, BUSY if EEPROM commit pending, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
    */
   Status setClkoutFrequency(ClkoutFrequency freq);
@@ -364,7 +389,7 @@ class RV3032 {
    * @brief Set frequency offset in parts-per-million
    * 
    * @param ppm Frequency offset in ppm (typical range: +/-200 ppm)
-   * @return Status::Ok() on success, error otherwise
+   * @return Status::Ok() on success, BUSY if EEPROM commit pending, error otherwise
    * @note Positive values increase frequency, negative decrease it.
    *       Persistent if Config::enableEepromWrites is true.
    */
@@ -438,8 +463,48 @@ class RV3032 {
    * 
    * @param mask Bit mask of flags to clear (1=clear, 0=leave unchanged)
    * @return Status::Ok() on success, error otherwise
+   * @note Writing STATUS clears THF/TLF regardless of mask (datasheet behavior).
    */
   Status clearStatus(uint8_t mask);
+
+  /**
+   * @brief Read decoded status register flags
+   * 
+   * @param[out] out Decoded status flags
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status readStatusFlags(StatusFlags& out);
+
+  /**
+   * @brief Read validity-related flags (PORF, VLF, BSF)
+   * 
+   * @param[out] out Validity flags
+   * @return Status::Ok() on success, error otherwise
+   * @note timeInvalid is true when PORF or VLF indicates invalid time.
+   */
+  Status readValidity(ValidityFlags& out);
+
+  /**
+   * @brief Clear backup switchover flag (BSF)
+   * 
+   * @return Status::Ok() on success, error otherwise
+   * @note Must be cleared while VDD is present (per datasheet).
+   */
+  Status clearBackupSwitchFlag();
+
+  /**
+   * @brief Check if an EEPROM commit is in progress
+   * 
+   * @return true if EEPROM state machine is busy
+   */
+  bool isEepromBusy() const;
+
+  /**
+   * @brief Get last completed EEPROM commit status
+   * 
+   * @return Status from last EEPROM commit (Ok if none or success)
+   */
+  Status getEepromLastStatus() const;
 
   // ===== Low-Level Operations =====
 
@@ -492,15 +557,77 @@ class RV3032 {
    */
   static bool parseBuildTime(DateTime& out);
 
+  /**
+   * @brief Convert BCD value to binary
+   * 
+   * @param bcd BCD-encoded value
+   * @return Binary value
+   */
+  static uint8_t bcdToBinary(uint8_t bcd);
+
+  /**
+   * @brief Convert binary value to BCD
+   * 
+   * @param bin Binary value
+   * @return BCD-encoded value
+   */
+  static uint8_t binaryToBcd(uint8_t bin);
+
+  /**
+   * @brief Convert Unix timestamp to DateTime
+   * 
+   * @param ts Unix timestamp (seconds since epoch)
+   * @param[out] out DateTime result
+   * @return true on success, false if out of range
+   */
+  static bool unixToDateTime(uint32_t ts, DateTime& out);
+
+  /**
+   * @brief Convert DateTime to Unix timestamp
+   * 
+   * @param time DateTime to convert
+   * @param[out] out Unix timestamp result
+   * @return true on success, false if DateTime invalid
+   */
+  static bool dateTimeToUnix(const DateTime& time, uint32_t& out);
+
  private:
+  enum class EepromStep : uint8_t {
+    Idle = 0,
+    ReadControl1,
+    WriteControl1,
+    WriteAddr,
+    WriteData,
+    WaitReadyBefore,
+    WriteCmd,
+    WaitReadyAfter,
+    RestoreControl
+  };
+
+  struct EepromOp {
+    EepromStep step = EepromStep::Idle;
+    uint8_t reg = 0;
+    uint8_t value = 0;
+    uint8_t control1 = 0;
+    uint32_t waitStartMs = 0;
+    uint32_t waitTimeoutMs = 0;
+    bool waitActive = false;
+    bool restoreNeeded = false;
+    Status result = Status::Ok();
+    Status lastStatus = Status::Ok();
+  };
+
   Config _config;
   bool _initialized = false;
+  EepromOp _eeprom;
 
   // I2C operations
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
   Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
   Status writeEepromRegister(uint8_t reg, uint8_t value);
-  Status updateEepromByte(uint8_t reg);
+  Status scheduleEepromUpdate(uint8_t reg, uint8_t value);
+  void processEeprom(uint32_t now_ms);
+  Status updateEepromByteBlocking(uint8_t reg, uint8_t value);
   Status waitEepromReady(uint32_t timeoutMs);
 
   // Conversion helpers

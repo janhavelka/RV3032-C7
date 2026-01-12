@@ -50,6 +50,11 @@ struct Config {
   ///       EEPROM has ~100k write endurance - use sparingly in production.
   bool enableEepromWrites = false;
 
+  /// @brief Process EEPROM commits in tick() (default: true)
+  /// @note When true, EEPROM writes are scheduled and completed in tick().
+  ///       When false, EEPROM writes block until complete.
+  bool eepromNonBlocking = true;
+
   /// @brief EEPROM write timeout in milliseconds (default: 200ms)
   /// @note RV3032 EEPROM writes take several milliseconds. Must be > 0 when enabled.
   uint32_t eepromTimeoutMs = 200;

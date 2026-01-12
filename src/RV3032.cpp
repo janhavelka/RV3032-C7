@@ -3,6 +3,8 @@
  * @brief Implementation of RV-3032-C7 RTC driver
  */
 
+#include <Arduino.h>
+#include <Wire.h>
 #include "RV3032/RV3032.h"
 
 namespace RV3032 {
@@ -32,7 +34,16 @@ constexpr uint8_t kRegEeCmd = 0x3F;
 
 constexpr uint16_t kTimerMaxTicks = 4095;
 
-constexpr uint8_t kStatusAlarmBit = 3;
+constexpr uint8_t kStatusThfBit = 7;
+constexpr uint8_t kStatusTlfBit = 6;
+constexpr uint8_t kStatusUfBit = 5;
+constexpr uint8_t kStatusTfBit = 4;
+constexpr uint8_t kStatusAfBit = 3;
+constexpr uint8_t kStatusEvfBit = 2;
+constexpr uint8_t kStatusPorfBit = 1;
+constexpr uint8_t kStatusVlfBit = 0;
+
+constexpr uint8_t kTempBsfBit = 0;
 
 constexpr uint8_t kControl1EerdBit = 2;
 constexpr uint8_t kControl1TeBit = 3;
@@ -55,6 +66,7 @@ constexpr uint8_t kTsOverwriteBit = 2;
 
 constexpr uint8_t kEepromBusyBit = 0x04;
 constexpr uint8_t kEepromUpdateCmd = 0x21;
+constexpr uint32_t kEepromReadyTimeoutMs = 50;
 }  // namespace
 
 // ===== Lifecycle Functions =====
@@ -62,6 +74,7 @@ constexpr uint8_t kEepromUpdateCmd = 0x21;
 Status RV3032::begin(const Config& config) {
   _config = config;
   _initialized = false;
+  _eeprom = EepromOp{};
 
   // Validate configuration
   if (!_config.wire) {
@@ -115,13 +128,12 @@ Status RV3032::begin(const Config& config) {
 }
 
 void RV3032::tick(uint32_t now_ms) {
-  // Currently no periodic operations
-  // Reserved for future features (e.g., periodic time sync, alarm monitoring)
-  (void)now_ms;
+  processEeprom(now_ms);
 }
 
 void RV3032::end() {
   _initialized = false;
+  _eeprom = EepromOp{};
   // No resources to release (I2C managed by application)
 }
 
@@ -193,18 +205,16 @@ Status RV3032::readUnix(uint32_t& out) {
     return st;
   }
 
-  uint32_t days = dateToDays(dt.year, dt.month, dt.day);
-  out = days * 86400UL
-      + static_cast<uint32_t>(dt.hour) * 3600UL
-      + static_cast<uint32_t>(dt.minute) * 60UL
-      + static_cast<uint32_t>(dt.second);
+  if (!dateTimeToUnix(dt, out)) {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid date/time values");
+  }
 
   return Status::Ok();
 }
 
 Status RV3032::setUnix(uint32_t ts) {
   DateTime dt;
-  if (!unixToDate(ts, dt)) {
+  if (!unixToDateTime(ts, dt)) {
     return Status::Error(Err::INVALID_DATETIME, "Unix timestamp out of range");
   }
   return setTime(dt);
@@ -298,12 +308,12 @@ Status RV3032::getAlarmFlag(bool& triggered) {
     return st;
   }
 
-  triggered = ((status & (1u << kStatusAlarmBit)) != 0);
+  triggered = ((status & (1u << kStatusAfBit)) != 0);
   return Status::Ok();
 }
 
 Status RV3032::clearAlarmFlag() {
-  return clearStatus(static_cast<uint8_t>(1u << kStatusAlarmBit));
+  return clearStatus(static_cast<uint8_t>(1u << kStatusAfBit));
 }
 
 Status RV3032::enableAlarmInterrupt(bool enable) {
@@ -627,6 +637,77 @@ Status RV3032::clearStatus(uint8_t mask) {
   return writeRegister(kRegStatus, status);
 }
 
+Status RV3032::readStatusFlags(StatusFlags& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.tempHigh = ((status & (1u << kStatusThfBit)) != 0);
+  out.tempLow = ((status & (1u << kStatusTlfBit)) != 0);
+  out.update = ((status & (1u << kStatusUfBit)) != 0);
+  out.timer = ((status & (1u << kStatusTfBit)) != 0);
+  out.alarm = ((status & (1u << kStatusAfBit)) != 0);
+  out.event = ((status & (1u << kStatusEvfBit)) != 0);
+  out.powerOnReset = ((status & (1u << kStatusPorfBit)) != 0);
+  out.voltageLow = ((status & (1u << kStatusVlfBit)) != 0);
+
+  return Status::Ok();
+}
+
+Status RV3032::readValidity(ValidityFlags& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  StatusFlags statusFlags;
+  Status st = readStatusFlags(statusFlags);
+  if (!st.ok()) {
+    return st;
+  }
+
+  uint8_t tempLsb = 0;
+  st = readRegister(kRegTempLsb, tempLsb);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.powerOnReset = statusFlags.powerOnReset;
+  out.voltageLow = statusFlags.voltageLow;
+  out.backupSwitched = ((tempLsb & (1u << kTempBsfBit)) != 0);
+  out.timeInvalid = (out.powerOnReset || out.voltageLow);
+
+  return Status::Ok();
+}
+
+Status RV3032::clearBackupSwitchFlag() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t tempLsb = 0;
+  Status st = readRegister(kRegTempLsb, tempLsb);
+  if (!st.ok()) {
+    return st;
+  }
+
+  tempLsb = static_cast<uint8_t>(tempLsb & ~(1u << kTempBsfBit));
+  return writeRegister(kRegTempLsb, tempLsb);
+}
+
+bool RV3032::isEepromBusy() const {
+  return _eeprom.step != EepromStep::Idle;
+}
+
+Status RV3032::getEepromLastStatus() const {
+  return _eeprom.lastStatus;
+}
+
 // ===== Low-Level Operations =====
 
 Status RV3032::readRegister(uint8_t reg, uint8_t& value) {
@@ -708,6 +789,34 @@ bool RV3032::parseBuildTime(DateTime& out) {
   return isValidDateTime(out);
 }
 
+uint8_t RV3032::bcdToBinary(uint8_t bcd) {
+  return bcdToBin(bcd);
+}
+
+uint8_t RV3032::binaryToBcd(uint8_t bin) {
+  return binToBcd(bin);
+}
+
+bool RV3032::unixToDateTime(uint32_t ts, DateTime& out) {
+  return unixToDate(ts, out);
+}
+
+bool RV3032::dateTimeToUnix(const DateTime& time, uint32_t& out) {
+  DateTime normalized = time;
+  normalized.weekday = computeWeekday(time.year, time.month, time.day);
+  if (!isValidDateTime(normalized)) {
+    return false;
+  }
+
+  uint32_t days = dateToDays(normalized.year, normalized.month, normalized.day);
+  out = days * 86400UL
+      + static_cast<uint32_t>(normalized.hour) * 3600UL
+      + static_cast<uint32_t>(normalized.minute) * 60UL
+      + static_cast<uint32_t>(normalized.second);
+
+  return true;
+}
+
 // ===== Private Helper Functions =====
 
 Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
@@ -782,15 +891,164 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
   }
 
   // Proceed with EEPROM update
-  return updateEepromByte(reg);
+  if (_config.eepromNonBlocking) {
+    return scheduleEepromUpdate(reg, value);
+  }
+  return updateEepromByteBlocking(reg, value);
 }
 
-Status RV3032::updateEepromByte(uint8_t reg) {
-  uint8_t value = 0;
-  Status st = readRegister(reg, value);
-  if (!st.ok()) {
-    return st;
+Status RV3032::scheduleEepromUpdate(uint8_t reg, uint8_t value) {
+  if (_eeprom.step != EepromStep::Idle) {
+    return Status::Error(Err::BUSY, "EEPROM busy");
   }
+
+  _eeprom.step = EepromStep::ReadControl1;
+  _eeprom.reg = reg;
+  _eeprom.value = value;
+  _eeprom.waitStartMs = 0;
+  _eeprom.waitTimeoutMs = 0;
+  _eeprom.waitActive = false;
+  _eeprom.restoreNeeded = false;
+  _eeprom.result = Status::Ok();
+  return Status::Ok();
+}
+
+void RV3032::processEeprom(uint32_t now_ms) {
+  if (!_initialized) {
+    return;
+  }
+  if (!_config.enableEepromWrites || !_config.eepromNonBlocking) {
+    return;
+  }
+  if (_eeprom.step == EepromStep::Idle) {
+    return;
+  }
+
+  Status st;
+  uint8_t busy = 0;
+  switch (_eeprom.step) {
+    case EepromStep::ReadControl1:
+      st = readRegister(kRegControl1, _eeprom.control1);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.step = EepromStep::RestoreControl;
+        _eeprom.restoreNeeded = false;
+        break;
+      }
+      _eeprom.step = EepromStep::WriteControl1;
+      break;
+    case EepromStep::WriteControl1: {
+      uint8_t control1 = static_cast<uint8_t>(_eeprom.control1 | (1u << kControl1EerdBit));
+      st = writeRegister(kRegControl1, control1);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.step = EepromStep::RestoreControl;
+        _eeprom.restoreNeeded = false;
+        break;
+      }
+      _eeprom.restoreNeeded = true;
+      _eeprom.step = EepromStep::WriteAddr;
+      break;
+    }
+    case EepromStep::WriteAddr:
+      st = writeRegister(kRegEeAddr, _eeprom.reg);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      _eeprom.step = EepromStep::WriteData;
+      break;
+    case EepromStep::WriteData:
+      st = writeRegister(kRegEeData, _eeprom.value);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      _eeprom.waitActive = false;
+      _eeprom.step = EepromStep::WaitReadyBefore;
+      break;
+    case EepromStep::WaitReadyBefore:
+      if (!_eeprom.waitActive) {
+        _eeprom.waitStartMs = now_ms;
+        _eeprom.waitTimeoutMs = kEepromReadyTimeoutMs;
+        _eeprom.waitActive = true;
+      }
+      st = readRegister(kRegTempLsb, busy);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      if ((busy & kEepromBusyBit) == 0) {
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::WriteCmd;
+        break;
+      }
+      if (static_cast<uint32_t>(now_ms - _eeprom.waitStartMs) >= _eeprom.waitTimeoutMs) {
+        _eeprom.result = Status::Error(Err::TIMEOUT, "EEPROM write timeout");
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::RestoreControl;
+      }
+      break;
+    case EepromStep::WriteCmd:
+      st = writeRegister(kRegEeCmd, kEepromUpdateCmd);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      _eeprom.waitActive = false;
+      _eeprom.step = EepromStep::WaitReadyAfter;
+      break;
+    case EepromStep::WaitReadyAfter:
+      if (!_eeprom.waitActive) {
+        _eeprom.waitStartMs = now_ms;
+        _eeprom.waitTimeoutMs = _config.eepromTimeoutMs;
+        _eeprom.waitActive = true;
+      }
+      st = readRegister(kRegTempLsb, busy);
+      if (!st.ok()) {
+        _eeprom.result = st;
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      if ((busy & kEepromBusyBit) == 0) {
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::RestoreControl;
+        break;
+      }
+      if (static_cast<uint32_t>(now_ms - _eeprom.waitStartMs) >= _eeprom.waitTimeoutMs) {
+        _eeprom.result = Status::Error(Err::TIMEOUT, "EEPROM write timeout");
+        _eeprom.waitActive = false;
+        _eeprom.step = EepromStep::RestoreControl;
+      }
+      break;
+    case EepromStep::RestoreControl:
+      if (_eeprom.restoreNeeded) {
+        Status restoreSt = writeRegister(kRegControl1, _eeprom.control1);
+        if (_eeprom.result.ok() && !restoreSt.ok()) {
+          _eeprom.result = restoreSt;
+        }
+      }
+      _eeprom.lastStatus = _eeprom.result;
+      _eeprom.step = EepromStep::Idle;
+      _eeprom.restoreNeeded = false;
+      _eeprom.waitActive = false;
+      _eeprom.waitStartMs = 0;
+      _eeprom.waitTimeoutMs = 0;
+      break;
+    case EepromStep::Idle:
+    default:
+      break;
+  }
+}
+
+Status RV3032::updateEepromByteBlocking(uint8_t reg, uint8_t value) {
+  Status st = Status::Ok();
 
   // Enable EEPROM auto refresh
   uint8_t control1 = 0;
@@ -816,7 +1074,7 @@ Status RV3032::updateEepromByte(uint8_t reg) {
   }
 
   // Wait for EEPROM ready
-  st = waitEepromReady(50);
+  st = waitEepromReady(kEepromReadyTimeoutMs);
   if (!st.ok()) {
     goto restore_control;
   }

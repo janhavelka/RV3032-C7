@@ -179,6 +179,11 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 |--------|-------------|
 | `Status readStatus(uint8_t& status)` | Read status register |
 | `Status clearStatus(uint8_t mask)` | Clear status flags |
+| `Status readStatusFlags(StatusFlags& out)` | Read decoded status flags |
+| `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF validity flags |
+| `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
+| `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
+| `Status getEepromLastStatus() const` | Get last EEPROM commit status |
 | `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
 | `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
 
@@ -189,6 +194,10 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `static bool isValidDateTime(const DateTime& time)` | Validate date/time structure |
 | `static uint8_t computeWeekday(uint16_t year, uint8_t month, uint8_t day)` | Calculate day of week |
 | `static bool parseBuildTime(DateTime& out)` | Parse __DATE__ and __TIME__ macros |
+| `static uint8_t bcdToBinary(uint8_t bcd)` | Convert BCD to binary |
+| `static uint8_t binaryToBcd(uint8_t bin)` | Convert binary to BCD |
+| `static bool unixToDateTime(uint32_t ts, DateTime& out)` | Convert Unix timestamp to DateTime |
+| `static bool dateTimeToUnix(const DateTime& time, uint32_t& out)` | Convert DateTime to Unix timestamp |
 
 ## Configuration
 
@@ -201,6 +210,7 @@ namespace RV3032 {
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
     BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
     bool enableEepromWrites = false;             // Persistent config (EEPROM)
+    bool eepromNonBlocking = true;               // EEPROM commits in tick()
     uint32_t eepromTimeoutMs = 200;              // EEPROM write timeout
   };
 }
@@ -211,6 +221,7 @@ namespace RV3032 {
 - `i2cAddress`: Valid 7-bit range 0x08-0x77
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss.
+- `eepromNonBlocking`: When `true` (default), EEPROM commits run in `tick()` and never block. When `false`, EEPROM writes block until complete.
 - `eepromTimeoutMs`: Maximum wait time for EEPROM writes (default 200ms, must be > 0 when enabled)
 
 ## Error Handling
@@ -239,6 +250,7 @@ struct Status {
 - `EEPROM_WRITE_FAILED` - EEPROM update failed
 - `REGISTER_READ_FAILED` - Register read failed
 - `REGISTER_WRITE_FAILED` - Register write failed
+- `BUSY` - Operation deferred (EEPROM commit in progress)
 
 **Example error handling:**
 ```cpp
@@ -253,7 +265,7 @@ if (!st.ok()) {
 
 **Threading Model:** Single-threaded by default. No FreeRTOS tasks created.
 
-**Timing:** `tick()` completes in <1ms (no I2C operations). EEPROM operations use blocking wait (up to `Config::eepromTimeoutMs`).
+**Timing:** `tick()` completes in <1ms. When EEPROM commits are pending, `tick()` performs at most one I2C transaction and never blocks.
 
 **Resource Ownership:** I2C interface passed via `Config`. No hardcoded pins or resources.
 
@@ -267,6 +279,7 @@ if (!st.ok()) {
 - Backup mode changes in `begin()`
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles.
+When `enableEepromWrites = true` and `eepromNonBlocking = true`, commits run in `tick()`. Use `isEepromBusy()` to check progress and `getEepromLastStatus()` for the last commit result. If a commit is already in progress, new EEPROM writes return `BUSY`.
 
 ## Supported Targets
 
