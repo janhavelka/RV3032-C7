@@ -176,7 +176,7 @@ static void cmd_temp() {
     LOGE("readTemperatureC() failed: %s", st.msg);
     return;
   }
-  Serial.printf("Temperature: %.2f °C\n", celsius);
+  Serial.printf("Temperature: %.2f C\n", celsius);
 }
 
 /**

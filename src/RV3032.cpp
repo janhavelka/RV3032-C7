@@ -30,6 +30,8 @@ constexpr uint8_t kRegEeAddr = 0x3D;
 constexpr uint8_t kRegEeData = 0x3E;
 constexpr uint8_t kRegEeCmd = 0x3F;
 
+constexpr uint16_t kTimerMaxTicks = 4095;
+
 constexpr uint8_t kStatusAlarmBit = 3;
 
 constexpr uint8_t kControl1EerdBit = 2;
@@ -64,6 +66,15 @@ Status RV3032::begin(const Config& config) {
   // Validate configuration
   if (!_config.wire) {
     return Status::Error(Err::INVALID_CONFIG, "I2C wire pointer is null");
+  }
+  if (_config.i2cAddress < 0x08 || _config.i2cAddress > 0x77) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C address out of range");
+  }
+  if (static_cast<uint8_t>(_config.backupMode) > static_cast<uint8_t>(BackupSwitchMode::Direct)) {
+    return Status::Error(Err::INVALID_CONFIG, "Invalid backup mode");
+  }
+  if (_config.enableEepromWrites && _config.eepromTimeoutMs == 0) {
+    return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be > 0");
   }
 
   // Test I2C communication
@@ -155,18 +166,21 @@ Status RV3032::setTime(const DateTime& time) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  if (!isValidDateTime(time)) {
+  DateTime normalized = time;
+  normalized.weekday = computeWeekday(time.year, time.month, time.day);
+
+  if (!isValidDateTime(normalized)) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time values");
   }
 
   uint8_t buf[7] = {
-    binToBcd(time.second),
-    binToBcd(time.minute),
-    binToBcd(time.hour),
-    static_cast<uint8_t>(1u << (time.weekday % 7)),
-    binToBcd(time.day),
-    binToBcd(time.month),
-    binToBcd(static_cast<uint8_t>(time.year % 100))
+    binToBcd(normalized.second),
+    binToBcd(normalized.minute),
+    binToBcd(normalized.hour),
+    static_cast<uint8_t>(1u << (normalized.weekday % 7)),
+    binToBcd(normalized.day),
+    binToBcd(normalized.month),
+    binToBcd(static_cast<uint8_t>(normalized.year % 100))
   };
 
   return writeRegs(kTimeReg, buf, sizeof(buf));
@@ -329,6 +343,12 @@ Status RV3032::getAlarmInterruptEnabled(bool& enabled) {
 Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (ticks > kTimerMaxTicks) {
+    return Status::Error(Err::INVALID_PARAM, "Timer ticks out of range");
+  }
+  if (static_cast<uint8_t>(freq) > static_cast<uint8_t>(TimerFrequency::Hz1_60)) {
+    return Status::Error(Err::INVALID_PARAM, "Timer frequency out of range");
   }
 
   uint8_t control1 = 0;
@@ -835,7 +855,7 @@ Status RV3032::waitEepromReady(uint32_t timeoutMs) {
       return Status::Error(Err::TIMEOUT, "EEPROM write timeout");
     }
 
-    delay(2);
+    yield();
   }
 }
 

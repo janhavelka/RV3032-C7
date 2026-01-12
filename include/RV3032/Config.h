@@ -37,6 +37,7 @@ struct Config {
   TwoWire* wire = nullptr;
 
   /// @brief I2C address of RV3032-C7 (default: 0x51, not user-configurable on hardware)
+  /// @note Valid 7-bit range: 0x08-0x77.
   uint8_t i2cAddress = 0x51;
 
   /// @brief Battery backup switching mode (default: Level)
@@ -50,7 +51,7 @@ struct Config {
   bool enableEepromWrites = false;
 
   /// @brief EEPROM write timeout in milliseconds (default: 200ms)
-  /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
+  /// @note RV3032 EEPROM writes take several milliseconds. Must be > 0 when enabled.
   uint32_t eepromTimeoutMs = 200;
 };
 

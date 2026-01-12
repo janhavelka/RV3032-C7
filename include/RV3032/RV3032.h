@@ -4,7 +4,7 @@
  * 
  * This library provides a comprehensive interface for the RV-3032-C7, a high-precision
  * real-time clock IC with I2C interface. The RV-3032-C7 features:
- * - Ultra-low power consumption (<1µA typical)
+ * - Ultra-low power consumption (<1 uA typical)
  * - Built-in temperature compensated crystal oscillator
  * - Battery backup with automatic switchover
  * - Alarm and periodic timer functionality
@@ -307,7 +307,7 @@ class RV3032 {
    * @param ticks Number of timer ticks before triggering (0-4095)
    * @param freq Timer clock frequency
    * @param enable Start timer immediately if true
-   * @return Status::Ok() on success, error otherwise
+   * @return Status::Ok() on success, INVALID_PARAM if ticks/freq invalid, error otherwise
    * @note Timer period = ticks / freq. Example: 60 ticks at Hz1 = 60 seconds
    */
   Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable);
@@ -363,7 +363,7 @@ class RV3032 {
   /**
    * @brief Set frequency offset in parts-per-million
    * 
-   * @param ppm Frequency offset in ppm (typical range: ±200 ppm)
+   * @param ppm Frequency offset in ppm (typical range: +/-200 ppm)
    * @return Status::Ok() on success, error otherwise
    * @note Positive values increase frequency, negative decrease it.
    *       Persistent if Config::enableEepromWrites is true.
@@ -385,7 +385,7 @@ class RV3032 {
    * 
    * @param[out] celsius Temperature in degrees Celsius
    * @return Status::Ok() on success, error otherwise
-   * @note Typical accuracy: ±3°C. Not intended as precision thermometer.
+   * @note Typical accuracy: +/-3 C. Not intended as precision thermometer.
    */
   Status readTemperatureC(float& celsius);
 

@@ -6,14 +6,14 @@ Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock
 
 ## Features
 
-- **Ultra-low power RTC** with battery backup (<1µA typical)
+- **Ultra-low power RTC** with battery backup (<1 uA typical)
 - **Temperature compensated** crystal oscillator (TCXO)
 - **Alarm functionality** with INT pin output
 - **Periodic countdown timer** with programmable frequency
 - **External event timestamping** (EVI pin)
 - **Programmable CLKOUT** output (32.768 kHz to 1 Hz)
-- **Frequency offset calibration** (±200 ppm range)
-- **Built-in temperature sensor** (±3°C accuracy)
+- **Frequency offset calibration** (+/-200 ppm range)
+- **Built-in temperature sensor** (+/-3 C accuracy)
 - **EEPROM** for persistent configuration
 - **Non-blocking API** with begin/tick/end lifecycle
 - **Unix timestamp** support
@@ -26,8 +26,8 @@ Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock
 - Supply voltage: 1.1V - 5.5V
 - Timekeeping current: <200 nA (typical)
 - Backup current: <45 nA (typical)
-- Temperature range: -40°C to +85°C
-- Accuracy: ±5 ppm (with calibration)
+- Temperature range: -40 C to +85 C
+- Accuracy: +/-5 ppm (with calibration)
 
 **Typical wiring (ESP32):**
 ```
@@ -162,7 +162,7 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 
 | Method | Description |
 |--------|-------------|
-| `Status readTemperatureC(float& celsius)` | Read die temperature (±3°C accuracy) |
+| `Status readTemperatureC(float& celsius)` | Read die temperature (+/-3 C accuracy) |
 
 ### External Event Input
 
@@ -199,7 +199,7 @@ namespace RV3032 {
   struct Config {
     TwoWire* wire = nullptr;                     // I2C interface (required)
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
-    BackupSwitchMode backupMode = Level;         // Battery backup mode
+    BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
     bool enableEepromWrites = false;             // Persistent config (EEPROM)
     uint32_t eepromTimeoutMs = 200;              // EEPROM write timeout
   };
@@ -208,9 +208,10 @@ namespace RV3032 {
 
 **Configuration rules:**
 - `wire` must be initialized (`Wire.begin()` called) before `begin()`
+- `i2cAddress`: Valid 7-bit range 0x08-0x77
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss.
-- `eepromTimeoutMs`: Maximum wait time for EEPROM writes (default 200ms)
+- `eepromTimeoutMs`: Maximum wait time for EEPROM writes (default 200ms, must be > 0 when enabled)
 
 ## Error Handling
 
@@ -310,15 +311,15 @@ pio device monitor -e ex_bringup_s3
 
 ```
 include/RV3032/         - Public API headers (Doxygen documented)
-  ├── Status.h          - Error types
-  ├── Config.h          - Configuration struct
-  ├── RV3032.h          - Main library class
-  └── Version.h         - Auto-generated version constants
+  - Status.h            - Error types
+  - Config.h            - Configuration struct
+  - RV3032.h            - Main library class
+  - Version.h           - Auto-generated version constants
 src/
-  └── RV3032.cpp        - Implementation
+  - RV3032.cpp          - Implementation
 examples/
-  ├── 01_basic_bringup_cli/  - Interactive CLI example
-  └── common/                - Example-only helpers (Log.h, BoardPins.h)
+  - 01_basic_bringup_cli/  - Interactive CLI example
+  - common/                - Example-only helpers (Log.h, BoardPins.h)
 platformio.ini          - Build environments
 library.json            - PlatformIO metadata
 README.md               - This file
