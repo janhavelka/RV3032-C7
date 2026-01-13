@@ -55,7 +55,9 @@ constexpr uint8_t kEepromBusyBit = 0x04;
 constexpr uint8_t kEepromUpdateCmd = 0x21;
 constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
 
-bool isDeadlineReached(uint32_t now_ms, uint32_t deadline_ms) {
+/// @brief Check if deadline has passed, with wraparound-safe comparison.
+/// Uses signed arithmetic to handle millis() wraparound (~49 days).
+bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
 }  // namespace
@@ -77,6 +79,9 @@ Status RV3032::begin(const Config& config) {
   }
   if (_config.enableEepromWrites && _config.eepromTimeoutMs == 0) {
     return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be > 0");
+  }
+  if (_config.enableEepromWrites && _config.i2cTimeoutMs < kEepromPreCmdTimeoutMs) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
   }
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -118,10 +123,11 @@ Status RV3032::begin(const Config& config) {
     if (!st.ok() && st.code != Err::IN_PROGRESS) {
       return st;
     }
+    // If IN_PROGRESS, EEPROM work is queued but initialization succeeds
   }
 
   _initialized = true;
-  return st.ok() ? Status::Ok() : st;
+  return Status::Ok();  // Always return OK (caller can check getEepromStatus() for pending work)
 }
 
 void RV3032::tick(uint32_t now_ms) {
@@ -139,7 +145,7 @@ void RV3032::end() {
 }
 
 bool RV3032::isEepromBusy() const {
-  return _eeprom.state != EepromState::Idle || _eeprom.pending;
+  return _eeprom.state != EepromState::Idle || _eeprom.queueCount > 0;
 }
 
 Status RV3032::getEepromStatus() const {
@@ -730,6 +736,7 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
   if (!_config.wire || !buf || len == 0) {
     return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
   }
+  // Wire::requestFrom() takes uint8_t for length. Reject larger reads to avoid silent truncation.
   if (len > 255) {
     return Status::Error(Err::INVALID_PARAM, "I2C read length too large");
   }
@@ -761,6 +768,8 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
   if (!_config.wire || !buf || len == 0) {
     return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
   }
+  // Wire::write() can accept larger lengths, but practical RTC ops never exceed 255 bytes.
+  // Check prevents accidental oversized transfers.
   if (len > 255) {
     return Status::Error(Err::INVALID_PARAM, "I2C write length too large");
   }
@@ -874,7 +883,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
         _eeprom.state = EepromState::WriteCmd;
         break;
       }
-      if (isDeadlineReached(now_ms, _eeprom.deadlineMs)) {
+      if (hasDeadlinePassed(now_ms, _eeprom.deadlineMs)) {
         _eepromLastStatus = Status::Error(Err::TIMEOUT, "EEPROM busy timeout");
         _eeprom.state = EepromState::RestoreControl1;
       }
@@ -901,7 +910,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
         _eepromLastStatus = Status::Ok();
         break;
       }
-      if (isDeadlineReached(now_ms, _eeprom.deadlineMs)) {
+      if (hasDeadlinePassed(now_ms, _eeprom.deadlineMs)) {
         _eepromLastStatus = Status::Error(Err::TIMEOUT, "EEPROM write timeout");
         _eeprom.state = EepromState::RestoreControl1;
       }
@@ -916,6 +925,12 @@ void RV3032::processEeprom(uint32_t now_ms) {
       }
       _eeprom.control1Valid = false;
       _eeprom.state = EepromState::Idle;
+      
+      // Check if there's a queued operation
+      uint8_t nextReg, nextValue;
+      if (eepromQueuePop(nextReg, nextValue)) {
+        startEepromUpdate(nextReg, nextValue, now_ms);
+      }
       break;
     }
     case EepromState::Idle:
@@ -926,13 +941,15 @@ void RV3032::processEeprom(uint32_t now_ms) {
 }
 
 Status RV3032::queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {
-  if (_eeprom.state != EepromState::Idle || _eeprom.pending) {
-    _eeprom.pending = true;
-    _eeprom.pendingReg = reg;
-    _eeprom.pendingValue = value;
+  if (_eeprom.state != EepromState::Idle) {
+    // State machine busy - try to queue
+    if (!eepromQueuePush(reg, value)) {
+      return Status::Error(Err::QUEUE_FULL, "EEPROM queue full");
+    }
     return Status::Error(Err::IN_PROGRESS, "EEPROM update queued");
   }
 
+  // Idle - start immediately
   return startEepromUpdate(reg, value, now_ms);
 }
 
@@ -946,13 +963,47 @@ Status RV3032::startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {
   return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
 }
 
+bool RV3032::eepromQueuePush(uint8_t reg, uint8_t value) {
+  if (_eeprom.queueCount >= kEepromQueueSize) {
+    return false;  // Queue full
+  }
+  
+  _eeprom.queue[_eeprom.queueHead].reg = reg;
+  _eeprom.queue[_eeprom.queueHead].value = value;
+  _eeprom.queueHead = (_eeprom.queueHead + 1) % kEepromQueueSize;
+  _eeprom.queueCount++;
+  return true;
+}
+
+bool RV3032::eepromQueuePop(uint8_t& reg, uint8_t& value) {
+  if (_eeprom.queueCount == 0) {
+    return false;  // Queue empty
+  }
+  
+  reg = _eeprom.queue[_eeprom.queueTail].reg;
+  value = _eeprom.queue[_eeprom.queueTail].value;
+  _eeprom.queueTail = (_eeprom.queueTail + 1) % kEepromQueueSize;
+  _eeprom.queueCount--;
+  return true;
+}
+  _eeprom.reg = reg;
+  _eeprom.value = value;
+  _eeprom.control1Valid = false;
+  _eeprom.deadlineMs = now_ms + kEepromPreCmdTimeoutMs;
+  _eeprom.state = EepromState::ReadControl1;
+  _eepromLastStatus = Status::Ok();
+  return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
+}
+
 Status RV3032::readEepromBusy(bool& busy) {
-  uint8_t status = 0;
-  Status st = readRegister(kRegStatus, status);
+  // EEPROM busy flag is in Temperature LSBs register (0x0E), bit 2 (EEbusy)
+  // See: RV-3032-C7 Application Manual, Sec 3.2.6 (0x0E Temperature LSBs)
+  uint8_t tempLsb = 0;
+  Status st = readRegister(kRegTempLsb, tempLsb);
   if (!st.ok()) {
     return st;
   }
-  busy = ((status & kEepromBusyBit) != 0);
+  busy = ((tempLsb & kEepromBusyBit) != 0);
   return Status::Ok();
 }
 

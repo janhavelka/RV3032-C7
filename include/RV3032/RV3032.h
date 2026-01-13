@@ -166,8 +166,10 @@ class RV3032 {
    * @brief Initialize RTC with configuration
    * 
    * @param config Hardware and behavior configuration
-   * @return OK on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
-   * @note config.wire must be initialized (Wire.begin() called) before this
+   * @return OK on success (library is ready to use), error otherwise
+   * @note config.wire must be initialized (Wire.begin() called) before this.
+   *       If EEPROM writes are enabled, call tick() to complete EEPROM work.
+   *       Use getEepromStatus() to check if EEPROM persistence is active.
    */
   Status begin(const Config& config);
 
@@ -229,7 +231,8 @@ class RV3032 {
    * 
    * @param time Date/time structure with values to set
    * @return Status::Ok() on success, error on validation or I2C failure
-   * @note Validates date/time before writing. Weekday auto-calculated.
+   * @note Weekday is auto-calculated from year/month/day. The time.weekday field is ignored.
+   *       Validates date/time values before writing.
    */
   Status setTime(const DateTime& time);
 
@@ -539,6 +542,13 @@ class RV3032 {
     RestoreControl1
   };
 
+  struct EepromWrite {
+    uint8_t reg = 0;
+    uint8_t value = 0;
+  };
+
+  static constexpr size_t kEepromQueueSize = 8;  // Fixed-size queue (no heap allocation)
+
   struct EepromOp {
     EepromState state = EepromState::Idle;
     uint8_t reg = 0;
@@ -546,13 +556,19 @@ class RV3032 {
     uint8_t control1 = 0;
     bool control1Valid = false;
     uint32_t deadlineMs = 0;
-    bool pending = false;
-    uint8_t pendingReg = 0;
-    uint8_t pendingValue = 0;
+    
+    // Circular buffer queue
+    EepromWrite queue[kEepromQueueSize];
+    uint8_t queueHead = 0;  // Next write position
+    uint8_t queueTail = 0;  // Next read position
+    uint8_t queueCount = 0; // Number of items in queue
   };
 
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
+  
+  bool eepromQueuePush(uint8_t reg, uint8_t value);
+  bool eepromQueuePop(uint8_t& reg, uint8_t& value);
 };
 
 }  // namespace RV3032
