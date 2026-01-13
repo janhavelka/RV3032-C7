@@ -148,8 +148,8 @@ struct EviConfig {
  * Single-threaded by default. No FreeRTOS tasks created.
  * 
  * @par Timing
- * tick() completes in <1ms (no I2C operations). Long EEPROM operations
- * use blocking wait (up to Config::eepromTimeoutMs).
+ * tick() completes in bounded time. When EEPROM persistence is enabled,
+ * tick() advances a non-blocking EEPROM state machine (one I2C op per call).
  * 
  * @par Resource Ownership
  * I2C interface passed via Config. No hardcoded pins or resources.
@@ -166,7 +166,7 @@ class RV3032 {
    * @brief Initialize RTC with configuration
    * 
    * @param config Hardware and behavior configuration
-   * @return Status::Ok() on success, error status otherwise
+   * @return OK on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note config.wire must be initialized (Wire.begin() called) before this
    */
   Status begin(const Config& config);
@@ -175,7 +175,7 @@ class RV3032 {
    * @brief Cooperative update (non-blocking)
    * 
    * @param now_ms Current time in milliseconds (from millis())
-   * @note Currently no periodic operations. Reserved for future features.
+   * @note Advances EEPROM persistence state machine when enabled.
    */
   void tick(uint32_t now_ms);
 
@@ -199,6 +199,20 @@ class RV3032 {
    * @return Reference to active configuration
    */
   const Config& getConfig() const { return _config; }
+
+  /**
+   * @brief Check if an EEPROM persistence operation is in progress
+   * 
+   * @return true if EEPROM update is active
+   */
+  bool isEepromBusy() const;
+
+  /**
+   * @brief Get status of the last EEPROM persistence operation
+   * 
+   * @return IN_PROGRESS if active, OK if last op succeeded, or error status
+   */
+  Status getEepromStatus() const;
 
   // ===== Time/Date Operations =====
 
@@ -328,7 +342,7 @@ class RV3032 {
    * @brief Enable or disable clock output
    * 
    * @param enabled true to enable CLKOUT pin, false to disable
-   * @return Status::Ok() on success, error otherwise
+   * @return OK on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
    */
   Status setClkoutEnabled(bool enabled);
@@ -345,7 +359,7 @@ class RV3032 {
    * @brief Set clock output frequency
    * 
    * @param freq Desired output frequency
-   * @return Status::Ok() on success, error otherwise
+   * @return OK on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
    */
   Status setClkoutFrequency(ClkoutFrequency freq);
@@ -364,7 +378,7 @@ class RV3032 {
    * @brief Set frequency offset in parts-per-million
    * 
    * @param ppm Frequency offset in ppm (typical range: ±200 ppm)
-   * @return Status::Ok() on success, error otherwise
+   * @return OK on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Positive values increase frequency, negative decrease it.
    *       Persistent if Config::enableEepromWrites is true.
    */
@@ -500,8 +514,10 @@ class RV3032 {
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
   Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
   Status writeEepromRegister(uint8_t reg, uint8_t value);
-  Status updateEepromByte(uint8_t reg);
-  Status waitEepromReady(uint32_t timeoutMs);
+  void processEeprom(uint32_t now_ms);
+  Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
+  Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
+  Status readEepromBusy(bool& busy);
 
   // Conversion helpers
   static uint8_t bcdToBin(uint8_t v);
@@ -510,6 +526,33 @@ class RV3032 {
   static uint8_t daysInMonth(uint16_t year, uint8_t month);
   static uint32_t dateToDays(uint16_t year, uint8_t month, uint8_t day);
   static bool unixToDate(uint32_t ts, DateTime& out);
+
+  enum class EepromState : uint8_t {
+    Idle,
+    ReadControl1,
+    EnableEerd,
+    WriteAddr,
+    WriteData,
+    WaitReadyPreCmd,
+    WriteCmd,
+    WaitReadyPostCmd,
+    RestoreControl1
+  };
+
+  struct EepromOp {
+    EepromState state = EepromState::Idle;
+    uint8_t reg = 0;
+    uint8_t value = 0;
+    uint8_t control1 = 0;
+    bool control1Valid = false;
+    uint32_t deadlineMs = 0;
+    bool pending = false;
+    uint8_t pendingReg = 0;
+    uint8_t pendingValue = 0;
+  };
+
+  EepromOp _eeprom;
+  Status _eepromLastStatus = Status::Ok();
 };
 
 }  // namespace RV3032

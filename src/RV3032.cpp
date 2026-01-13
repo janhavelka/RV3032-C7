@@ -53,6 +53,11 @@ constexpr uint8_t kTsOverwriteBit = 2;
 
 constexpr uint8_t kEepromBusyBit = 0x04;
 constexpr uint8_t kEepromUpdateCmd = 0x21;
+constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
+
+bool isDeadlineReached(uint32_t now_ms, uint32_t deadline_ms) {
+  return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
+}
 }  // namespace
 
 // ===== Lifecycle Functions =====
@@ -60,11 +65,27 @@ constexpr uint8_t kEepromUpdateCmd = 0x21;
 Status RV3032::begin(const Config& config) {
   _config = config;
   _initialized = false;
+  _eeprom = EepromOp{};
+  _eepromLastStatus = Status::Ok();
 
   // Validate configuration
   if (!_config.wire) {
     return Status::Error(Err::INVALID_CONFIG, "I2C wire pointer is null");
   }
+  if (_config.i2cTimeoutMs == 0) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
+  }
+  if (_config.enableEepromWrites && _config.eepromTimeoutMs == 0) {
+    return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be > 0");
+  }
+
+#if defined(ARDUINO_ARCH_ESP32)
+  uint32_t timeoutMs = _config.i2cTimeoutMs;
+  if (timeoutMs > UINT16_MAX) {
+    timeoutMs = UINT16_MAX;
+  }
+  _config.wire->setTimeOut(static_cast<uint16_t>(timeoutMs));
+#endif
 
   // Test I2C communication
   _config.wire->beginTransmission(_config.i2cAddress);
@@ -94,24 +115,38 @@ Status RV3032::begin(const Config& config) {
 
   if (newCoe != coe) {
     st = writeEepromRegister(kRegCoe, newCoe);
-    if (!st.ok()) {
+    if (!st.ok() && st.code != Err::IN_PROGRESS) {
       return st;
     }
   }
 
   _initialized = true;
-  return Status::Ok();
+  return st.ok() ? Status::Ok() : st;
 }
 
 void RV3032::tick(uint32_t now_ms) {
-  // Currently no periodic operations
-  // Reserved for future features (e.g., periodic time sync, alarm monitoring)
-  (void)now_ms;
+  if (!_initialized) {
+    return;
+  }
+  processEeprom(now_ms);
 }
 
 void RV3032::end() {
   _initialized = false;
+  _eeprom = EepromOp{};
+  _eepromLastStatus = Status::Ok();
   // No resources to release (I2C managed by application)
+}
+
+bool RV3032::isEepromBusy() const {
+  return _eeprom.state != EepromState::Idle || _eeprom.pending;
+}
+
+Status RV3032::getEepromStatus() const {
+  if (isEepromBusy()) {
+    return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
+  }
+  return _eepromLastStatus;
 }
 
 // ===== Time/Date Operations =====
@@ -159,11 +194,12 @@ Status RV3032::setTime(const DateTime& time) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time values");
   }
 
+  uint8_t weekday = computeWeekday(time.year, time.month, time.day);
   uint8_t buf[7] = {
     binToBcd(time.second),
     binToBcd(time.minute),
     binToBcd(time.hour),
-    static_cast<uint8_t>(1u << (time.weekday % 7)),
+    static_cast<uint8_t>(1u << (weekday % 7)),
     binToBcd(time.day),
     binToBcd(time.month),
     binToBcd(static_cast<uint8_t>(time.year % 100))
@@ -694,6 +730,9 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
   if (!_config.wire || !buf || len == 0) {
     return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
   }
+  if (len > 255) {
+    return Status::Error(Err::INVALID_PARAM, "I2C read length too large");
+  }
 
   _config.wire->beginTransmission(_config.i2cAddress);
   _config.wire->write(reg);
@@ -721,6 +760,9 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
 Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
   if (!_config.wire || !buf || len == 0) {
     return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
+  }
+  if (len > 255) {
+    return Status::Error(Err::INVALID_PARAM, "I2C write length too large");
   }
 
   _config.wire->beginTransmission(_config.i2cAddress);
@@ -761,82 +803,157 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
     return Status::Ok();
   }
 
-  // Proceed with EEPROM update
-  return updateEepromByte(reg);
+  return queueEepromUpdate(reg, value, millis());
 }
 
-Status RV3032::updateEepromByte(uint8_t reg) {
-  uint8_t value = 0;
-  Status st = readRegister(reg, value);
-  if (!st.ok()) {
-    return st;
+void RV3032::processEeprom(uint32_t now_ms) {
+  if (!_config.enableEepromWrites) {
+    _eeprom.state = EepromState::Idle;
+    _eeprom.pending = false;
+    return;
   }
 
-  // Enable EEPROM auto refresh
-  uint8_t control1 = 0;
-  st = readRegister(kRegControl1, control1);
-  if (!st.ok()) {
-    return st;
+  if (_eeprom.state == EepromState::Idle) {
+    if (_eeprom.pending) {
+      startEepromUpdate(_eeprom.pendingReg, _eeprom.pendingValue, now_ms);
+      _eeprom.pending = false;
+    }
+    return;
   }
 
-  st = writeRegister(kRegControl1, static_cast<uint8_t>(control1 | (1u << kControl1EerdBit)));
-  if (!st.ok()) {
-    return st;
+  Status st;
+  bool busy = false;
+
+  switch (_eeprom.state) {
+    case EepromState::ReadControl1:
+      st = readRegister(kRegControl1, _eeprom.control1);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::Idle;
+        break;
+      }
+      _eeprom.control1Valid = true;
+      _eeprom.state = EepromState::EnableEerd;
+      break;
+    case EepromState::EnableEerd:
+      st = writeRegister(kRegControl1, static_cast<uint8_t>(_eeprom.control1 | (1u << kControl1EerdBit)));
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      _eeprom.state = EepromState::WriteAddr;
+      break;
+    case EepromState::WriteAddr:
+      st = writeRegister(kRegEeAddr, _eeprom.reg);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      _eeprom.state = EepromState::WriteData;
+      break;
+    case EepromState::WriteData:
+      st = writeRegister(kRegEeData, _eeprom.value);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      _eeprom.deadlineMs = now_ms + kEepromPreCmdTimeoutMs;
+      _eeprom.state = EepromState::WaitReadyPreCmd;
+      break;
+    case EepromState::WaitReadyPreCmd:
+      st = readEepromBusy(busy);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      if (!busy) {
+        _eeprom.state = EepromState::WriteCmd;
+        break;
+      }
+      if (isDeadlineReached(now_ms, _eeprom.deadlineMs)) {
+        _eepromLastStatus = Status::Error(Err::TIMEOUT, "EEPROM busy timeout");
+        _eeprom.state = EepromState::RestoreControl1;
+      }
+      break;
+    case EepromState::WriteCmd:
+      st = writeRegister(kRegEeCmd, kEepromUpdateCmd);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      _eeprom.deadlineMs = now_ms + _config.eepromTimeoutMs;
+      _eeprom.state = EepromState::WaitReadyPostCmd;
+      break;
+    case EepromState::WaitReadyPostCmd:
+      st = readEepromBusy(busy);
+      if (!st.ok()) {
+        _eepromLastStatus = st;
+        _eeprom.state = EepromState::RestoreControl1;
+        break;
+      }
+      if (!busy) {
+        _eeprom.state = EepromState::RestoreControl1;
+        _eepromLastStatus = Status::Ok();
+        break;
+      }
+      if (isDeadlineReached(now_ms, _eeprom.deadlineMs)) {
+        _eepromLastStatus = Status::Error(Err::TIMEOUT, "EEPROM write timeout");
+        _eeprom.state = EepromState::RestoreControl1;
+      }
+      break;
+    case EepromState::RestoreControl1: {
+      if (_eeprom.control1Valid) {
+        uint8_t restore = static_cast<uint8_t>(_eeprom.control1 & ~(1u << kControl1EerdBit));
+        st = writeRegister(kRegControl1, restore);
+        if (!st.ok() && _eepromLastStatus.ok()) {
+          _eepromLastStatus = st;
+        }
+      }
+      _eeprom.control1Valid = false;
+      _eeprom.state = EepromState::Idle;
+      break;
+    }
+    case EepromState::Idle:
+    default:
+      _eeprom.state = EepromState::Idle;
+      break;
   }
-
-  // Write EEPROM address and data
-  st = writeRegister(kRegEeAddr, reg);
-  if (!st.ok()) {
-    goto restore_control;
-  }
-
-  st = writeRegister(kRegEeData, value);
-  if (!st.ok()) {
-    goto restore_control;
-  }
-
-  // Wait for EEPROM ready
-  st = waitEepromReady(50);
-  if (!st.ok()) {
-    goto restore_control;
-  }
-
-  // Execute EEPROM update command
-  st = writeRegister(kRegEeCmd, kEepromUpdateCmd);
-  if (!st.ok()) {
-    goto restore_control;
-  }
-
-  // Wait for completion
-  st = waitEepromReady(_config.eepromTimeoutMs);
-
-restore_control:
-  // Restore control1 register (disable EERD bit)
-  Status restoreSt = writeRegister(kRegControl1, static_cast<uint8_t>(control1 & ~(1u << kControl1EerdBit)));
-  
-  // Return original error if any, otherwise restore status
-  return st.ok() ? restoreSt : st;
 }
 
-Status RV3032::waitEepromReady(uint32_t timeoutMs) {
-  uint32_t start = millis();
-  while (true) {
-    uint8_t busy = 0;
-    Status st = readRegister(kRegTempLsb, busy);
-    if (!st.ok()) {
-      return st;
-    }
-
-    if ((busy & kEepromBusyBit) == 0) {
-      return Status::Ok();
-    }
-
-    if (static_cast<uint32_t>(millis() - start) >= timeoutMs) {
-      return Status::Error(Err::TIMEOUT, "EEPROM write timeout");
-    }
-
-    delay(2);
+Status RV3032::queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {
+  if (_eeprom.state != EepromState::Idle || _eeprom.pending) {
+    _eeprom.pending = true;
+    _eeprom.pendingReg = reg;
+    _eeprom.pendingValue = value;
+    return Status::Error(Err::IN_PROGRESS, "EEPROM update queued");
   }
+
+  return startEepromUpdate(reg, value, now_ms);
+}
+
+Status RV3032::startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {
+  _eeprom.reg = reg;
+  _eeprom.value = value;
+  _eeprom.control1Valid = false;
+  _eeprom.deadlineMs = now_ms + kEepromPreCmdTimeoutMs;
+  _eeprom.state = EepromState::ReadControl1;
+  _eepromLastStatus = Status::Ok();
+  return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
+}
+
+Status RV3032::readEepromBusy(bool& busy) {
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+  busy = ((status & kEepromBusyBit) != 0);
+  return Status::Ok();
 }
 
 // ===== Conversion Helper Functions =====

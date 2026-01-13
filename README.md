@@ -114,6 +114,8 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `void end()` | Stop and release resources |
 | `bool isInitialized() const` | Check if RTC initialized |
 | `const Config& getConfig() const` | Get current configuration |
+| `bool isEepromBusy() const` | Check if EEPROM persistence is active |
+| `Status getEepromStatus() const` | Get last EEPROM persistence status |
 
 ### Time/Date Operations
 
@@ -199,6 +201,7 @@ namespace RV3032 {
   struct Config {
     TwoWire* wire = nullptr;                     // I2C interface (required)
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
+    uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
     BackupSwitchMode backupMode = Level;         // Battery backup mode
     bool enableEepromWrites = false;             // Persistent config (EEPROM)
     uint32_t eepromTimeoutMs = 200;              // EEPROM write timeout
@@ -209,8 +212,9 @@ namespace RV3032 {
 **Configuration rules:**
 - `wire` must be initialized (`Wire.begin()` called) before `begin()`
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
-- `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss.
-- `eepromTimeoutMs`: Maximum wait time for EEPROM writes (default 200ms)
+- `i2cTimeoutMs`: Bounds I2C transaction time via `Wire.setTimeOut()` (default 50ms). Affects the shared I2C bus.
+- `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss and complete asynchronously.
+- `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 200ms)
 
 ## Error Handling
 
@@ -238,6 +242,7 @@ struct Status {
 - `EEPROM_WRITE_FAILED` - EEPROM update failed
 - `REGISTER_READ_FAILED` - Register read failed
 - `REGISTER_WRITE_FAILED` - Register write failed
+- `IN_PROGRESS` - EEPROM persistence queued or active
 
 **Example error handling:**
 ```cpp
@@ -252,7 +257,7 @@ if (!st.ok()) {
 
 **Threading Model:** Single-threaded by default. No FreeRTOS tasks created.
 
-**Timing:** `tick()` completes in <1ms (no I2C operations). EEPROM operations use blocking wait (up to `Config::eepromTimeoutMs`).
+**Timing:** `tick()` completes in bounded time. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay).
 
 **Resource Ownership:** I2C interface passed via `Config`. No hardcoded pins or resources.
 
@@ -264,6 +269,8 @@ if (!st.ok()) {
 - `setClkoutEnabled()` / `setClkoutFrequency()`
 - `setOffsetPpm()`
 - Backup mode changes in `begin()`
+
+EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported.
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles.
 
