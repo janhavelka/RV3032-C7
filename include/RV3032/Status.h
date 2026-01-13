@@ -24,7 +24,9 @@ enum class Err : uint8_t {
   DEVICE_NOT_FOUND,      ///< RTC device not responding on I2C bus
   EEPROM_WRITE_FAILED,   ///< EEPROM update operation failed
   REGISTER_READ_FAILED,  ///< Register read operation failed
-  REGISTER_WRITE_FAILED  ///< Register write operation failed
+  REGISTER_WRITE_FAILED, ///< Register write operation failed
+  QUEUE_FULL,            ///< EEPROM write queue is full (too many pending writes)
+  IN_PROGRESS            ///< Operation scheduled; call tick() to complete
 };
 
 /**
