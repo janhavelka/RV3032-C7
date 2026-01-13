@@ -212,7 +212,7 @@ namespace RV3032 {
 **Configuration rules:**
 - `wire` must be initialized (`Wire.begin()` called) before `begin()`
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
-- `i2cTimeoutMs`: Bounds I2C transaction time via `Wire.setTimeOut()` (default 50ms). Affects the shared I2C bus.
+- `i2cTimeoutMs`: Bounds I2C transaction time via `Wire.setTimeOut()` (default 50ms). Affects the shared I2C bus; must be >= 50ms when EEPROM writes are enabled.
 - `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss and complete asynchronously.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 200ms)
 
@@ -243,6 +243,7 @@ struct Status {
 - `REGISTER_READ_FAILED` - Register read failed
 - `REGISTER_WRITE_FAILED` - Register write failed
 - `IN_PROGRESS` - EEPROM persistence queued or active
+- `QUEUE_FULL` - EEPROM persistence queue full
 
 **Example error handling:**
 ```cpp
@@ -270,7 +271,7 @@ if (!st.ok()) {
 - `setOffsetPpm()`
 - Backup mode changes in `begin()`
 
-EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported.
+EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles.
 

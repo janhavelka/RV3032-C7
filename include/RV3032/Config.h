@@ -42,6 +42,7 @@ struct Config {
   /// @brief I2C transaction timeout in milliseconds (default: 50ms)
   /// @note Applied in begin() via TwoWire::setTimeOut(). Affects the shared I2C bus.
   ///       Set to a value > 0 to bound bus stalls.
+  ///       Must be >= 50ms when enableEepromWrites is true.
   uint32_t i2cTimeoutMs = 50;
 
   /// @brief Battery backup switching mode (default: Level)

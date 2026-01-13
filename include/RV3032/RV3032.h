@@ -222,7 +222,7 @@ class RV3032 {
    * @brief Read current time and date from RTC
    * 
    * @param[out] out Structure to receive current date/time
-   * @return Status::Ok() on success, error on I2C failure
+   * @return OK on success, INVALID_DATETIME on invalid BCD, error on I2C failure
    */
   Status readTime(DateTime& out);
 
@@ -324,7 +324,7 @@ class RV3032 {
    * @param ticks Number of timer ticks before triggering (0-4095)
    * @param freq Timer clock frequency
    * @param enable Start timer immediately if true
-   * @return Status::Ok() on success, error otherwise
+   * @return OK on success, INVALID_PARAM if ticks > 4095, error otherwise
    * @note Timer period = ticks / freq. Example: 60 ticks at Hz1 = 60 seconds
    */
   Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable);
@@ -520,9 +520,10 @@ class RV3032 {
   void processEeprom(uint32_t now_ms);
   Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
   Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
-  Status readEepromBusy(bool& busy);
+  Status readEepromFlags(bool& busy, bool& failed);
 
   // Conversion helpers
+  static bool isValidBcd(uint8_t v);
   static uint8_t bcdToBin(uint8_t v);
   static uint8_t binToBcd(uint8_t v);
   static bool isLeapYear(uint16_t year);
