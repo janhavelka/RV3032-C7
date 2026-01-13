@@ -1142,6 +1142,32 @@ Status RV3032::readValidity(ValidityFlags& out) {
   return Status::Ok();
 }
 
+Status RV3032::clearPowerOnResetFlag() {
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Clear PORF (bit 1)
+  status &= ~0x02;
+
+  return writeRegister(kRegStatus, status);
+}
+
+Status RV3032::clearVoltageLowFlag() {
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Clear VLF (bit 0)
+  status &= ~0x01;
+
+  return writeRegister(kRegStatus, status);
+}
+
 Status RV3032::clearBackupSwitchFlag() {
   uint8_t status = 0;
   Status st = readRegister(kRegStatus, status);

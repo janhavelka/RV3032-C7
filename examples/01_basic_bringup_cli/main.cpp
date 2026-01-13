@@ -78,6 +78,8 @@ static void print_help() {
   Serial.println(F("  offset [ppm]      - Read or set frequency offset"));
   Serial.println(F("  status            - Read status register"));
   Serial.println(F("  validity          - Read PORF/VLF/BSF validity flags"));
+  Serial.println(F("  clear_porf        - Clear power-on reset flag"));
+  Serial.println(F("  clear_vlf         - Clear voltage low flag"));
   Serial.println(F("  clear_bsf         - Clear backup switchover flag"));
   Serial.println();
 }
@@ -381,6 +383,30 @@ static void cmd_clear_bsf() {
 }
 
 /**
+ * @brief Handle 'clear_porf' command - clear power-on reset flag.
+ */
+static void cmd_clear_porf() {
+  RV3032::Status st = g_rtc.clearPowerOnResetFlag();
+  if (!st.ok()) {
+    LOGE("clearPowerOnResetFlag() failed: %s", st.msg);
+  } else {
+    LOGI("Power-on reset flag cleared");
+  }
+}
+
+/**
+ * @brief Handle 'clear_vlf' command - clear voltage low flag.
+ */
+static void cmd_clear_vlf() {
+  RV3032::Status st = g_rtc.clearVoltageLowFlag();
+  if (!st.ok()) {
+    LOGE("clearVoltageLowFlag() failed: %s", st.msg);
+  } else {
+    LOGI("Voltage low flag cleared");
+  }
+}
+
+/**
  * @brief Process command string.
  */
 static void process_command(const String& line) {
@@ -424,6 +450,10 @@ static void process_command(const String& line) {
     cmd_status();
   } else if (cmd == "validity") {
     cmd_validity();
+  } else if (cmd == "clear_porf") {
+    cmd_clear_porf();
+  } else if (cmd == "clear_vlf") {
+    cmd_clear_vlf();
   } else if (cmd == "clear_bsf") {
     cmd_clear_bsf();
   } else {

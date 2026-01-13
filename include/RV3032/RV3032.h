@@ -502,6 +502,23 @@ class RV3032 {
   Status readValidity(ValidityFlags& out);
 
   /**
+   * @brief Clear power-on reset flag (PORF)
+   * 
+   * @return Status::Ok() on success, error otherwise
+   * @note PORF indicates a power-up event occurred. Once confirmed the time is correct,
+   *       clear this flag to indicate time validity.
+   */
+  Status clearPowerOnResetFlag();
+
+  /**
+   * @brief Clear voltage low flag (VLF)
+   * 
+   * @return Status::Ok() on success, error otherwise
+   * @note VLF is set when a low-voltage event occurs. Once verified, clear this flag.
+   */
+  Status clearVoltageLowFlag();
+
+  /**
    * @brief Clear backup switchover flag (BSF)
    * 
    * @return Status::Ok() on success, error otherwise
