@@ -4,6 +4,8 @@
  */
 
 #include "RV3032/RV3032.h"
+#include <cstring>
+#include <Wire.h>
 
 namespace RV3032 {
 
@@ -1125,4 +1127,33 @@ bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
   return true;
 }
 
+Status RV3032::readValidity(ValidityFlags& out) {
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.voltageLow = (status & 0x01) != 0;      // VLF bit
+  out.powerOnReset = (status & 0x02) != 0;    // PORF bit
+  out.backupSwitched = (status & 0x04) != 0;  // BSF bit
+  out.timeInvalid = out.powerOnReset || out.voltageLow;
+
+  return Status::Ok();
+}
+
+Status RV3032::clearBackupSwitchFlag() {
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Clear BSF (bit 2)
+  status &= ~0x04;
+
+  return writeRegister(kRegStatus, status);
+}
+
 }  // namespace RV3032
+

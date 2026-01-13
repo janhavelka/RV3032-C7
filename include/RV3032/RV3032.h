@@ -509,20 +509,6 @@ class RV3032 {
    */
   Status clearBackupSwitchFlag();
 
-  /**
-   * @brief Check if an EEPROM commit is in progress
-   * 
-   * @return true if EEPROM state machine is busy
-   */
-  bool isEepromBusy() const;
-
-  /**
-   * @brief Get last completed EEPROM commit status
-   * 
-   * @return Status from last EEPROM commit (Ok if none or success)
-   */
-  Status getEepromLastStatus() const;
-
   // ===== Low-Level Operations =====
 
   /**
@@ -609,53 +595,6 @@ class RV3032 {
   static bool dateTimeToUnix(const DateTime& time, uint32_t& out);
 
  private:
-  enum class EepromStep : uint8_t {
-    Idle = 0,
-    ReadControl1,
-    WriteControl1,
-    WriteAddr,
-    WriteData,
-    WaitReadyBefore,
-    WriteCmd,
-    WaitReadyAfter,
-    RestoreControl
-  };
-
-  struct EepromOp {
-    EepromStep step = EepromStep::Idle;
-    uint8_t reg = 0;
-    uint8_t value = 0;
-    uint8_t control1 = 0;
-    uint32_t waitStartMs = 0;
-    uint32_t waitTimeoutMs = 0;
-    bool waitActive = false;
-    bool restoreNeeded = false;
-    Status result = Status::Ok();
-    Status lastStatus = Status::Ok();
-  };
-
-  Config _config;
-  bool _initialized = false;
-  EepromOp _eeprom;
-
-  // I2C operations
-  Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
-  Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
-  Status writeEepromRegister(uint8_t reg, uint8_t value);
-  void processEeprom(uint32_t now_ms);
-  Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
-  Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
-  Status readEepromFlags(bool& busy, bool& failed);
-
-  // Conversion helpers
-  static bool isValidBcd(uint8_t v);
-  static uint8_t bcdToBin(uint8_t v);
-  static uint8_t binToBcd(uint8_t v);
-  static bool isLeapYear(uint16_t year);
-  static uint8_t daysInMonth(uint16_t year, uint8_t month);
-  static uint32_t dateToDays(uint16_t year, uint8_t month, uint8_t day);
-  static bool unixToDate(uint32_t ts, DateTime& out);
-
   enum class EepromState : uint8_t {
     Idle,
     ReadControl1,
@@ -690,11 +629,30 @@ class RV3032 {
     uint8_t queueCount = 0; // Number of items in queue
   };
 
+  Config _config;
+  bool _initialized = false;
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
   
+  // I2C operations
+  Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
+  Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
+  Status writeEepromRegister(uint8_t reg, uint8_t value);
+  void processEeprom(uint32_t now_ms);
+  Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
+  Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
+  Status readEepromFlags(bool& busy, bool& failed);
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
+
+  // Conversion helpers
+  static bool isValidBcd(uint8_t v);
+  static uint8_t bcdToBin(uint8_t v);
+  static uint8_t binToBcd(uint8_t v);
+  static bool isLeapYear(uint16_t year);
+  static uint8_t daysInMonth(uint16_t year, uint8_t month);
+  static uint32_t dateToDays(uint16_t year, uint8_t month, uint8_t day);
+  static bool unixToDate(uint32_t ts, DateTime& out);
 };
 
 }  // namespace RV3032
