@@ -1,0 +1,47 @@
+# Enforce LF line endings for all text files across all platforms
+# This ensures consistent behavior in embedded development environments
+
+# Default: LF for all text files
+* text=auto eol=lf
+
+# Explicitly declare source files
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.ino text eol=lf
+
+# Python scripts
+*.py text eol=lf
+
+# Configuration files
+*.ini text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+
+# Shell scripts (must be LF)
+*.sh text eol=lf
+
+# Windows scripts (must be CRLF)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.bin binary
+*.elf binary
+*.hex binary
+*.a binary
+*.so binary
+*.dll binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

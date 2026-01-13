@@ -26,6 +26,7 @@ enum class Err : uint8_t {
   REGISTER_READ_FAILED,  ///< Register read operation failed
   REGISTER_WRITE_FAILED, ///< Register write operation failed
   QUEUE_FULL,            ///< EEPROM write queue is full (too many pending writes)
+  BUSY,                  ///< Operation deferred because device is busy
   IN_PROGRESS            ///< Operation scheduled; call tick() to complete
 };
 

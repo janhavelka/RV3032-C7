@@ -77,6 +77,8 @@ static void print_help() {
   Serial.println(F("  clkout_freq 0..3  - Set frequency (0=32768Hz, 1=1024Hz, 2=64Hz, 3=1Hz)"));
   Serial.println(F("  offset [ppm]      - Read or set frequency offset"));
   Serial.println(F("  status            - Read status register"));
+  Serial.println(F("  validity          - Read PORF/VLF/BSF validity flags"));
+  Serial.println(F("  clear_bsf         - Clear backup switchover flag"));
   Serial.println();
 }
 
@@ -176,7 +178,7 @@ static void cmd_temp() {
     LOGE("readTemperatureC() failed: %s", st.msg);
     return;
   }
-  Serial.printf("Temperature: %.2f °C\n", celsius);
+  Serial.printf("Temperature: %.2f C\n", celsius);
 }
 
 /**
@@ -350,6 +352,35 @@ static void cmd_status() {
 }
 
 /**
+ * @brief Handle 'validity' command - read validity flags.
+ */
+static void cmd_validity() {
+  RV3032::ValidityFlags flags;
+  RV3032::Status st = g_rtc.readValidity(flags);
+  if (!st.ok()) {
+    LOGE("readValidity() failed: %s", st.msg);
+    return;
+  }
+
+  Serial.printf("PORF: %s\n", flags.powerOnReset ? "set" : "clear");
+  Serial.printf("VLF:  %s\n", flags.voltageLow ? "set" : "clear");
+  Serial.printf("BSF:  %s\n", flags.backupSwitched ? "set" : "clear");
+  Serial.printf("Time: %s\n", flags.timeInvalid ? "invalid" : "valid");
+}
+
+/**
+ * @brief Handle 'clear_bsf' command - clear backup switchover flag.
+ */
+static void cmd_clear_bsf() {
+  RV3032::Status st = g_rtc.clearBackupSwitchFlag();
+  if (!st.ok()) {
+    LOGE("clearBackupSwitchFlag() failed: %s", st.msg);
+  } else {
+    LOGI("Backup switchover flag cleared");
+  }
+}
+
+/**
  * @brief Process command string.
  */
 static void process_command(const String& line) {
@@ -391,6 +422,10 @@ static void process_command(const String& line) {
     cmd_offset(args);
   } else if (cmd == "status") {
     cmd_status();
+  } else if (cmd == "validity") {
+    cmd_validity();
+  } else if (cmd == "clear_bsf") {
+    cmd_clear_bsf();
   } else {
     LOGW("Unknown command: '%s'. Type 'help' for available commands.", cmd.c_str());
   }

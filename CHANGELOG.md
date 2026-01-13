@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-01-12
+
+### Added
+- Non-blocking EEPROM commit state machine (tick-driven) with `isEepromBusy()` and `getEepromLastStatus()`
+- Status/validity helpers: `readStatusFlags()`, `readValidity()`, `clearBackupSwitchFlag()`
+- Conversion helpers: `bcdToBinary()`, `binaryToBcd()`, `unixToDateTime()`, `dateTimeToUnix()`
+- Host-side unit tests with a native test environment and CI job
+
+### Changed
+- Added `eepromNonBlocking` config option (default true)
+- EEPROM writes can return `BUSY` when a commit is already in progress
+- CLI example includes validity and backup switchover helpers
+
+### Fixed
+- N/A
+
+### Removed
+- N/A
+
 ## [1.0.0] - 2026-01-10
 
 ### Added
@@ -35,5 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.0.0
