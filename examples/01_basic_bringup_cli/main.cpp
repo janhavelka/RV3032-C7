@@ -23,6 +23,81 @@
 #include "RV3032/RV3032.h"
 
 static RV3032::RV3032 g_rtc;
+static bool g_verbose = true;  // Verbose mode for deep debugging
+
+/**
+ * @brief Convert DriverState enum to string.
+ */
+static const char* stateToStr(RV3032::DriverState state) {
+  switch (state) {
+    case RV3032::DriverState::UNINIT:   return "UNINIT";
+    case RV3032::DriverState::READY:    return "READY";
+    case RV3032::DriverState::DEGRADED: return "DEGRADED";
+    case RV3032::DriverState::OFFLINE:  return "OFFLINE";
+    default: return "UNKNOWN";
+  }
+}
+
+/**
+ * @brief Convert Err enum to string.
+ */
+static const char* errToStr(RV3032::Err code) {
+  switch (code) {
+    case RV3032::Err::OK:                   return "OK";
+    case RV3032::Err::NOT_INITIALIZED:      return "NOT_INITIALIZED";
+    case RV3032::Err::INVALID_CONFIG:       return "INVALID_CONFIG";
+    case RV3032::Err::I2C_ERROR:            return "I2C_ERROR";
+    case RV3032::Err::TIMEOUT:              return "TIMEOUT";
+    case RV3032::Err::INVALID_PARAM:        return "INVALID_PARAM";
+    case RV3032::Err::INVALID_DATETIME:     return "INVALID_DATETIME";
+    case RV3032::Err::DEVICE_NOT_FOUND:     return "DEVICE_NOT_FOUND";
+    case RV3032::Err::EEPROM_WRITE_FAILED:  return "EEPROM_WRITE_FAILED";
+    case RV3032::Err::REGISTER_READ_FAILED: return "REGISTER_READ_FAILED";
+    case RV3032::Err::REGISTER_WRITE_FAILED:return "REGISTER_WRITE_FAILED";
+    case RV3032::Err::QUEUE_FULL:           return "QUEUE_FULL";
+    case RV3032::Err::BUSY:                 return "BUSY";
+    case RV3032::Err::IN_PROGRESS:          return "IN_PROGRESS";
+    default: return "UNKNOWN";
+  }
+}
+
+/**
+ * @brief Print verbose status details after any operation.
+ */
+static void print_verbose_status(const char* op, const RV3032::Status& st) {
+  if (!g_verbose) return;
+  
+  Serial.println(F("  --- Verbose Status ---"));
+  Serial.printf("  Operation: %s\n", op);
+  Serial.printf("  Result: %s (code=%s, detail=%d)\n",
+                st.ok() ? "OK" : "FAILED",
+                errToStr(st.code),
+                st.detail);
+  if (st.msg) {
+    Serial.printf("  Message: %s\n", st.msg);
+  }
+  
+  // Driver health snapshot
+  Serial.printf("  Driver State: %s\n", stateToStr(g_rtc.state()));
+  Serial.printf("  isOnline: %s\n", g_rtc.isOnline() ? "true" : "false");
+  Serial.printf("  Consecutive Failures: %d\n", g_rtc.consecutiveFailures());
+  Serial.printf("  Total: success=%lu, failures=%lu\n",
+                static_cast<unsigned long>(g_rtc.totalSuccess()),
+                static_cast<unsigned long>(g_rtc.totalFailures()));
+  
+  uint32_t now = millis();
+  uint32_t lastOk = g_rtc.lastOkMs();
+  uint32_t lastErr = g_rtc.lastErrorMs();
+  Serial.printf("  Last OK: %u ms ago\n", lastOk > 0 ? (now - lastOk) : 0);
+  if (lastErr > 0) {
+    RV3032::Status lastError = g_rtc.lastError();
+    Serial.printf("  Last Error: %u ms ago (%s: %s)\n",
+                  now - lastErr,
+                  errToStr(lastError.code),
+                  lastError.msg ? lastError.msg : "");
+  }
+  Serial.println(F("  ----------------------"));
+}
 
 /**
  * @brief Non-blocking line reader from Serial.
@@ -83,6 +158,14 @@ static void print_help() {
   Serial.println(F("  clear_vlf         - Clear voltage low flag"));
   Serial.println(F("  clear_bsf         - Clear backup switchover flag"));
   Serial.println();
+  Serial.println(F("Driver Debugging:"));
+  Serial.println(F("  drv               - Show driver state and health"));
+  Serial.println(F("  probe             - Probe device (no health tracking)"));
+  Serial.println(F("  recover           - Manual recovery attempt"));
+  Serial.println(F("  verbose 0|1       - Disable/enable verbose status output"));
+  Serial.println(F("  stress [N]        - Run N iterations stress test (default 100)"));
+  Serial.println(F("  stress_mix [N]    - Run N iterations mixed operations test"));
+  Serial.println();
 }
 
 /**
@@ -101,6 +184,7 @@ static void print_datetime(const RV3032::DateTime& dt) {
 static void cmd_time() {
   RV3032::DateTime dt;
   RV3032::Status st = g_rtc.readTime(dt);
+  print_verbose_status("readTime", st);
   if (!st.ok()) {
     LOGE("readTime() failed: %s", st.msg);
     return;
@@ -400,11 +484,363 @@ static void cmd_clear_porf() {
  */
 static void cmd_clear_vlf() {
   RV3032::Status st = g_rtc.clearVoltageLowFlag();
+  print_verbose_status("clearVoltageLowFlag", st);
   if (!st.ok()) {
     LOGE("clearVoltageLowFlag() failed: %s", st.msg);
   } else {
     LOGI("Voltage low flag cleared");
   }
+}
+
+// ===== Driver Debugging Commands =====
+
+/**
+ * @brief Handle 'drv' command - show driver state and health.
+ */
+static void cmd_drv() {
+  Serial.println();
+  Serial.println(F("=== Driver State ==="));
+  Serial.printf("State: %s\n", stateToStr(g_rtc.state()));
+  Serial.printf("isOnline: %s\n", g_rtc.isOnline() ? "true" : "false");
+  Serial.println();
+  
+  Serial.println(F("=== Health Counters ==="));
+  Serial.printf("Consecutive Failures: %d\n", g_rtc.consecutiveFailures());
+  Serial.printf("Total Successes: %lu\n", static_cast<unsigned long>(g_rtc.totalSuccess()));
+  Serial.printf("Total Failures: %lu\n", static_cast<unsigned long>(g_rtc.totalFailures()));
+  Serial.println();
+  
+  Serial.println(F("=== Timestamps ==="));
+  uint32_t now = millis();
+  uint32_t lastOk = g_rtc.lastOkMs();
+  uint32_t lastErr = g_rtc.lastErrorMs();
+  
+  if (lastOk > 0) {
+    Serial.printf("Last OK: %u ms (%.1f sec ago)\n", 
+                  lastOk, (now - lastOk) / 1000.0f);
+  } else {
+    Serial.println(F("Last OK: never"));
+  }
+  
+  if (lastErr > 0) {
+    Serial.printf("Last Error: %u ms (%.1f sec ago)\n",
+                  lastErr, (now - lastErr) / 1000.0f);
+  } else {
+    Serial.println(F("Last Error: never"));
+  }
+  Serial.println();
+  
+  Serial.println(F("=== Last Error Details ==="));
+  RV3032::Status lastError = g_rtc.lastError();
+  Serial.printf("Code: %s (%d)\n", errToStr(lastError.code), static_cast<int>(lastError.code));
+  Serial.printf("Detail: %d\n", lastError.detail);
+  Serial.printf("Message: %s\n", lastError.msg ? lastError.msg : "(none)");
+  Serial.println();
+  
+  Serial.println(F("=== EEPROM State ==="));
+  Serial.printf("Busy: %s\n", g_rtc.isEepromBusy() ? "true" : "false");
+  RV3032::Status eepromSt = g_rtc.getEepromStatus();
+  Serial.printf("Status: %s\n", eepromSt.ok() ? "OK" : eepromSt.msg);
+  Serial.println();
+}
+
+/**
+ * @brief Handle 'probe' command - probe device without health tracking.
+ */
+static void cmd_probe() {
+  Serial.println(F("Probing device (no health tracking)..."));
+  
+  // Capture health before
+  uint8_t failsBefore = g_rtc.consecutiveFailures();
+  uint32_t successBefore = g_rtc.totalSuccess();
+  uint32_t failureBefore = g_rtc.totalFailures();
+  
+  RV3032::Status st = g_rtc.probe();
+  
+  // Capture health after
+  uint8_t failsAfter = g_rtc.consecutiveFailures();
+  uint32_t successAfter = g_rtc.totalSuccess();
+  uint32_t failureAfter = g_rtc.totalFailures();
+  
+  if (st.ok()) {
+    LOGI("Probe OK - device responding");
+  } else {
+    LOGE("Probe FAILED: %s (code=%s, detail=%d)", 
+         st.msg, errToStr(st.code), st.detail);
+  }
+  
+  // Verify no health change
+  bool healthChanged = (failsBefore != failsAfter) ||
+                       (successBefore != successAfter) ||
+                       (failureBefore != failureAfter);
+  
+  Serial.printf("Health tracking: %s\n", 
+                healthChanged ? "CHANGED (unexpected!)" : "unchanged (correct)");
+}
+
+/**
+ * @brief Handle 'recover' command - manual recovery attempt.
+ */
+static void cmd_recover() {
+  Serial.println(F("Attempting recovery..."));
+  
+  // Capture state before
+  RV3032::DriverState stateBefore = g_rtc.state();
+  uint8_t failsBefore = g_rtc.consecutiveFailures();
+  
+  RV3032::Status st = g_rtc.recover();
+  print_verbose_status("recover", st);
+  
+  // Capture state after
+  RV3032::DriverState stateAfter = g_rtc.state();
+  uint8_t failsAfter = g_rtc.consecutiveFailures();
+  
+  if (st.ok()) {
+    LOGI("Recovery successful");
+  } else {
+    LOGE("Recovery FAILED: %s (code=%s, detail=%d)",
+         st.msg, errToStr(st.code), st.detail);
+  }
+  
+  Serial.printf("State: %s -> %s\n", stateToStr(stateBefore), stateToStr(stateAfter));
+  Serial.printf("Consecutive failures: %d -> %d\n", failsBefore, failsAfter);
+}
+
+/**
+ * @brief Handle 'verbose' command - enable/disable verbose mode.
+ */
+static void cmd_verbose(const String& args) {
+  if (args.length() == 0) {
+    Serial.printf("Verbose mode: %s\n", g_verbose ? "ON" : "OFF");
+    return;
+  }
+  
+  g_verbose = (args.toInt() != 0);
+  LOGI("Verbose mode %s", g_verbose ? "enabled" : "disabled");
+}
+
+/**
+ * @brief Handle 'stress' command - rapid time reads stress test.
+ * Tests I2C reliability and health tracking under load.
+ */
+static void cmd_stress(const String& args) {
+  int iterations = 100;
+  if (args.length() > 0) {
+    iterations = args.toInt();
+    if (iterations < 1) iterations = 1;
+    if (iterations > 100000) iterations = 100000;
+  }
+  
+  Serial.printf("\n=== Stress Test: %d iterations ===\n", iterations);
+  
+  // Capture initial state
+  uint32_t successBefore = g_rtc.totalSuccess();
+  uint32_t failureBefore = g_rtc.totalFailures();
+  RV3032::DriverState stateBefore = g_rtc.state();
+  
+  uint32_t startMs = millis();
+  int okCount = 0;
+  int failCount = 0;
+  uint32_t minTimeUs = UINT32_MAX;
+  uint32_t maxTimeUs = 0;
+  uint64_t totalTimeUs = 0;
+  
+  RV3032::DateTime dt;
+  
+  for (int i = 0; i < iterations; i++) {
+    uint32_t opStart = micros();
+    RV3032::Status st = g_rtc.readTime(dt);
+    uint32_t opTime = micros() - opStart;
+    
+    if (st.ok()) {
+      okCount++;
+      totalTimeUs += opTime;
+      if (opTime < minTimeUs) minTimeUs = opTime;
+      if (opTime > maxTimeUs) maxTimeUs = opTime;
+    } else {
+      failCount++;
+      Serial.printf("  [%d] FAIL: %s (code=%s)\n", i, st.msg, errToStr(st.code));
+    }
+    
+    // Progress indicator every 10%
+    if ((i + 1) % (iterations / 10) == 0) {
+      Serial.printf("  Progress: %d%%\n", ((i + 1) * 100) / iterations);
+    }
+    
+    // Allow watchdog/system tasks
+    yield();
+  }
+  
+  uint32_t totalMs = millis() - startMs;
+  
+  // Results
+  Serial.println(F("\n--- Results ---"));
+  Serial.printf("OK: %d, FAIL: %d (%.2f%% success)\n", 
+                okCount, failCount,
+                iterations > 0 ? (okCount * 100.0f / iterations) : 0.0f);
+  Serial.printf("Total time: %u ms (%.1f ops/sec)\n",
+                totalMs,
+                totalMs > 0 ? (iterations * 1000.0f / totalMs) : 0.0f);
+  
+  if (okCount > 0) {
+    Serial.printf("Per-op timing: min=%u us, max=%u us, avg=%u us\n",
+                  minTimeUs, maxTimeUs,
+                  static_cast<uint32_t>(totalTimeUs / okCount));
+  }
+  
+  // Health tracking verification
+  Serial.println(F("\n--- Health Tracking ---"));
+  uint32_t successAfter = g_rtc.totalSuccess();
+  uint32_t failureAfter = g_rtc.totalFailures();
+  RV3032::DriverState stateAfter = g_rtc.state();
+  
+  uint32_t expectedSuccess = successBefore + okCount;
+  uint32_t expectedFailure = failureBefore + failCount;
+  
+  Serial.printf("Total success: %lu -> %lu (expected %lu) %s\n",
+                static_cast<unsigned long>(successBefore),
+                static_cast<unsigned long>(successAfter),
+                static_cast<unsigned long>(expectedSuccess),
+                successAfter == expectedSuccess ? "OK" : "MISMATCH!");
+  Serial.printf("Total failures: %lu -> %lu (expected %lu) %s\n",
+                static_cast<unsigned long>(failureBefore),
+                static_cast<unsigned long>(failureAfter),
+                static_cast<unsigned long>(expectedFailure),
+                failureAfter == expectedFailure ? "OK" : "MISMATCH!");
+  Serial.printf("Driver state: %s -> %s\n", 
+                stateToStr(stateBefore), stateToStr(stateAfter));
+  Serial.printf("Consecutive failures: %d\n", g_rtc.consecutiveFailures());
+  Serial.println();
+}
+
+/**
+ * @brief Handle 'stress_mix' command - mixed operations stress test.
+ * Tests various API calls to exercise different code paths.
+ */
+static void cmd_stress_mix(const String& args) {
+  int iterations = 50;
+  if (args.length() > 0) {
+    iterations = args.toInt();
+    if (iterations < 1) iterations = 1;
+    if (iterations > 100000) iterations = 100000;
+  }
+  
+  Serial.printf("\n=== Mixed Operations Stress Test: %d iterations ===\n", iterations);
+  
+  // Capture initial state
+  uint32_t successBefore = g_rtc.totalSuccess();
+  uint32_t failureBefore = g_rtc.totalFailures();
+  
+  uint32_t startMs = millis();
+  int okCount = 0;
+  int failCount = 0;
+  
+  // Track per-operation stats
+  struct OpStats {
+    const char* name;
+    int ok;
+    int fail;
+  };
+  OpStats stats[] = {
+    {"readTime", 0, 0},
+    {"readUnix", 0, 0},
+    {"readTemp", 0, 0},
+    {"readStatus", 0, 0},
+    {"getOffset", 0, 0},
+    {"getClkout", 0, 0},
+    {"readValidity", 0, 0},
+  };
+  constexpr int numOps = sizeof(stats) / sizeof(stats[0]);
+  
+  for (int i = 0; i < iterations; i++) {
+    RV3032::Status st;
+    int opIdx = i % numOps;
+    
+    switch (opIdx) {
+      case 0: {
+        RV3032::DateTime dt;
+        st = g_rtc.readTime(dt);
+        break;
+      }
+      case 1: {
+        uint32_t ts;
+        st = g_rtc.readUnix(ts);
+        break;
+      }
+      case 2: {
+        float temp;
+        st = g_rtc.readTemperatureC(temp);
+        break;
+      }
+      case 3: {
+        uint8_t status;
+        st = g_rtc.readStatus(status);
+        break;
+      }
+      case 4: {
+        float ppm;
+        st = g_rtc.getOffsetPpm(ppm);
+        break;
+      }
+      case 5: {
+        bool enabled;
+        st = g_rtc.getClkoutEnabled(enabled);
+        break;
+      }
+      case 6: {
+        RV3032::ValidityFlags flags;
+        st = g_rtc.readValidity(flags);
+        break;
+      }
+    }
+    
+    if (st.ok()) {
+      okCount++;
+      stats[opIdx].ok++;
+    } else {
+      failCount++;
+      stats[opIdx].fail++;
+      Serial.printf("  [%d] %s FAIL: %s\n", i, stats[opIdx].name, st.msg);
+    }
+    
+    // Progress indicator every 25%
+    if (iterations >= 4 && (i + 1) % (iterations / 4) == 0) {
+      Serial.printf("  Progress: %d%%\n", ((i + 1) * 100) / iterations);
+    }
+    
+    yield();
+  }
+  
+  uint32_t totalMs = millis() - startMs;
+  
+  // Results
+  Serial.println(F("\n--- Results ---"));
+  Serial.printf("Total: OK=%d, FAIL=%d (%.2f%% success)\n", 
+                okCount, failCount,
+                (iterations > 0) ? (okCount * 100.0f / iterations) : 0.0f);
+  Serial.printf("Time: %u ms (%.1f ops/sec)\n\n",
+                totalMs,
+                totalMs > 0 ? (iterations * 1000.0f / totalMs) : 0.0f);
+  
+  Serial.println(F("Per-operation breakdown:"));
+  for (int i = 0; i < numOps; i++) {
+    Serial.printf("  %-12s: OK=%d, FAIL=%d\n", 
+                  stats[i].name, stats[i].ok, stats[i].fail);
+  }
+  
+  // Health tracking verification
+  Serial.println(F("\n--- Health Tracking ---"));
+  uint32_t successAfter = g_rtc.totalSuccess();
+  uint32_t failureAfter = g_rtc.totalFailures();
+  
+  // Note: some operations do multiple I2C calls, so we can't predict exact count
+  Serial.printf("Success delta: +%lu (ops had %d OK results)\n",
+                static_cast<unsigned long>(successAfter - successBefore), okCount);
+  Serial.printf("Failure delta: +%lu (ops had %d FAIL results)\n",
+                static_cast<unsigned long>(failureAfter - failureBefore), failCount);
+  Serial.printf("Driver state: %s\n", stateToStr(g_rtc.state()));
+  Serial.printf("Consecutive failures: %d\n", g_rtc.consecutiveFailures());
+  Serial.println();
 }
 
 /**
@@ -457,6 +893,18 @@ static void process_command(const String& line) {
     cmd_clear_vlf();
   } else if (cmd == "clear_bsf") {
     cmd_clear_bsf();
+  } else if (cmd == "drv") {
+    cmd_drv();
+  } else if (cmd == "probe") {
+    cmd_probe();
+  } else if (cmd == "recover") {
+    cmd_recover();
+  } else if (cmd == "verbose") {
+    cmd_verbose(args);
+  } else if (cmd == "stress") {
+    cmd_stress(args);
+  } else if (cmd == "stress_mix") {
+    cmd_stress_mix(args);
   } else {
     LOGW("Unknown command: '%s'. Type 'help' for available commands.", cmd.c_str());
   }
@@ -488,14 +936,16 @@ void setup() {
 
   RV3032::Status st = g_rtc.begin(cfg);
   if (!st.ok()) {
-    LOGE("RTC init failed: %s (code=%d, detail=%d)",
-         st.msg, static_cast<int>(st.code), st.detail);
+    LOGE("RTC init failed: %s (code=%s, detail=%d)",
+         st.msg, errToStr(st.code), st.detail);
     LOGE("Check I2C wiring and RTC power");
     return;
   }
 
   LOGI("RTC initialized successfully");
+  LOGI("Driver state: %s", stateToStr(g_rtc.state()));
   LOGI("Type 'help' for available commands");
+  LOGI("Type 'drv' for driver health, 'verbose 1' for detailed output");
   Serial.print("> ");
 }
 
