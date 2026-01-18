@@ -8,7 +8,7 @@ A reusable architecture for embedded I2C device drivers with health tracking and
 
 **Pattern Type**: Managed Synchronous Driver  
 **Blocking**: Yes (all public operations are blocking)  
-**Health Tracking**: Centralized via `_updateHealth()`  
+**Health Tracking**: Centralized via tracked I2C transport wrappers  
 **Recovery**: Manual only (no automatic recovery in tick)  
 **Async Support**: Limited to EEPROM state machine only
 
@@ -91,11 +91,95 @@ uint32_t _totalSuccess = 0;          // Lifetime success count
 
 ---
 
-## 4. Core Private Helpers
+## 4. I2C Transport Wrapper Architecture
 
-### `_updateHealth(const Status& st)` — Central Health Tracker
+### Layered Transport Design
 
-**Purpose**: Single point for all health state updates.
+All I2C communication flows through a layered wrapper architecture:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Public API (readTime, setTime, etc.)                   │
+│  - NO direct _updateHealth() calls                      │
+│  - Uses readRegister/writeRegister                      │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│  Register Helpers (readRegs, writeRegs)                 │
+│  - Uses TRACKED wrappers                                │
+│  - Health updated automatically per I2C transaction     │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│  TRACKED Wrappers (_i2cWriteReadTracked, _i2cWriteTracked)│
+│  - Calls RAW wrapper                                    │
+│  - Returns _updateHealth(status)                        │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│  RAW Wrappers (_i2cWriteReadRaw, _i2cWriteRaw)         │
+│  - Direct transport callback                            │
+│  - NO health tracking                                   │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│  Transport Callbacks (Config::i2cWrite, i2cWriteRead)  │
+│  - Application-provided                                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Raw Transport Wrappers (No Health Tracking)
+
+```cpp
+Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, 
+                        uint8_t* rxBuf, size_t rxLen) {
+  if (!_config.i2cWriteRead) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
+  }
+  return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
+                              _config.i2cTimeoutMs, _config.i2cUser);
+}
+
+Status _i2cWriteRaw(const uint8_t* buf, size_t len) {
+  if (!_config.i2cWrite) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C write callback null");
+  }
+  return _config.i2cWrite(_config.i2cAddress, buf, len,
+                          _config.i2cTimeoutMs, _config.i2cUser);
+}
+```
+
+### Tracked Transport Wrappers (With Health Tracking)
+
+```cpp
+Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, 
+                            uint8_t* rxBuf, size_t rxLen) {
+  Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
+  return _updateHealth(st);
+}
+
+Status _i2cWriteTracked(const uint8_t* buf, size_t len) {
+  Status st = _i2cWriteRaw(buf, len);
+  return _updateHealth(st);
+}
+```
+
+### Raw Register Access (For Diagnostics)
+
+```cpp
+Status _readRegisterRaw(uint8_t reg, uint8_t& value) {
+  uint8_t tx = reg;
+  return _i2cWriteReadRaw(&tx, 1, &value, 1);
+}
+```
+
+**Used by**: `probe()`, `_applyConfig()` for diagnostic reads
+
+---
+
+## 5. Health Tracking — `_updateHealth()`
+
+Called **only** by tracked transport wrappers:
 
 ```cpp
 Status _updateHealth(const Status& st) {
@@ -125,52 +209,136 @@ Status _updateHealth(const Status& st) {
 }
 ```
 
-**When to call**:
-| Scenario | Call `_updateHealth()`? |
-|----------|------------------------|
-| Real I2C transaction result | ✅ YES |
-| `Err::IN_PROGRESS` (queued) | ✅ YES (treated as success) |
-| `INVALID_CONFIG` | ❌ NO |
-| `INVALID_PARAM` | ❌ NO |
-| `NOT_INITIALIZED` | ❌ NO |
-| `probe()` result | ❌ NO (diagnostic only) |
+### What Triggers Health Updates
 
-### `_readRegisterRaw(uint8_t reg, uint8_t& value)` — Raw I2C Read
+| Scenario | Health Updated? |
+|----------|-----------------|
+| Real I2C transaction (via tracked wrapper) | ✅ YES |
+| `Err::IN_PROGRESS` (queued EEPROM) | ✅ YES (treated as success) |
+| `INVALID_CONFIG` (precondition) | ❌ NO |
+| `INVALID_PARAM` (precondition) | ❌ NO |
+| `NOT_INITIALIZED` (precondition) | ❌ NO |
+| `probe()` (uses raw wrapper) | ❌ NO |
 
-**Purpose**: Bypass health tracking for diagnostics.
+---
+
+## 6. Register Helpers — Use Tracked Wrappers
 
 ```cpp
-Status _readRegisterRaw(uint8_t reg, uint8_t& value) {
-  if (!_config.i2cWriteRead) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
+Status readRegs(uint8_t reg, uint8_t* buf, size_t len) {
+  if (!buf || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid parameters");
   }
   uint8_t tx = reg;
-  return _config.i2cWriteRead(_config.i2cAddress, &tx, 1, &value, 1,
-                              _config.i2cTimeoutMs, _config.i2cUser);
+  // Health updated automatically by tracked wrapper
+  return _i2cWriteReadTracked(&tx, 1, buf, len);
 }
-```
 
-**Used by**: `probe()`, `_applyConfig()`
+Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
+  if (!buf || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid parameters");
+  }
+  uint8_t tx[kMaxWriteLen] = {0};
+  tx[0] = reg;
+  std::memcpy(&tx[1], buf, len);
+  // Health updated automatically by tracked wrapper
+  return _i2cWriteTracked(tx, len + 1);
+}
 
-### `_applyConfig()` — Shared Configuration Application
+Status readRegister(uint8_t reg, uint8_t& value) {
+  uint8_t buf = 0;
+  Status st = readRegs(reg, &buf, 1);
+  if (st.ok()) value = buf;
+  return st;
+}
 
-**Purpose**: Apply stored config to device (shared by `begin()` and `recover()`).
-
-```cpp
-Status _applyConfig() {
-  // Read-modify-write device registers as needed
-  // Does NOT call _updateHealth() - caller handles that
-  return Status::Ok();
+Status writeRegister(uint8_t reg, uint8_t value) {
+  return writeRegs(reg, &value, 1);
 }
 ```
 
 ---
 
-## 5. Public API — Lifecycle
+## 7. Public API — No Direct `_updateHealth()` Calls
 
-### `Status begin(const Config& config)`
+After this refactor, public API methods **never** call `_updateHealth()` directly:
 
-**Purpose**: Initialize driver and device.
+```cpp
+Status someOperation(params...) {
+  // 1. Precondition check (no health update)
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  
+  // 2. Parameter validation (no health update)
+  if (invalidParams) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid parameters");
+  }
+  
+  // 3. I2C operations (health updated automatically via tracked wrappers)
+  Status st = readRegister(REG_X, value);
+  if (!st.ok()) return st;  // Just return - health already updated
+  
+  return writeRegister(REG_Y, newValue);  // Health updated automatically
+}
+```
+
+### Multi-Step Operations
+
+Each I2C transaction updates health independently. This is intentional:
+
+```cpp
+Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
+  if (!_initialized) return Status::Error(Err::NOT_INITIALIZED, ...);
+  if (invalid params) return Status::Error(Err::INVALID_PARAM, ...);
+  
+  // Each call updates health automatically
+  Status st = readRegister(REG_ALARM_MINUTE, minReg);
+  if (!st.ok()) return st;
+  
+  st = readRegister(REG_ALARM_HOUR, hourReg);
+  if (!st.ok()) return st;
+  
+  // ... modify ...
+  
+  st = writeRegister(REG_ALARM_MINUTE, minReg);
+  if (!st.ok()) return st;
+  
+  return writeRegister(REG_ALARM_DATE, dateReg);
+}
+```
+
+---
+
+## 8. Diagnostics — Use Raw Path
+
+### `probe()` — No Health Tracking
+
+```cpp
+Status probe() {
+  uint8_t dummy = 0;
+  Status st = _readRegisterRaw(REG_STATUS, dummy);
+  
+  if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
+    return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding");
+  }
+  
+  // Do NOT call _updateHealth() - diagnostic only
+  return st;
+}
+```
+
+**Key Properties**:
+- Can be called in ANY state (even UNINIT)
+- Does NOT modify `_driverState`
+- Does NOT update health counters
+- Uses `_readRegisterRaw()` → `_i2cWriteReadRaw()`
+
+---
+
+## 9. Lifecycle Functions
+
+### `begin()`
 
 ```cpp
 Status begin(const Config& config) {
@@ -189,34 +357,46 @@ Status begin(const Config& config) {
   // Clamp threshold
   if (_config.offlineThreshold < 1) _config.offlineThreshold = 1;
   
-  // Validate config (no _updateHealth for config errors)
+  // Validate config (no health tracking for config errors)
   if (!_config.i2cWrite || !_config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C callbacks null");
   }
   
-  // Probe device (no health update)
+  // Probe device (uses raw path - no health tracking)
   Status st = probe();
-  if (!st.ok()) {
-    _updateHealth(st);  // Track the failure
-    return st;
-  }
+  if (!st.ok()) return st;
   
-  // Apply config
+  // Apply config (uses tracked path - health updated automatically)
   st = _applyConfig();
-  if (!st.ok() && st.code != Err::IN_PROGRESS) {
-    _updateHealth(st);
-    return st;
-  }
+  if (!st.ok() && st.code != Err::IN_PROGRESS) return st;
   
   _initialized = true;
-  _updateHealth(Status::Ok());  // Sets READY
+  _driverState = DriverState::READY;
   return Status::Ok();
 }
 ```
 
-### `void end()`
+### `recover()`
 
-**Purpose**: Deinitialize driver.
+```cpp
+Status recover() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  
+  // Probe uses raw path (no health tracking)
+  Status st = probe();
+  if (!st.ok()) return st;
+  
+  // Reapply config uses tracked path (health updated automatically)
+  st = _applyConfig();
+  if (st.ok()) return Status::Ok();
+  
+  return st;
+}
+```
+
+### `end()`
 
 ```cpp
 void end() {
@@ -233,72 +413,9 @@ void end() {
 }
 ```
 
-### `void tick(uint32_t nowMs)`
-
-**Purpose**: Advance async state machines (EEPROM only).
-
-- Does **NOT** perform automatic recovery
-- Does **NOT** update health tracking
-- Only drives EEPROM persistence state machine
-
 ---
 
-## 6. Public API — Diagnostics
-
-### `Status probe()`
-
-**Purpose**: Check device presence without affecting state.
-
-```cpp
-Status probe() {
-  uint8_t dummy = 0;
-  Status st = _readRegisterRaw(REG_STATUS, dummy);
-  
-  if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
-    return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
-  }
-  
-  // Do NOT call _updateHealth() - diagnostic only
-  return st;
-}
-```
-
-**Key Properties**:
-- Can be called in ANY state (even UNINIT)
-- Does NOT modify `_driverState`
-- Does NOT update health counters
-- Uses `_readRegisterRaw()` to bypass tracking
-
-### `Status recover()`
-
-**Purpose**: Manual recovery from OFFLINE state.
-
-```cpp
-Status recover() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  
-  Status st = probe();
-  if (!st.ok()) {
-    _updateHealth(st);  // Track failed recovery attempt
-    return st;
-  }
-  
-  st = _applyConfig();
-  _updateHealth(st);  // Success → READY, failure → track it
-  return st;
-}
-```
-
-**Key Properties**:
-- Requires `_initialized == true`
-- On success: resets counters, sets READY
-- On failure: increments counters, may transition to OFFLINE
-
----
-
-## 7. Public API — Health Getters
+## 10. Public Health Getters
 
 | Function | Return Type | Description |
 |----------|-------------|-------------|
@@ -311,203 +428,40 @@ Status recover() {
 | `totalFailures()` | `uint32_t` | Lifetime failure count |
 | `totalSuccess()` | `uint32_t` | Lifetime success count |
 
-```cpp
-DriverState state() const { return _driverState; }
-
-bool isOnline() const {
-  return _driverState == DriverState::READY || 
-         _driverState == DriverState::DEGRADED;
-}
-
-uint32_t lastOkMs() const { return _lastOkMs; }
-uint32_t lastErrorMs() const { return _lastErrorMs; }
-Status lastError() const { return _lastError; }
-uint8_t consecutiveFailures() const { return _consecutiveFailures; }
-uint32_t totalFailures() const { return _totalFailures; }
-uint32_t totalSuccess() const { return _totalSuccess; }
-```
-
 ---
 
-## 8. Public API — Device Operations Pattern
+## 11. Summary: Transport Wrapper Functions
 
-All public methods that perform I2C follow this pattern:
-
-```cpp
-Status someOperation(params...) {
-  // 1. Precondition check (no health update)
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  
-  // 2. Parameter validation (no health update)
-  if (invalidParams) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid parameters");
-  }
-  
-  // 3. I2C operations (track health on result)
-  Status st = readRegister(REG_X, value);
-  if (!st.ok()) return _updateHealth(st);
-  
-  st = writeRegister(REG_Y, newValue);
-  return _updateHealth(st);  // Final result
-}
-```
-
-### Multi-Step Operations
-
-For operations with multiple I2C calls, count as **ONE logical operation**:
-- Call `_updateHealth()` on early exit (failure)
-- Call `_updateHealth()` on final result (success or failure)
-- Do NOT call multiple times for intermediate steps
-
----
-
-## 9. I2C Transport Abstraction
-
-The driver does NOT own I2C. Transport is injected via Config:
-
-```cpp
-// Function pointer types
-using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
-                               uint32_t timeoutMs, void* user);
-
-using I2cWriteReadFn = Status (*)(uint8_t addr, 
-                                   const uint8_t* txData, size_t txLen,
-                                   uint8_t* rxData, size_t rxLen,
-                                   uint32_t timeoutMs, void* user);
-
-struct Config {
-  I2cWriteFn i2cWrite = nullptr;         // Write-only operations
-  I2cWriteReadFn i2cWriteRead = nullptr; // Write-then-read (register reads)
-  void* i2cUser = nullptr;               // User context (e.g., &Wire)
-  uint8_t i2cAddress = 0x51;
-  uint32_t i2cTimeoutMs = 100;
-};
-```
-
-| Callback | Purpose | I2C Sequence |
-|----------|---------|--------------|
-| `i2cWrite` | Write data to device | START → ADDR+W → DATA → STOP |
-| `i2cWriteRead` | Read registers | START → ADDR+W → REG → RESTART → ADDR+R → DATA → STOP |
-
----
-
-## 10. Naming Conventions
-
-| Element | Convention | Example |
-|---------|------------|---------|
-| Private members | `_camelCase` | `_driverState`, `_lastOkMs` |
-| Public methods | `camelCase` | `probe()`, `recover()`, `isOnline()` |
-| Private helpers | `_camelCase` | `_updateHealth()`, `_applyConfig()` |
-| Enum values | `CAPS_CASE` | `UNINIT`, `READY`, `OFFLINE` |
-| Config fields | `camelCase` | `offlineThreshold`, `i2cTimeoutMs` |
-
----
-
-## 11. Summary Table
-
-### Private Members Added
-
-| Name | Type | Purpose |
-|------|------|---------|
-| `_driverState` | `DriverState` | Current operational state |
-| `_lastOkMs` | `uint32_t` | Last success timestamp |
-| `_lastErrorMs` | `uint32_t` | Last error timestamp |
-| `_lastError` | `Status` | Most recent error |
-| `_consecutiveFailures` | `uint8_t` | Sequential failure count |
-| `_totalFailures` | `uint32_t` | Lifetime failures |
-| `_totalSuccess` | `uint32_t` | Lifetime successes |
-
-### Private Methods Added
+### Added Private Members
 
 | Name | Purpose |
 |------|---------|
-| `_updateHealth(const Status&)` | Central health state manager |
-| `_readRegisterRaw(uint8_t, uint8_t&)` | Raw I2C read (no health tracking) |
-| `_applyConfig()` | Apply stored config to device |
+| `_i2cWriteReadRaw(...)` | Raw write-then-read, NO health tracking |
+| `_i2cWriteRaw(...)` | Raw write-only, NO health tracking |
+| `_i2cWriteReadTracked(...)` | Tracked write-then-read, calls `_updateHealth()` |
+| `_i2cWriteTracked(...)` | Tracked write-only, calls `_updateHealth()` |
+| `_readRegisterRaw(...)` | Raw single register read (for diagnostics) |
+| `_updateHealth(...)` | Health state manager (called only by tracked wrappers) |
 
-### Public Methods Added
+### Functions Using Tracked Wrappers
 
-| Name | Returns | Purpose |
-|------|---------|---------|
-| `probe()` | `Status` | Check device presence (no state change) |
-| `recover()` | `Status` | Manual recovery attempt |
-| `state()` | `DriverState` | Get current state |
-| `isOnline()` | `bool` | Check if operational |
-| `lastOkMs()` | `uint32_t` | Last success timestamp |
-| `lastErrorMs()` | `uint32_t` | Last error timestamp |
-| `lastError()` | `Status` | Most recent error |
-| `consecutiveFailures()` | `uint8_t` | Sequential failures |
-| `totalFailures()` | `uint32_t` | Lifetime failures |
-| `totalSuccess()` | `uint32_t` | Lifetime successes |
+- `readRegs()` → `_i2cWriteReadTracked()`
+- `writeRegs()` → `_i2cWriteTracked()`
+- All public API via `readRegister()`/`writeRegister()`
 
-### Config Fields Added
+### Functions Using Raw Wrappers
 
-| Name | Type | Default | Purpose |
-|------|------|---------|---------|
-| `offlineThreshold` | `uint8_t` | `3` | Failures before OFFLINE |
+- `probe()` → `_readRegisterRaw()` → `_i2cWriteReadRaw()`
+- `_applyConfig()` reads → `_readRegisterRaw()` → `_i2cWriteReadRaw()`
 
 ---
 
-## 12. Example Usage
+## 12. Key Design Principles
 
-```cpp
-#include "Driver.h"
-
-Driver device;
-
-void setup() {
-  Config cfg;
-  cfg.i2cWrite = myI2cWrite;
-  cfg.i2cWriteRead = myI2cWriteRead;
-  cfg.i2cUser = &Wire;
-  cfg.offlineThreshold = 3;
-  
-  // Optional pre-check
-  if (!device.probe().ok()) {
-    Serial.println("Device not found!");
-    return;
-  }
-  
-  if (!device.begin(cfg).ok()) {
-    Serial.println("Init failed!");
-    return;
-  }
-}
-
-void loop() {
-  device.tick(millis());
-  
-  if (!device.isOnline()) {
-    // Manual recovery every 5s
-    static uint32_t lastTry = 0;
-    if (millis() - lastTry > 5000) {
-      if (device.recover().ok()) {
-        Serial.println("Recovered!");
-      }
-      lastTry = millis();
-    }
-    return;
-  }
-  
-  // Normal operations...
-  Status st = device.doSomething();
-  if (!st.ok()) {
-    Serial.printf("Error: %s (failures: %d)\n", 
-                  st.msg, device.consecutiveFailures());
-  }
-}
-```
-
----
-
-## 13. Key Design Principles
-
-1. **Centralized health tracking** — All state changes flow through `_updateHealth()`
-2. **No implicit recovery** — Application controls retry strategy
-3. **Diagnostic isolation** — `probe()` never affects health counters
-4. **Config vs I2C errors** — Only real bus transactions affect health
+1. **Centralized health tracking** — All `_updateHealth()` calls inside tracked transport wrappers
+2. **Public API never calls `_updateHealth()`** — Tracking is automatic via wrappers
+3. **Diagnostic isolation** — `probe()` and raw register reads bypass health tracking
+4. **Precondition errors don't affect health** — Config/param validation errors return early
 5. **IN_PROGRESS is success** — Queued async ops don't count as failures
-6. **Single logical operation** — Multi-step ops count once, not per-transaction
+6. **Per-transaction tracking** — Multi-step ops update health per I2C call (intentional)
 7. **Transport agnostic** — Driver never touches Wire/I2C directly

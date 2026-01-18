@@ -755,9 +755,22 @@ class RV3032 {
   uint32_t _totalFailures = 0;         ///< Total failures since begin()
   uint32_t _totalSuccess = 0;          ///< Total successes since begin()
   
-  // I2C operations
+  // Raw I2C transport (no health tracking) - for diagnostics only
+  Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
+  Status _i2cWriteRaw(const uint8_t* buf, size_t len);
+
+  // Tracked I2C transport (with health tracking) - for normal operations
+  Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
+  Status _i2cWriteTracked(const uint8_t* buf, size_t len);
+
+  // Register-level I2C helpers (use tracked transport internally)
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
   Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
+  
+  // Raw register access (no health tracking) - for diagnostics
+  Status _readRegisterRaw(uint8_t reg, uint8_t& value);
+
+  // EEPROM operations
   Status writeEepromRegister(uint8_t reg, uint8_t value);
   void processEeprom(uint32_t now_ms);
   Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
@@ -766,9 +779,10 @@ class RV3032 {
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
 
-  // Health tracking helpers
-  Status _readRegisterRaw(uint8_t reg, uint8_t& value);
+  // Health tracking (called only by tracked transport wrappers)
   Status _updateHealth(const Status& st);
+  
+  // Configuration application helper
   Status _applyConfig();
 
   // Conversion helpers

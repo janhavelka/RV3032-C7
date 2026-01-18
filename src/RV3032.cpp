@@ -43,7 +43,7 @@ Status RV3032::begin(const Config& config) {
     _config.offlineThreshold = 1;
   }
 
-  // Validate configuration - do NOT call _updateHealth for config errors
+  // Validate configuration - no health tracking for config errors
   if (!_config.i2cWrite || !_config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
   }
@@ -57,25 +57,22 @@ Status RV3032::begin(const Config& config) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
   }
 
-  // Test device presence (probe does not update health)
+  // Test device presence (probe uses raw I2C - no health tracking)
   Status st = probe();
   if (!st.ok()) {
-    // First real I2C attempt failed - update health
-    _updateHealth(st);
     return st;
   }
 
-  // Apply stored configuration using shared helper
+  // Apply stored configuration (uses tracked I2C internally)
+  // Health is updated automatically via tracked wrappers
   st = _applyConfig();
   if (!st.ok() && st.code != Err::IN_PROGRESS) {
-    // Config application failed
-    _updateHealth(st);
     return st;
   }
 
-  // Success - set initialized flag and update health
+  // Success - set initialized flag and transition to READY
   _initialized = true;
-  _updateHealth(Status::Ok());  // Sets state to READY, updates counters
+  _driverState = DriverState::READY;
 
   return Status::Ok();
 }
@@ -134,37 +131,60 @@ Status RV3032::probe() {
 Status RV3032::recover() {
   // Precondition: must be initialized to recover
   if (!_initialized) {
-    // Do NOT call _updateHealth() for precondition errors
+    // No health tracking for precondition errors
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
 
-  // Verify device presence first (probe does not update health)
+  // Verify device presence first (probe uses raw I2C)
   Status st = probe();
   if (!st.ok()) {
-    // Device still not responding - update health to track this attempt
-    _updateHealth(st);
-    return st;
+    // Track failed recovery attempt - this IS a real I2C failure
+    // (unlike probe() called standalone, here we're actively trying to recover)
+    return _updateHealth(st);
   }
 
-  // Re-apply stored configuration using shared helper
+  // Re-apply stored configuration (uses tracked I2C internally)
+  // Health is updated automatically via tracked wrappers
   st = _applyConfig();
-  _updateHealth(st);
-
   if (st.ok()) {
-    // Recovery successful - _updateHealth() already set state to READY
+    // Recovery successful - tracked wrappers already updated health/state
     return Status::Ok();
   }
 
   return st;
 }
 
-Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
+// ===== I2C Transport Wrappers =====
+
+Status RV3032::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
   if (!_config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
   }
-  uint8_t tx = reg;
-  return _config.i2cWriteRead(_config.i2cAddress, &tx, 1, &value, 1,
+  return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
                               _config.i2cTimeoutMs, _config.i2cUser);
+}
+
+Status RV3032::_i2cWriteRaw(const uint8_t* buf, size_t len) {
+  if (!_config.i2cWrite) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C write callback null");
+  }
+  return _config.i2cWrite(_config.i2cAddress, buf, len,
+                          _config.i2cTimeoutMs, _config.i2cUser);
+}
+
+Status RV3032::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
+  Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
+  return _updateHealth(st);
+}
+
+Status RV3032::_i2cWriteTracked(const uint8_t* buf, size_t len) {
+  Status st = _i2cWriteRaw(buf, len);
+  return _updateHealth(st);
+}
+
+Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
+  uint8_t tx = reg;
+  return _i2cWriteReadRaw(&tx, 1, &value, 1);
 }
 
 Status RV3032::_updateHealth(const Status& st) {
@@ -177,14 +197,14 @@ Status RV3032::_updateHealth(const Status& st) {
     _consecutiveFailures = 0;
     _totalSuccess++;
 
-    // Transition from DEGRADED or OFFLINE back to READY
-    if (_driverState == DriverState::DEGRADED ||
-        _driverState == DriverState::OFFLINE) {
-      _driverState = DriverState::READY;
-    }
-    // Also handle UNINIT → READY for begin() success
-    if (_driverState == DriverState::UNINIT && _initialized) {
-      _driverState = DriverState::READY;
+    // State transitions only when initialized
+    // (during begin(), we track counters but don't transition states)
+    if (_initialized) {
+      // Transition from DEGRADED or OFFLINE back to READY
+      if (_driverState == DriverState::DEGRADED ||
+          _driverState == DriverState::OFFLINE) {
+        _driverState = DriverState::READY;
+      }
     }
   } else {
     // Failure path
@@ -193,14 +213,18 @@ Status RV3032::_updateHealth(const Status& st) {
     _consecutiveFailures++;
     _totalFailures++;
 
-    // Transition READY → DEGRADED on first failure
-    if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
-      _driverState = DriverState::DEGRADED;
-    }
+    // State transitions only when initialized
+    // (during begin(), we track counters but don't transition states)
+    if (_initialized) {
+      // Transition READY → DEGRADED on first failure
+      if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
+        _driverState = DriverState::DEGRADED;
+      }
 
-    // Transition DEGRADED → OFFLINE when threshold reached
-    if (_consecutiveFailures >= _config.offlineThreshold) {
-      _driverState = DriverState::OFFLINE;
+      // Transition DEGRADED → OFFLINE when threshold reached
+      if (_consecutiveFailures >= _config.offlineThreshold) {
+        _driverState = DriverState::OFFLINE;
+      }
     }
   }
 
@@ -248,7 +272,8 @@ Status RV3032::readTime(DateTime& out) {
   uint8_t buf[7] = {0};
   Status st = readRegs(cmd::REG_SECONDS, buf, sizeof(buf));
   if (!st.ok()) {
-    return _updateHealth(st);
+    // Health already updated by tracked wrapper
+    return st;
   }
 
   const uint8_t secReg = static_cast<uint8_t>(buf[0] & 0x7F);
@@ -261,8 +286,7 @@ Status RV3032::readTime(DateTime& out) {
 
   if (!isValidBcd(secReg) || !isValidBcd(minReg) || !isValidBcd(hourReg) ||
       !isValidBcd(dayReg) || !isValidBcd(monthReg) || !isValidBcd(yearReg)) {
-    // I2C succeeded but data is invalid - still count as success for health
-    _updateHealth(Status::Ok());
+    // I2C succeeded (health already updated) but data is invalid
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid BCD");
   }
 
@@ -275,12 +299,12 @@ Status RV3032::readTime(DateTime& out) {
   out.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
 
   if (!isValidDateTime(out)) {
-    // I2C succeeded but data is invalid - still count as success for health
-    _updateHealth(Status::Ok());
+    // I2C succeeded (health already updated) but data is invalid
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid date/time");
   }
 
-  return _updateHealth(Status::Ok());
+  // Health already updated by tracked wrapper in readRegs()
+  return Status::Ok();
 }
 
 Status RV3032::setTime(const DateTime& time) {
@@ -305,7 +329,8 @@ Status RV3032::setTime(const DateTime& time) {
     binToBcd(static_cast<uint8_t>(time.year % 100))
   };
 
-  return _updateHealth(writeRegs(cmd::REG_SECONDS, buf, sizeof(buf)));
+  // Health updated automatically by tracked wrapper
+  return writeRegs(cmd::REG_SECONDS, buf, sizeof(buf));
 }
 
 Status RV3032::readUnix(uint32_t& out) {
@@ -345,21 +370,21 @@ Status RV3032::setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
 
   uint8_t minReg = 0, hourReg = 0, dateReg = 0;
   Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_DATE, dateReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
 
   minReg = static_cast<uint8_t>((minReg & 0x80) | binToBcd(minute));
   hourReg = static_cast<uint8_t>((hourReg & 0x80) | binToBcd(hour));
   dateReg = static_cast<uint8_t>((dateReg & 0x80) | binToBcd(date));
 
   st = writeRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = writeRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return _updateHealth(st);
-  return _updateHealth(writeRegister(cmd::REG_ALARM_DATE, dateReg));
+  if (!st.ok()) return st;
+  return writeRegister(cmd::REG_ALARM_DATE, dateReg);
 }
 
 Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
@@ -369,21 +394,21 @@ Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
 
   uint8_t minReg = 0, hourReg = 0, dateReg = 0;
   Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_DATE, dateReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
 
   minReg = static_cast<uint8_t>((minReg & 0x7F) | (matchMinute ? 0 : 0x80));
   hourReg = static_cast<uint8_t>((hourReg & 0x7F) | (matchHour ? 0 : 0x80));
   dateReg = static_cast<uint8_t>((dateReg & 0x7F) | (matchDate ? 0 : 0x80));
 
   st = writeRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = writeRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return _updateHealth(st);
-  return _updateHealth(writeRegister(cmd::REG_ALARM_DATE, dateReg));
+  if (!st.ok()) return st;
+  return writeRegister(cmd::REG_ALARM_DATE, dateReg);
 }
 
 Status RV3032::getAlarmConfig(AlarmConfig& out) {
@@ -393,11 +418,11 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
 
   uint8_t minReg = 0, hourReg = 0, dateReg = 0;
   Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_ALARM_DATE, dateReg);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
 
   out.matchMinute = ((minReg & 0x80) == 0);
   out.matchHour = ((hourReg & 0x80) == 0);
@@ -406,7 +431,7 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
   out.hour = bcdToBin(static_cast<uint8_t>(hourReg & 0x7F));
   out.date = bcdToBin(static_cast<uint8_t>(dateReg & 0x7F));
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 Status RV3032::getAlarmFlag(bool& triggered) {
@@ -417,11 +442,11 @@ Status RV3032::getAlarmFlag(bool& triggered) {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   triggered = ((status & (1u << cmd::STATUS_AF_BIT)) != 0);
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 Status RV3032::clearAlarmFlag() {
@@ -436,13 +461,13 @@ Status RV3032::enableAlarmInterrupt(bool enable) {
   uint8_t control2 = 0;
   Status st = readRegister(cmd::REG_CONTROL2, control2);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newControl2 = enable ? static_cast<uint8_t>(control2 | (1u << cmd::CTRL2_AIE_BIT))
                                : static_cast<uint8_t>(control2 & ~(1u << cmd::CTRL2_AIE_BIT));
 
-  return _updateHealth(writeRegister(cmd::REG_CONTROL2, newControl2));
+  return writeRegister(cmd::REG_CONTROL2, newControl2);
 }
 
 Status RV3032::getAlarmInterruptEnabled(bool& enabled) {
@@ -453,11 +478,11 @@ Status RV3032::getAlarmInterruptEnabled(bool& enabled) {
   uint8_t control2 = 0;
   Status st = readRegister(cmd::REG_CONTROL2, control2);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   enabled = ((control2 & (1u << cmd::CTRL2_AIE_BIT)) != 0);
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== Timer Operations =====
@@ -473,7 +498,7 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   uint8_t control1 = 0;
   Status st = readRegister(cmd::REG_CONTROL1, control1);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   control1 = static_cast<uint8_t>(control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT)));
@@ -484,15 +509,15 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
 
   st = writeRegister(cmd::REG_CONTROL1, control1);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
   uint8_t high = static_cast<uint8_t>((ticks >> 8) & 0x0F);
 
   st = writeRegister(cmd::REG_TIMER_LOW, low);
-  if (!st.ok()) return _updateHealth(st);
-  return _updateHealth(writeRegister(cmd::REG_TIMER_HIGH, high));
+  if (!st.ok()) return st;
+  return writeRegister(cmd::REG_TIMER_HIGH, high);
 }
 
 Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {
@@ -502,17 +527,17 @@ Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {
 
   uint8_t control1 = 0, low = 0, high = 0;
   Status st = readRegister(cmd::REG_CONTROL1, control1);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_TIMER_LOW, low);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_TIMER_HIGH, high);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
 
   ticks = static_cast<uint16_t>((static_cast<uint16_t>(high & 0x0F) << 8) | low);
   freq = static_cast<TimerFrequency>(control1 & cmd::CTRL1_TD_MASK);
   enabled = ((control1 & (1u << cmd::CTRL1_TE_BIT)) != 0);
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== Clock Output Operations =====
@@ -525,13 +550,13 @@ Status RV3032::setClkoutEnabled(bool enabled) {
   uint8_t coe = 0;
   Status st = readRegister(cmd::REG_EEPROM_PMU, coe);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newCoe = enabled ? static_cast<uint8_t>(coe & ~cmd::PMU_CLKOUT_DISABLE)
                            : static_cast<uint8_t>(coe | cmd::PMU_CLKOUT_DISABLE);
 
-  return _updateHealth(writeEepromRegister(cmd::REG_EEPROM_PMU, newCoe));
+  return writeEepromRegister(cmd::REG_EEPROM_PMU, newCoe);
 }
 
 Status RV3032::getClkoutEnabled(bool& enabled) {
@@ -542,11 +567,11 @@ Status RV3032::getClkoutEnabled(bool& enabled) {
   uint8_t coe = 0;
   Status st = readRegister(cmd::REG_EEPROM_PMU, coe);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   enabled = ((coe & cmd::PMU_CLKOUT_DISABLE) == 0);
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
@@ -557,13 +582,13 @@ Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
   uint8_t clkout = 0;
   Status st = readRegister(cmd::REG_EEPROM_CLKOUT2, clkout);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newClkout = static_cast<uint8_t>(clkout & ~cmd::CLKOUT_FREQ_MASK);
   newClkout = static_cast<uint8_t>(newClkout | ((static_cast<uint8_t>(freq) << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK));
 
-  return _updateHealth(writeEepromRegister(cmd::REG_EEPROM_CLKOUT2, newClkout));
+  return writeEepromRegister(cmd::REG_EEPROM_CLKOUT2, newClkout);
 }
 
 Status RV3032::getClkoutFrequency(ClkoutFrequency& freq) {
@@ -574,7 +599,7 @@ Status RV3032::getClkoutFrequency(ClkoutFrequency& freq) {
   uint8_t clkout = 0;
   Status st = readRegister(cmd::REG_EEPROM_CLKOUT2, clkout);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t value = static_cast<uint8_t>((clkout & cmd::CLKOUT_FREQ_MASK) >> cmd::CLKOUT_FREQ_SHIFT);
@@ -583,7 +608,7 @@ Status RV3032::getClkoutFrequency(ClkoutFrequency& freq) {
   }
   freq = static_cast<ClkoutFrequency>(value);
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== Calibration Operations =====
@@ -606,12 +631,12 @@ Status RV3032::setOffsetPpm(float ppm) {
   uint8_t current = 0;
   Status st = readRegister(cmd::REG_EEPROM_OFFSET, current);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t raw = static_cast<uint8_t>(value & 0x3F);
   uint8_t newValue = static_cast<uint8_t>((current & 0xC0) | raw);
-  return _updateHealth(writeEepromRegister(cmd::REG_EEPROM_OFFSET, newValue));
+  return writeEepromRegister(cmd::REG_EEPROM_OFFSET, newValue);
 }
 
 Status RV3032::getOffsetPpm(float& ppm) {
@@ -622,14 +647,14 @@ Status RV3032::getOffsetPpm(float& ppm) {
   uint8_t raw = 0;
   Status st = readRegister(cmd::REG_EEPROM_OFFSET, raw);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   raw = static_cast<uint8_t>(raw & 0x3F);
   int8_t signedRaw = (raw & 0x20) ? static_cast<int8_t>(raw | 0xC0) : static_cast<int8_t>(raw);
   ppm = static_cast<float>(signedRaw) * 0.2384f;
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== Temperature Sensor =====
@@ -642,7 +667,7 @@ Status RV3032::readTemperatureC(float& celsius) {
   uint8_t buf[2] = {0};
   Status st = readRegs(cmd::REG_TEMP_LSB, buf, sizeof(buf));
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t lsb = buf[0];
@@ -651,7 +676,7 @@ Status RV3032::readTemperatureC(float& celsius) {
                 | static_cast<int16_t>(lsb >> 4);
   celsius = static_cast<float>(raw) / 16.0f;
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== External Event Input =====
@@ -664,13 +689,13 @@ Status RV3032::setEviEdge(bool rising) {
   uint8_t control = 0;
   Status st = readRegister(cmd::REG_EVI_CONTROL, control);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newControl = rising ? static_cast<uint8_t>(control | (1u << cmd::EVI_EB_BIT))
                               : static_cast<uint8_t>(control & ~(1u << cmd::EVI_EB_BIT));
 
-  return _updateHealth(writeRegister(cmd::REG_EVI_CONTROL, newControl));
+  return writeRegister(cmd::REG_EVI_CONTROL, newControl);
 }
 
 Status RV3032::setEviDebounce(EviDebounce debounce) {
@@ -681,13 +706,13 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
   uint8_t control = 0;
   Status st = readRegister(cmd::REG_EVI_CONTROL, control);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newControl = static_cast<uint8_t>(control & ~cmd::EVI_DB_MASK);
   newControl = static_cast<uint8_t>(newControl | ((static_cast<uint8_t>(debounce) << cmd::EVI_DB_SHIFT) & cmd::EVI_DB_MASK));
 
-  return _updateHealth(writeRegister(cmd::REG_EVI_CONTROL, newControl));
+  return writeRegister(cmd::REG_EVI_CONTROL, newControl);
 }
 
 Status RV3032::setEviOverwrite(bool enable) {
@@ -698,13 +723,13 @@ Status RV3032::setEviOverwrite(bool enable) {
   uint8_t control = 0;
   Status st = readRegister(cmd::REG_TS_CONTROL, control);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   uint8_t newControl = enable ? static_cast<uint8_t>(control | (1u << cmd::TS_OVERWRITE_BIT))
                               : static_cast<uint8_t>(control & ~(1u << cmd::TS_OVERWRITE_BIT));
 
-  return _updateHealth(writeRegister(cmd::REG_TS_CONTROL, newControl));
+  return writeRegister(cmd::REG_TS_CONTROL, newControl);
 }
 
 Status RV3032::getEviConfig(EviConfig& out) {
@@ -714,15 +739,15 @@ Status RV3032::getEviConfig(EviConfig& out) {
 
   uint8_t evi = 0, ts = 0;
   Status st = readRegister(cmd::REG_EVI_CONTROL, evi);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
   st = readRegister(cmd::REG_TS_CONTROL, ts);
-  if (!st.ok()) return _updateHealth(st);
+  if (!st.ok()) return st;
 
   out.rising = ((evi & (1u << cmd::EVI_EB_BIT)) != 0);
   out.debounce = static_cast<EviDebounce>((evi & cmd::EVI_DB_MASK) >> cmd::EVI_DB_SHIFT);
   out.overwrite = ((ts & (1u << cmd::TS_OVERWRITE_BIT)) != 0);
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 // ===== Status Operations =====
@@ -731,7 +756,7 @@ Status RV3032::readStatus(uint8_t& status) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
-  return _updateHealth(readRegister(cmd::REG_STATUS, status));
+  return readRegister(cmd::REG_STATUS, status);
 }
 
 Status RV3032::clearStatus(uint8_t mask) {
@@ -742,11 +767,11 @@ Status RV3032::clearStatus(uint8_t mask) {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   status = static_cast<uint8_t>(status & ~mask);
-  return _updateHealth(writeRegister(cmd::REG_STATUS, status));
+  return writeRegister(cmd::REG_STATUS, status);
 }
 
 // ===== Low-Level Operations =====
@@ -833,9 +858,6 @@ bool RV3032::parseBuildTime(DateTime& out) {
 // ===== Private Helper Functions =====
 
 Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
-  if (!_config.i2cWriteRead) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C read callback is null");
-  }
   if (!buf || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid I2C read parameters");
   }
@@ -845,14 +867,11 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
   }
 
   uint8_t tx = reg;
-  return _config.i2cWriteRead(_config.i2cAddress, &tx, 1, buf, len,
-                              _config.i2cTimeoutMs, _config.i2cUser);
+  // Use tracked wrapper - health is updated automatically
+  return _i2cWriteReadTracked(&tx, 1, buf, len);
 }
 
 Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
-  if (!_config.i2cWrite) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C write callback is null");
-  }
   if (!buf || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid I2C write parameters");
   }
@@ -865,8 +884,8 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
   uint8_t tx[kMaxWriteLen] = {0};
   tx[0] = reg;
   std::memcpy(&tx[1], buf, len);
-  return _config.i2cWrite(_config.i2cAddress, tx, len + 1,
-                          _config.i2cTimeoutMs, _config.i2cUser);
+  // Use tracked wrapper - health is updated automatically
+  return _i2cWriteTracked(tx, len + 1);
 }
 
 Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
@@ -1196,7 +1215,7 @@ Status RV3032::readValidity(ValidityFlags& out) {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   out.voltageLow = (status & 0x01) != 0;      // VLF bit
@@ -1204,46 +1223,46 @@ Status RV3032::readValidity(ValidityFlags& out) {
   out.backupSwitched = (status & 0x04) != 0;  // BSF bit
   out.timeInvalid = out.powerOnReset || out.voltageLow;
 
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 Status RV3032::clearPowerOnResetFlag() {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   // Clear PORF (bit 1)
   status &= ~0x02;
 
-  return _updateHealth(writeRegister(cmd::REG_STATUS, status));
+  return writeRegister(cmd::REG_STATUS, status);
 }
 
 Status RV3032::clearVoltageLowFlag() {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   // Clear VLF (bit 0)
   status &= ~0x01;
 
-  return _updateHealth(writeRegister(cmd::REG_STATUS, status));
+  return writeRegister(cmd::REG_STATUS, status);
 }
 
 Status RV3032::clearBackupSwitchFlag() {
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
-    return _updateHealth(st);
+    return st;
   }
 
   // Clear BSF (bit 2)
   status &= ~0x04;
 
-  return _updateHealth(writeRegister(cmd::REG_STATUS, status));
+  return writeRegister(cmd::REG_STATUS, status);
 }
 
 }  // namespace RV3032
