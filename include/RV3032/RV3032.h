@@ -23,10 +23,10 @@
  * RV3032::RV3032 rtc;
  * 
  * void setup() {
- *   Wire.begin();
- *   
  *   RV3032::Config cfg;
- *   cfg.wire = &Wire;
+ *   cfg.i2cWrite = myI2cWrite;
+ *   cfg.i2cWriteRead = myI2cWriteRead;
+ *   cfg.i2cUser = myI2cContext;
  *   
  *   RV3032::Status st = rtc.begin(cfg);
  *   if (!st.ok()) {
@@ -177,7 +177,7 @@ struct EviConfig {
  * tick() advances a non-blocking EEPROM state machine (one I2C op per call).
  * 
  * @par Resource Ownership
- * I2C interface passed via Config. No hardcoded pins or resources.
+ * I2C transport passed via Config. No hardcoded pins or resources.
  * 
  * @par Memory
  * All allocation in begin(). Zero allocation in tick() and normal operations.
@@ -192,7 +192,7 @@ class RV3032 {
    * 
    * @param config Hardware and behavior configuration
    * @return OK on success (library is ready to use), error otherwise
-   * @note config.wire must be initialized (Wire.begin() called) before this.
+   * @note The transport callbacks must be provided in Config.
    *       If EEPROM writes are enabled, call tick() to complete EEPROM work.
    *       Use getEepromStatus() to check if EEPROM persistence is active.
    */

@@ -16,7 +16,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-#include "examples/common/BoardPins.h"
+#include "examples/common/BoardConfig.h"
+#include "examples/common/I2cTransport.h"
 #include "examples/common/Log.h"
 #include "RV3032/Version.h"
 #include "RV3032/RV3032.h"
@@ -470,13 +471,18 @@ void setup() {
   print_help();
 
   // Initialize I2C
-  LOGI("Initializing I2C (SDA=%d, SCL=%d)...", pins::I2C_SDA, pins::I2C_SCL);
-  Wire.begin(pins::I2C_SDA, pins::I2C_SCL);
+  LOGI("Initializing I2C (SDA=%d, SCL=%d)...", board::I2C_SDA, board::I2C_SCL);
+  if (!board::initI2c()) {
+    LOGE("I2C init failed");
+    return;
+  }
 
   // Initialize RTC
   LOGI("Initializing RTC...");
   RV3032::Config cfg;
-  cfg.wire = &Wire;
+  cfg.i2cWrite = transport::wireWrite;
+  cfg.i2cWriteRead = transport::wireWriteRead;
+  cfg.i2cUser = &Wire;
   cfg.backupMode = RV3032::BackupSwitchMode::Level;
   cfg.enableEepromWrites = false;  // RAM-only mode for frequent testing
 

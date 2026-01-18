@@ -4,8 +4,8 @@
  */
 
 #include "RV3032/RV3032.h"
+#include <Arduino.h>
 #include <cstring>
-#include <Wire.h>
 
 namespace RV3032 {
 
@@ -74,8 +74,8 @@ Status RV3032::begin(const Config& config) {
   _eepromLastStatus = Status::Ok();
 
   // Validate configuration
-  if (!_config.wire) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C wire pointer is null");
+  if (!_config.i2cWrite || !_config.i2cWriteRead) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
   }
   if (_config.i2cTimeoutMs == 0) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
@@ -87,24 +87,20 @@ Status RV3032::begin(const Config& config) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
   }
 
-#if defined(ARDUINO_ARCH_ESP32)
-  uint32_t timeoutMs = _config.i2cTimeoutMs;
-  if (timeoutMs > UINT16_MAX) {
-    timeoutMs = UINT16_MAX;
-  }
-  _config.wire->setTimeOut(static_cast<uint16_t>(timeoutMs));
-#endif
-
-  // Test I2C communication
-  _config.wire->beginTransmission(_config.i2cAddress);
-  uint8_t result = _config.wire->endTransmission();
-  if (result != 0) {
-    return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding on I2C", result);
+  // Test I2C communication (read status register)
+  uint8_t status = 0;
+  Status st = readRegister(kRegStatus, status);
+  (void)status;
+  if (!st.ok()) {
+    if (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT) {
+      return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding on I2C", st.detail);
+    }
+    return st;
   }
 
   // Apply backup switching mode
   uint8_t coe = 0;
-  Status st = readRegister(kRegCoe, coe);
+  st = readRegister(kRegCoe, coe);
   if (!st.ok()) {
     return st;
   }
@@ -749,59 +745,40 @@ bool RV3032::parseBuildTime(DateTime& out) {
 // ===== Private Helper Functions =====
 
 Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
-  if (!_config.wire || !buf || len == 0) {
-    return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
+  if (!_config.i2cWriteRead) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C read callback is null");
   }
-  // Wire::requestFrom() takes uint8_t for length. Reject larger reads to avoid silent truncation.
+  if (!buf || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C read parameters");
+  }
+  // Limit reads to avoid oversized transfers.
   if (len > 255) {
     return Status::Error(Err::INVALID_PARAM, "I2C read length too large");
   }
 
-  _config.wire->beginTransmission(_config.i2cAddress);
-  _config.wire->write(reg);
-  uint8_t result = _config.wire->endTransmission(false);
-  if (result != 0) {
-    return Status::Error(Err::I2C_ERROR, "I2C write failed", result);
-  }
-
-  size_t read = _config.wire->requestFrom(_config.i2cAddress, static_cast<uint8_t>(len));
-  if (read != len) {
-    return Status::Error(Err::I2C_ERROR, "I2C read length mismatch", read);
-  }
-
-  for (size_t i = 0; i < len; ++i) {
-    if (_config.wire->available()) {
-      buf[i] = static_cast<uint8_t>(_config.wire->read());
-    } else {
-      return Status::Error(Err::I2C_ERROR, "I2C data not available");
-    }
-  }
-
-  return Status::Ok();
+  uint8_t tx = reg;
+  return _config.i2cWriteRead(_config.i2cAddress, &tx, 1, buf, len,
+                              _config.i2cTimeoutMs, _config.i2cUser);
 }
 
 Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
-  if (!_config.wire || !buf || len == 0) {
-    return Status::Error(Err::I2C_ERROR, "Invalid I2C parameters");
+  if (!_config.i2cWrite) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C write callback is null");
   }
-  // Wire::write() can accept larger lengths, but practical RTC ops never exceed 255 bytes.
-  // Check prevents accidental oversized transfers.
-  if (len > 255) {
+  if (!buf || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C write parameters");
+  }
+
+  static constexpr size_t kMaxWriteLen = 16;
+  if (len > (kMaxWriteLen - 1)) {
     return Status::Error(Err::INVALID_PARAM, "I2C write length too large");
   }
 
-  _config.wire->beginTransmission(_config.i2cAddress);
-  _config.wire->write(reg);
-  for (size_t i = 0; i < len; ++i) {
-    _config.wire->write(buf[i]);
-  }
-
-  uint8_t result = _config.wire->endTransmission();
-  if (result != 0) {
-    return Status::Error(Err::I2C_ERROR, "I2C write failed", result);
-  }
-
-  return Status::Ok();
+  uint8_t tx[kMaxWriteLen] = {0};
+  tx[0] = reg;
+  std::memcpy(&tx[1], buf, len);
+  return _config.i2cWrite(_config.i2cAddress, tx, len + 1,
+                          _config.i2cTimeoutMs, _config.i2cUser);
 }
 
 Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
@@ -1182,4 +1159,3 @@ Status RV3032::clearBackupSwitchFlag() {
 }
 
 }  // namespace RV3032
-

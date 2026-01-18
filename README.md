@@ -15,7 +15,7 @@ Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock
 - **Frequency offset calibration** (+/-200 ppm range)
 - **Built-in temperature sensor** (+/-3 C accuracy)
 - **EEPROM** for persistent configuration
-- **Non-blocking API** with begin/tick/end lifecycle
+- **Deterministic lifecycle** with begin/tick/end and non-blocking EEPROM handling
 - **Unix timestamp** support
 - **No heap allocation** in steady state
 
@@ -45,16 +45,19 @@ VBAT  ->  CR2032 battery +
 ```cpp
 #include <Wire.h>
 #include "RV3032/RV3032.h"
+#include "examples/common/BoardConfig.h"  // Example-only defaults + Wire adapter
 
 RV3032::RV3032 rtc;
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin();  // Initialize I2C (default SDA=21, SCL=22)
+  board::initI2c();  // Initialize I2C (example defaults)
 
   // Configure RTC
   RV3032::Config cfg;
-  cfg.wire = &Wire;
+  cfg.i2cWrite = transport::wireWrite;
+  cfg.i2cWriteRead = transport::wireWriteRead;
+  cfg.i2cUser = &Wire;
   cfg.backupMode = RV3032::BackupSwitchMode::Level;
 
   // Initialize RTC
@@ -185,7 +188,7 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF validity flags |
 | `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
 | `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
-| `Status getEepromLastStatus() const` | Get last EEPROM commit status |
+| `Status getEepromStatus() const` | Get last EEPROM commit status |
 | `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
 | `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
 
@@ -208,7 +211,9 @@ Configuration is injected via `Config` struct. The library **never hardcodes pin
 ```cpp
 namespace RV3032 {
   struct Config {
-    TwoWire* wire = nullptr;                     // I2C interface (required)
+    I2cWriteFn i2cWrite = nullptr;               // I2C write callback (required)
+    I2cWriteReadFn i2cWriteRead = nullptr;       // I2C write-read callback (required)
+    void* i2cUser = nullptr;                     // User context (e.g., TwoWire*)
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
     uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
     BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
@@ -219,10 +224,10 @@ namespace RV3032 {
 ```
 
 **Configuration rules:**
-- `wire` must be initialized (`Wire.begin()` called) before `begin()`
+- `i2cWrite` and `i2cWriteRead` must be provided before `begin()`
 - `i2cAddress`: Valid 7-bit range 0x08-0x77
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
-- `i2cTimeoutMs`: Bounds I2C transaction time via `Wire.setTimeOut()` (default 50ms). Affects the shared I2C bus; must be >= 50ms when EEPROM writes are enabled.
+- `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
 - `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss and complete asynchronously.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 200ms)
 
@@ -268,9 +273,9 @@ if (!st.ok()) {
 
 **Threading Model:** Single-threaded by default. No FreeRTOS tasks created.
 
-**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay).
+**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout.
 
-**Resource Ownership:** I2C interface passed via `Config`. No hardcoded pins or resources.
+**Resource Ownership:** I2C transport passed via `Config`. No hardcoded pins or resources.
 
 **Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
 
@@ -283,8 +288,7 @@ if (!st.ok()) {
 
 EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
 
-EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles.
-When `enableEepromWrites = true` and `eepromNonBlocking = true`, commits run in `tick()`. Use `isEepromBusy()` to check progress and `getEepromLastStatus()` for the last commit result. If a commit is already in progress, new EEPROM writes return `BUSY`.
+EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
 ## Supported Targets
 
@@ -337,7 +341,7 @@ src/
   - RV3032.cpp          - Implementation
 examples/
   - 01_basic_bringup_cli/  - Interactive CLI example
-  - common/                - Example-only helpers (Log.h, BoardPins.h)
+  - common/                - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h, I2cScanner.h)
 platformio.ini          - Build environments
 library.json            - PlatformIO metadata
 README.md               - This file
