@@ -58,7 +58,7 @@ The bus is owned by a manager. The driver never touches `Wire` directly.
 - No blocking mode; remove or ignore any "blocking" config flags.
 
 Example requirement:
-- Implement a minimal I2C manager in the example (even for a single device).
+- Implement an I2C manager in the example.
 - The example must use the manager and never call `Wire` directly.
 - Manager responsibilities: per-transaction timeout, bounded retries with backoff, bus recovery, and device health tracking.
 
