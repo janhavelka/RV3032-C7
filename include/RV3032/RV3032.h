@@ -63,6 +63,23 @@
 namespace RV3032 {
 
 /**
+ * @enum DriverState
+ * @brief Driver lifecycle and health state
+ * 
+ * Reflects current operational health of the device:
+ * - UNINIT: begin() never called or end() called
+ * - READY: Device responding, no recent failures
+ * - DEGRADED: Device responding but with recent failures
+ * - OFFLINE: Device not responding
+ */
+enum class DriverState : uint8_t {
+  UNINIT,    ///< Never initialized, begin() not called or end() called
+  READY,     ///< Operational, all operations allowed
+  DEGRADED,  ///< Frequent errors (1 to offlineThreshold-1 consecutive failures)
+  OFFLINE    ///< Device not responding (>= offlineThreshold consecutive failures)
+};
+
+/**
  * @struct DateTime
  * @brief Date and time representation for RTC operations
  * 
@@ -226,6 +243,84 @@ class RV3032 {
    * @return Reference to active configuration
    */
   const Config& getConfig() const { return _config; }
+
+  // ===== Driver State and Health =====
+
+  /**
+   * @brief Probe RTC device presence and identity
+   * 
+   * Performs blocking I2C read to verify device is present and responding.
+   * Does NOT modify configuration or initialize the driver.
+   * Does NOT update health tracking or driver state.
+   * Can be called before begin() or anytime after.
+   * 
+   * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
+   */
+  Status probe();
+
+  /**
+   * @brief Attempt to recover from OFFLINE state
+   * 
+   * Blocking operation that probes device and re-applies configuration.
+   * Only succeeds if device is responsive.
+   * Uses same _applyConfig() helper as begin() for consistency.
+   * 
+   * @return OK if recovered and state is now READY, error otherwise
+   */
+  Status recover();
+
+  /**
+   * @brief Get current driver state
+   * @return UNINIT, READY, DEGRADED, or OFFLINE
+   */
+  DriverState state() const { return _driverState; }
+
+  /**
+   * @brief Check if device is operational
+   * @return true if READY or DEGRADED, false if UNINIT or OFFLINE
+   */
+  bool isOnline() const {
+    return _driverState == DriverState::READY ||
+           _driverState == DriverState::DEGRADED;
+  }
+
+  /**
+   * @brief Get timestamp of last successful operation
+   * @return Milliseconds timestamp from millis()
+   */
+  uint32_t lastOkMs() const { return _lastOkMs; }
+
+  /**
+   * @brief Get most recent error status
+   * @return Status with error code, detail, and message
+   */
+  Status lastError() const { return _lastError; }
+
+  /**
+   * @brief Get consecutive failure count
+   * @return Number of consecutive failures since last success
+   */
+  uint8_t consecutiveFailures() const { return _consecutiveFailures; }
+
+  /**
+   * @brief Get total failure count
+   * @return Total failures since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalFailures() const { return _totalFailures; }
+
+  /**
+   * @brief Get total success count
+   * @return Total successes since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalSuccess() const { return _totalSuccess; }
+
+  /**
+   * @brief Get timestamp of last error
+   * @return Milliseconds timestamp from millis(), 0 if no error yet
+   */
+  uint32_t lastErrorMs() const { return _lastErrorMs; }
+
+  // ===== EEPROM Status =====
 
   /**
    * @brief Check if an EEPROM persistence operation is in progress
@@ -650,6 +745,15 @@ class RV3032 {
   bool _initialized = false;
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
+
+  // Driver state and health tracking
+  DriverState _driverState = DriverState::UNINIT;
+  uint32_t _lastOkMs = 0;              ///< Timestamp of last successful operation
+  Status _lastError = Status::Ok();    ///< Most recent error status
+  uint32_t _lastErrorMs = 0;           ///< Timestamp of last error
+  uint8_t _consecutiveFailures = 0;    ///< Consecutive failures since last success
+  uint32_t _totalFailures = 0;         ///< Total failures since begin()
+  uint32_t _totalSuccess = 0;          ///< Total successes since begin()
   
   // I2C operations
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
@@ -661,6 +765,11 @@ class RV3032 {
   Status readEepromFlags(bool& busy, bool& failed);
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
+
+  // Health tracking helpers
+  Status _readRegisterRaw(uint8_t reg, uint8_t& value);
+  Status _updateHealth(const Status& st);
+  Status _applyConfig();
 
   // Conversion helpers
   static bool isValidBcd(uint8_t v);

@@ -13,6 +13,7 @@ You are a professional embedded software engineer building a production-grade RV
 
 ```
 include/RV3032/        - Public API headers only (Doxygen)
+  CommandTable.h       - a full list from register reference
   Status.h
   Config.h
   RV3032.h
@@ -82,6 +83,53 @@ struct Status {
 - Explicit flag read/clear; never clear implicitly.
 - EEPROM writes are deadline-driven; bounded retries only.
 - Never write reserved bits; preserve register masks.
+
+---
+
+## Driver Architecture: Managed Synchronous Driver
+
+The driver follows a **managed synchronous** model with health tracking:
+
+- All public I2C operations are **blocking** (no async beyond EEPROM persistence).
+- `tick()` only advances the EEPROM state machine; no automatic recovery.
+- Health is tracked centrally via `_updateHealth()` after each I2C operation.
+- Recovery is **manual** via `recover()` - the application controls retry strategy.
+
+### DriverState (4 states only)
+
+```cpp
+enum class DriverState : uint8_t {
+  UNINIT,    // begin() not called or end() called
+  READY,     // Operational, consecutiveFailures == 0
+  DEGRADED,  // 1 <= consecutiveFailures < offlineThreshold
+  OFFLINE    // consecutiveFailures >= offlineThreshold
+};
+```
+
+State transitions:
+- `begin()` success → READY
+- Any I2C failure in READY → DEGRADED
+- Success in DEGRADED/OFFLINE → READY
+- Failures reach `offlineThreshold` → OFFLINE
+- `end()` → UNINIT
+
+### Health Tracking Rules
+
+- `_updateHealth()` called once per logical I2C operation (not per byte).
+- NOT called for config/param validation errors (INVALID_CONFIG, INVALID_PARAM).
+- NOT called for precondition errors (NOT_INITIALIZED).
+- `Err::IN_PROGRESS` treated as success (EEPROM queuing is not a failure).
+- `probe()` uses raw I2C and does NOT update health (diagnostic only).
+
+### Health Tracking Fields
+
+- `_lastOkMs` - timestamp of last successful I2C operation
+- `_lastErrorMs` - timestamp of last failed I2C operation
+- `_lastError` - most recent error Status
+- `_consecutiveFailures` - failures since last success (resets on success)
+- `_totalFailures` / `_totalSuccess` - lifetime counters (wrap at max)
+
+---
 
 ## Versioning and Releases
 

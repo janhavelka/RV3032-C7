@@ -75,6 +75,11 @@ struct Config {
   /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
   ///       Must be > 0 when enableEepromWrites is true.
   uint32_t eepromTimeoutMs = 200;
+
+  /// @brief Consecutive failure threshold before transitioning to OFFLINE
+  /// @note Default: 5. DEGRADED = [1, offlineThreshold-1], OFFLINE >= offlineThreshold.
+  ///       Values < 1 are clamped to 1 during begin().
+  uint8_t offlineThreshold = 5;
 };
 
 }  // namespace RV3032
