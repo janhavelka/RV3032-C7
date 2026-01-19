@@ -60,7 +60,7 @@ Status RV3032::begin(const Config& config) {
   // Test device presence (probe uses raw I2C - no health tracking)
   Status st = probe();
   if (!st.ok()) {
-    return st;
+    return _updateHealth(st);
   }
 
   // Apply stored configuration (uses tracked I2C internally)
@@ -70,11 +70,9 @@ Status RV3032::begin(const Config& config) {
     return st;
   }
 
-  // Success - set initialized flag and transition to READY
+  // Success - set initialized flag and let _updateHealth() transition to READY
   _initialized = true;
-  _driverState = DriverState::READY;
-
-  return Status::Ok();
+  return _updateHealth(Status::Ok());
 }
 
 void RV3032::tick(uint32_t now_ms) {
@@ -143,15 +141,10 @@ Status RV3032::recover() {
     return _updateHealth(st);
   }
 
-  // Re-apply stored configuration (uses tracked I2C internally)
-  // Health is updated automatically via tracked wrappers
+  // Re-apply stored configuration
   st = _applyConfig();
-  if (st.ok()) {
-    // Recovery successful - tracked wrappers already updated health/state
-    return Status::Ok();
-  }
-
-  return st;
+  // Track final result of recovery operation
+  return _updateHealth(st);
 }
 
 // ===== I2C Transport Wrappers =====
