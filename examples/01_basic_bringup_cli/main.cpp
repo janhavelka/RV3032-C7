@@ -23,7 +23,7 @@
 #include "RV3032/RV3032.h"
 
 static RV3032::RV3032 g_rtc;
-static bool g_verbose = true;  // Verbose mode for deep debugging
+static bool g_verbose = false;  // Verbose mode - disabled by default for production examples
 
 /**
  * @brief Convert DriverState enum to string.

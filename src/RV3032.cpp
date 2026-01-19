@@ -24,13 +24,11 @@ bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
 // ===== Lifecycle Functions =====
 
 Status RV3032::begin(const Config& config) {
-  _config = config;
-  _driverState = DriverState::UNINIT;
+  // Reset all state first (before validation)
   _initialized = false;
+  _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _eepromLastStatus = Status::Ok();
-
-  // Reset health tracking
   _lastOkMs = 0;
   _lastError = Status::Ok();
   _lastErrorMs = 0;
@@ -38,29 +36,35 @@ Status RV3032::begin(const Config& config) {
   _totalFailures = 0;
   _totalSuccess = 0;
 
+  // Validate configuration BEFORE copying to ensure consistent state on failure
+  // (if validation fails, _config remains unchanged from previous state)
+  if (!config.i2cWrite || !config.i2cWriteRead) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
+  }
+  if (config.i2cTimeoutMs == 0) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
+  }
+  if (config.enableEepromWrites && config.eepromTimeoutMs == 0) {
+    return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be > 0");
+  }
+  if (config.enableEepromWrites && config.i2cTimeoutMs < kEepromPreCmdTimeoutMs) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
+  }
+
+  // Validation passed - now copy config
+  _config = config;
+
   // Clamp offlineThreshold (values < 1 make no sense)
   if (_config.offlineThreshold < 1) {
     _config.offlineThreshold = 1;
   }
 
-  // Validate configuration - no health tracking for config errors
-  if (!_config.i2cWrite || !_config.i2cWriteRead) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
-  }
-  if (_config.i2cTimeoutMs == 0) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
-  }
-  if (_config.enableEepromWrites && _config.eepromTimeoutMs == 0) {
-    return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be > 0");
-  }
-  if (_config.enableEepromWrites && _config.i2cTimeoutMs < kEepromPreCmdTimeoutMs) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
-  }
-
-  // Test device presence (probe uses raw I2C - no health tracking)
+  // Test device presence (probe uses raw I2C - no health tracking for diagnostic)
   Status st = probe();
   if (!st.ok()) {
-    return _updateHealth(st);
+    // Device not found - remain in UNINIT with clean health state
+    // (no health tracking since begin() failed)
+    return st;
   }
 
   // Apply stored configuration (uses tracked I2C internally)
@@ -112,10 +116,12 @@ Status RV3032::getEepromStatus() const {
 // ===== Driver State and Health =====
 
 Status RV3032::probe() {
-  // Use raw read that bypasses health tracking
-  uint8_t status = 0;
-  Status st = _readRegisterRaw(cmd::REG_STATUS, status);
-  (void)status;
+  // Read a known register to verify device presence.
+  // Uses raw I2C (no health tracking) - this is a diagnostic-only function.
+  // The status register value is not used; we only check if I2C succeeds.
+  uint8_t statusReg = 0;
+  Status st = _readRegisterRaw(cmd::REG_STATUS, statusReg);
+  (void)statusReg;  // Value unused - we only verify I2C communication works
 
   // Convert I2C errors to DEVICE_NOT_FOUND for clarity
   if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
@@ -265,8 +271,7 @@ Status RV3032::readTime(DateTime& out) {
   uint8_t buf[7] = {0};
   Status st = readRegs(cmd::REG_SECONDS, buf, sizeof(buf));
   if (!st.ok()) {
-    // Health already updated by tracked wrapper
-    return st;
+    return st;  // readRegs() uses tracked I2C, so health state is already updated
   }
 
   const uint8_t secReg = static_cast<uint8_t>(buf[0] & 0x7F);
@@ -279,7 +284,7 @@ Status RV3032::readTime(DateTime& out) {
 
   if (!isValidBcd(secReg) || !isValidBcd(minReg) || !isValidBcd(hourReg) ||
       !isValidBcd(dayReg) || !isValidBcd(monthReg) || !isValidBcd(yearReg)) {
-    // I2C succeeded (health already updated) but data is invalid
+    // I2C succeeded but data is corrupt - not an I2C failure, so no health update
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid BCD");
   }
 
@@ -292,11 +297,10 @@ Status RV3032::readTime(DateTime& out) {
   out.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
 
   if (!isValidDateTime(out)) {
-    // I2C succeeded (health already updated) but data is invalid
+    // I2C succeeded but data is invalid - not an I2C failure, so no health update
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid date/time");
   }
 
-  // Health already updated by tracked wrapper in readRegs()
   return Status::Ok();
 }
 
@@ -869,9 +873,11 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
     return Status::Error(Err::INVALID_PARAM, "Invalid I2C write parameters");
   }
 
+  // Max write buffer: 1 byte for register address + 15 bytes data = 16 bytes total.
+  // This covers all RV3032 multi-byte writes (time registers = 7 bytes, etc.)
   static constexpr size_t kMaxWriteLen = 16;
-  if (len > (kMaxWriteLen - 1)) {
-    return Status::Error(Err::INVALID_PARAM, "I2C write length too large");
+  if (len > (kMaxWriteLen - 1)) {  // len is data only, we add 1 for register address
+    return Status::Error(Err::INVALID_PARAM, "I2C write length exceeds 15 bytes");
   }
 
   uint8_t tx[kMaxWriteLen] = {0};
