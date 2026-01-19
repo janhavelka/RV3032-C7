@@ -24,20 +24,13 @@ bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
 // ===== Lifecycle Functions =====
 
 Status RV3032::begin(const Config& config) {
-  // Reset all state first (before validation)
-  _initialized = false;
-  _driverState = DriverState::UNINIT;
-  _eeprom = EepromOp{};
-  _eepromLastStatus = Status::Ok();
-  _lastOkMs = 0;
-  _lastError = Status::Ok();
-  _lastErrorMs = 0;
-  _consecutiveFailures = 0;
-  _totalFailures = 0;
-  _totalSuccess = 0;
+  // Clean up any previous instance to ensure consistent state.
+  // If caller needs to detect accidental re-initialization, check isInitialized() first.
+  if (_initialized) {
+    end();
+  }
 
-  // Validate configuration BEFORE copying to ensure consistent state on failure
-  // (if validation fails, _config remains unchanged from previous state)
+  // Validate configuration FIRST - don't modify any state until validation passes
   if (!config.i2cWrite || !config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
   }
@@ -51,7 +44,19 @@ Status RV3032::begin(const Config& config) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
   }
 
-  // Validation passed - now copy config
+  // Validation passed - now initialize all state
+  _initialized = false;
+  _driverState = DriverState::UNINIT;
+  _eeprom = EepromOp{};
+  _eepromLastStatus = Status::Ok();
+  _lastOkMs = 0;
+  _lastError = Status::Ok();
+  _lastErrorMs = 0;
+  _consecutiveFailures = 0;
+  _totalFailures = 0;
+  _totalSuccess = 0;
+
+  // Copy validated config
   _config = config;
 
   // Clamp offlineThreshold (values < 1 make no sense)
