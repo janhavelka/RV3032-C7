@@ -6,6 +6,7 @@
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
 #include <Arduino.h>
+#include <cstdio>
 #include <cstring>
 
 namespace RV3032 {
