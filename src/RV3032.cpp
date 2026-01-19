@@ -1269,4 +1269,30 @@ Status RV3032::clearBackupSwitchFlag() {
   return writeRegister(cmd::REG_STATUS, status);
 }
 
+// ===== Public Static Conversion Functions =====
+
+uint8_t RV3032::bcdToBinary(uint8_t bcd) {
+  return bcdToBin(bcd);
+}
+
+uint8_t RV3032::binaryToBcd(uint8_t bin) {
+  return binToBcd(bin);
+}
+
+bool RV3032::unixToDateTime(uint32_t ts, DateTime& out) {
+  return unixToDate(ts, out);
+}
+
+bool RV3032::dateTimeToUnix(const DateTime& time, uint32_t& out) {
+  if (!isValidDateTime(time)) {
+    return false;
+  }
+  uint32_t days = dateToDays(time.year, time.month, time.day);
+  out = days * 86400UL
+      + static_cast<uint32_t>(time.hour) * 3600UL
+      + static_cast<uint32_t>(time.minute) * 60UL
+      + static_cast<uint32_t>(time.second);
+  return true;
+}
+
 }  // namespace RV3032
