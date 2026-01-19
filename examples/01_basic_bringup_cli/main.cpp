@@ -911,9 +911,10 @@ static void process_command(const String& line) {
 }
 
 void setup() {
+  delay(1000);  // USB-CDC enumeration delay - helps Windows recognize device after reset
   Serial.begin(115200);
-  while (!Serial && millis() < 3000) {
-    delay(10);  // Wait for serial (max 3 seconds)
+  while (!Serial && millis() < 4000) {
+    delay(10);  // Wait for serial (max 3 seconds after the initial delay)
   }
 
   print_help();
