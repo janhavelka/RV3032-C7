@@ -5,10 +5,10 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
-// Forward declaration for TwoWire
-class TwoWire;
+#include "Status.h"
 
 namespace RV3032 {
 
@@ -24,25 +24,38 @@ enum class BackupSwitchMode : uint8_t {
   Direct = 2   ///< Direct switching mode (instant switchover)
 };
 
+/// @brief I2C write callback signature.
+using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
+                              uint32_t timeoutMs, void* user);
+
+/// @brief I2C write-read callback signature.
+using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* tx, size_t txLen,
+                                  uint8_t* rx, size_t rxLen, uint32_t timeoutMs,
+                                  void* user);
+
 /**
  * @struct Config
  * @brief RTC configuration parameters
- * 
+ *
  * All hardware resources are application-provided. Library does not
  * define any pin defaults - board-specific values must be passed by user.
  */
 struct Config {
-  /// @brief I2C interface pointer. Application must initialize Wire before calling begin().
-  /// @note Application-provided. Library does not initialize I2C bus.
-  TwoWire* wire = nullptr;
+  /// @brief I2C write callback (required).
+  I2cWriteFn i2cWrite = nullptr;
+
+  /// @brief I2C write-read callback (required).
+  I2cWriteReadFn i2cWriteRead = nullptr;
+
+  /// @brief User context passed to I2C callbacks (e.g., TwoWire*).
+  void* i2cUser = nullptr;
 
   /// @brief I2C address of RV3032-C7 (default: 0x51, not user-configurable on hardware)
   /// @note Valid 7-bit range: 0x08-0x77.
   uint8_t i2cAddress = 0x51;
 
   /// @brief I2C transaction timeout in milliseconds (default: 50ms)
-  /// @note Applied in begin() via TwoWire::setTimeOut(). Affects the shared I2C bus.
-  ///       Set to a value > 0 to bound bus stalls.
+  /// @note Passed to the transport callback. The library never configures the bus.
   ///       Must be >= 50ms when enableEepromWrites is true.
   uint32_t i2cTimeoutMs = 50;
 
@@ -58,15 +71,15 @@ struct Config {
   ///       EEPROM has ~100k write endurance - use sparingly in production.
   bool enableEepromWrites = false;
 
-  /// @brief Process EEPROM commits in tick() (default: true)
-  /// @note When true, EEPROM writes are scheduled and completed in tick().
-  ///       When false, EEPROM writes block until complete.
-  bool eepromNonBlocking = true;
-
   /// @brief EEPROM write timeout in milliseconds (default: 200ms)
   /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
   ///       Must be > 0 when enableEepromWrites is true.
   uint32_t eepromTimeoutMs = 200;
+
+  /// @brief Consecutive failure threshold before transitioning to OFFLINE
+  /// @note Default: 5. DEGRADED = [1, offlineThreshold-1], OFFLINE >= offlineThreshold.
+  ///       Values < 1 are clamped to 1 during begin().
+  uint8_t offlineThreshold = 5;
 };
 
 }  // namespace RV3032

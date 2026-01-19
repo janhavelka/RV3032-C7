@@ -23,10 +23,10 @@
  * RV3032::RV3032 rtc;
  * 
  * void setup() {
- *   Wire.begin();
- *   
  *   RV3032::Config cfg;
- *   cfg.wire = &Wire;
+ *   cfg.i2cWrite = myI2cWrite;
+ *   cfg.i2cWriteRead = myI2cWriteRead;
+ *   cfg.i2cUser = myI2cContext;
  *   
  *   RV3032::Status st = rtc.begin(cfg);
  *   if (!st.ok()) {
@@ -61,6 +61,23 @@
 #include "Config.h"
 
 namespace RV3032 {
+
+/**
+ * @enum DriverState
+ * @brief Driver lifecycle and health state
+ * 
+ * Reflects current operational health of the device:
+ * - UNINIT: begin() never called or end() called
+ * - READY: Device responding, no recent failures
+ * - DEGRADED: Device responding but with recent failures
+ * - OFFLINE: Device not responding
+ */
+enum class DriverState : uint8_t {
+  UNINIT,    ///< Never initialized, begin() not called or end() called
+  READY,     ///< Operational, all operations allowed
+  DEGRADED,  ///< Frequent errors (1 to offlineThreshold-1 consecutive failures)
+  OFFLINE    ///< Device not responding (>= offlineThreshold consecutive failures)
+};
 
 /**
  * @struct DateTime
@@ -177,7 +194,7 @@ struct EviConfig {
  * tick() advances a non-blocking EEPROM state machine (one I2C op per call).
  * 
  * @par Resource Ownership
- * I2C interface passed via Config. No hardcoded pins or resources.
+ * I2C transport passed via Config. No hardcoded pins or resources.
  * 
  * @par Memory
  * All allocation in begin(). Zero allocation in tick() and normal operations.
@@ -192,7 +209,7 @@ class RV3032 {
    * 
    * @param config Hardware and behavior configuration
    * @return OK on success (library is ready to use), error otherwise
-   * @note config.wire must be initialized (Wire.begin() called) before this.
+   * @note The transport callbacks must be provided in Config.
    *       If EEPROM writes are enabled, call tick() to complete EEPROM work.
    *       Use getEepromStatus() to check if EEPROM persistence is active.
    */
@@ -226,6 +243,84 @@ class RV3032 {
    * @return Reference to active configuration
    */
   const Config& getConfig() const { return _config; }
+
+  // ===== Driver State and Health =====
+
+  /**
+   * @brief Probe RTC device presence and identity
+   * 
+   * Performs blocking I2C read to verify device is present and responding.
+   * Does NOT modify configuration or initialize the driver.
+   * Does NOT update health tracking or driver state.
+   * Can be called before begin() or anytime after.
+   * 
+   * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
+   */
+  Status probe();
+
+  /**
+   * @brief Attempt to recover from OFFLINE state
+   * 
+   * Blocking operation that probes device and re-applies configuration.
+   * Only succeeds if device is responsive.
+   * Uses same _applyConfig() helper as begin() for consistency.
+   * 
+   * @return OK if recovered and state is now READY, error otherwise
+   */
+  Status recover();
+
+  /**
+   * @brief Get current driver state
+   * @return UNINIT, READY, DEGRADED, or OFFLINE
+   */
+  DriverState state() const { return _driverState; }
+
+  /**
+   * @brief Check if device is operational
+   * @return true if READY or DEGRADED, false if UNINIT or OFFLINE
+   */
+  bool isOnline() const {
+    return _driverState == DriverState::READY ||
+           _driverState == DriverState::DEGRADED;
+  }
+
+  /**
+   * @brief Get timestamp of last successful operation
+   * @return Milliseconds timestamp from millis()
+   */
+  uint32_t lastOkMs() const { return _lastOkMs; }
+
+  /**
+   * @brief Get most recent error status
+   * @return Status with error code, detail, and message
+   */
+  Status lastError() const { return _lastError; }
+
+  /**
+   * @brief Get consecutive failure count
+   * @return Number of consecutive failures since last success
+   */
+  uint8_t consecutiveFailures() const { return _consecutiveFailures; }
+
+  /**
+   * @brief Get total failure count
+   * @return Total failures since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalFailures() const { return _totalFailures; }
+
+  /**
+   * @brief Get total success count
+   * @return Total successes since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalSuccess() const { return _totalSuccess; }
+
+  /**
+   * @brief Get timestamp of last error
+   * @return Milliseconds timestamp from millis(), 0 if no error yet
+   */
+  uint32_t lastErrorMs() const { return _lastErrorMs; }
+
+  // ===== EEPROM Status =====
 
   /**
    * @brief Check if an EEPROM persistence operation is in progress
@@ -650,10 +745,32 @@ class RV3032 {
   bool _initialized = false;
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
+
+  // Driver state and health tracking
+  DriverState _driverState = DriverState::UNINIT;
+  uint32_t _lastOkMs = 0;              ///< Timestamp of last successful operation
+  Status _lastError = Status::Ok();    ///< Most recent error status
+  uint32_t _lastErrorMs = 0;           ///< Timestamp of last error
+  uint8_t _consecutiveFailures = 0;    ///< Consecutive failures since last success
+  uint32_t _totalFailures = 0;         ///< Total failures since begin()
+  uint32_t _totalSuccess = 0;          ///< Total successes since begin()
   
-  // I2C operations
+  // Raw I2C transport (no health tracking) - for diagnostics only
+  Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
+  Status _i2cWriteRaw(const uint8_t* buf, size_t len);
+
+  // Tracked I2C transport (with health tracking) - for normal operations
+  Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
+  Status _i2cWriteTracked(const uint8_t* buf, size_t len);
+
+  // Register-level I2C helpers (use tracked transport internally)
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
   Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
+  
+  // Raw register access (no health tracking) - for diagnostics
+  Status _readRegisterRaw(uint8_t reg, uint8_t& value);
+
+  // EEPROM operations
   Status writeEepromRegister(uint8_t reg, uint8_t value);
   void processEeprom(uint32_t now_ms);
   Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
@@ -661,6 +778,12 @@ class RV3032 {
   Status readEepromFlags(bool& busy, bool& failed);
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
+
+  // Health tracking (called only by tracked transport wrappers)
+  Status _updateHealth(const Status& st);
+  
+  // Configuration application helper
+  Status _applyConfig();
 
   // Conversion helpers
   static bool isValidBcd(uint8_t v);

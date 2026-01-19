@@ -1,0 +1,760 @@
+================================================================================
+RV3032-C7 DRIVER - OPTION A: MANAGED SYNCHRONOUS DRIVER
+================================================================================
+
+SCOPE: Minimal lifecycle tracking with blocking operations only.
+This proposal adds health tracking and offline detection WITHOUT adding async
+behavior or automatic recovery. Existing EEPROM persistence state machine is
+unchanged. tick() continues to only advance EEPROM, nothing more.
+
+================================================================================
+0. KEY DEFINITIONS
+================================================================================
+
+_initialized vs DriverState:
+
+  _initialized (bool):
+    - TRUE when begin() has completed successfully at least once AND end() not called
+    - FALSE when begin() never called, begin() failed, or end() was called
+    - Guards API calls (returns NOT_INITIALIZED if false)
+    - Does NOT reflect current device health
+
+  DriverState (enum):
+    - Reflects current operational health of the device
+    - UNINIT: begin() never called or end() called (_initialized == false)
+    - READY: Device responding, no recent failures (_initialized == true)
+    - DEGRADED: Device responding but with recent failures (_initialized == true)
+    - OFFLINE: Device not responding (_initialized == true, but device unreachable)
+
+  Consistency rules:
+    - _initialized == false  →  _driverState == UNINIT (always)
+    - _initialized == true   →  _driverState ∈ {READY, DEGRADED, OFFLINE}
+    - _driverState == UNINIT →  _initialized == false (always)
+
+================================================================================
+1. DRIVER STATE ENUM (4 STATES ONLY)
+================================================================================
+
+enum class DriverState : uint8_t {
+  UNINIT,      // Never initialized, begin() not called
+  READY,       // Operational, all operations allowed
+  DEGRADED,    // Frequent errors (1 to offlineThreshold-1 consecutive failures)
+  OFFLINE      // Device not responding (>= offlineThreshold consecutive failures)
+};
+
+State Rules:
+- UNINIT: Initial state, or after end() called
+- READY: begin() succeeded, consecutiveFailures == 0
+- DEGRADED: consecutiveFailures >= 1 AND consecutiveFailures < offlineThreshold
+- OFFLINE: consecutiveFailures >= offlineThreshold
+
+State Transitions (automatic, via centralized helper):
+- Any state + begin() succeeds → READY
+- READY + I2C operation fails → DEGRADED
+- DEGRADED + I2C operation succeeds → READY
+- DEGRADED + consecutive failures reach offlineThreshold → OFFLINE
+- OFFLINE + I2C operation succeeds → READY
+- OFFLINE + recover() succeeds → READY
+- Any state + end() → UNINIT
+
+================================================================================
+2. CONFIG CHANGES
+================================================================================
+
+Add to struct Config:
+
+  /// @brief Consecutive failure threshold before transitioning to OFFLINE
+  /// @note Default: 3. DEGRADED = [1, offlineThreshold-1], OFFLINE = [offlineThreshold, ∞)
+  ///       Values < 1 are clamped to 1 during begin().
+  uint8_t offlineThreshold = 3;
+
+No other changes to Config.
+
+Validation in begin():
+
+  // Clamp invalid offlineThreshold
+  if (_config.offlineThreshold < 1) {
+    _config.offlineThreshold = 1;
+  }
+
+================================================================================
+3. HEALTH TRACKING FIELDS
+================================================================================
+
+Add to RV3032 class (private members):
+
+  DriverState _driverState = DriverState::UNINIT;
+  
+  // Health tracking (required)
+  uint32_t _lastOkMs = 0;              // Timestamp of last successful operation
+  Status _lastError = Status::Ok();    // Most recent error status
+  uint8_t _consecutiveFailures = 0;    // Consecutive failures since last success
+  uint32_t _totalFailures = 0;         // Total failures since begin()
+  uint32_t _totalSuccess = 0;          // Total successes since begin()
+  
+  // Health tracking (optional but recommended)
+  uint32_t _lastErrorMs = 0;           // Timestamp of last error
+
+Update Rules:
+
+On I2C operation SUCCESS:
+  - _lastOkMs = millis()
+  - _consecutiveFailures = 0
+  - _totalSuccess++
+  - If _driverState == DEGRADED or OFFLINE: transition to READY
+
+On I2C operation FAILURE:
+  - _lastError = returned Status
+  - _lastErrorMs = millis()
+  - _consecutiveFailures++
+  - _totalFailures++
+  - If _consecutiveFailures == 1 and _driverState == READY: transition to DEGRADED
+  - If _consecutiveFailures >= offlineThreshold: transition to OFFLINE
+
+What counts as a "logical operation":
+  - Single I2C transaction (readRegister, writeRegister)
+  - Multi-step operation counts as ONE:
+    - Count as FAILURE if ANY step fails
+    - Count as SUCCESS only if ALL steps succeed
+    - Example: readTime() reads 7 bytes in one burst → counts as one operation
+    - Example: setAlarmTime() reads 3 regs, writes 3 regs → counts as one operation
+                (fails if any read or write fails)
+
+================================================================================
+4. CENTRALIZED HELPER
+================================================================================
+
+Add private methods:
+
+  /**
+   * @brief Raw register read that does NOT update health tracking
+   * 
+   * Used by probe() and other diagnostic functions that should not
+   * affect driver state or health counters.
+   * 
+   * @param reg Register address
+   * @param value Output value
+   * @return Status from I2C operation
+   */
+  Status _readRegisterRaw(uint8_t reg, uint8_t& value);
+
+  /**
+   * @brief Update health tracking and driver state based on operation result
+   * 
+   * @param st Status from I2C operation
+   * @return Same status (for passthrough)
+   * 
+   * RULES:
+   * - Call exactly once per logical I2C operation from public methods
+   * - Do NOT call for configuration errors (INVALID_CONFIG, INVALID_PARAM)
+   * - Do NOT call for precondition errors (NOT_INITIALIZED)
+   * - Treat IN_PROGRESS as success (EEPROM queueing is not a failure)
+   * - Only call for real device/bus transaction results
+   */
+  Status _updateHealth(const Status& st);
+
+Implementation of _readRegisterRaw():
+
+  Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
+    if (!_config.i2cWriteRead) {
+      return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
+    }
+    uint8_t tx = reg;
+    return _config.i2cWriteRead(_config.i2cAddress, &tx, 1, &value, 1,
+                                _config.i2cTimeoutMs, _config.i2cUser);
+  }
+
+Implementation of _updateHealth():
+
+  Status RV3032::_updateHealth(const Status& st) {
+    // Treat IN_PROGRESS as success (EEPROM queueing is not a failure)
+    bool isSuccess = st.ok() || st.code == Err::IN_PROGRESS;
+    
+    if (isSuccess) {
+      // Success path
+      _lastOkMs = millis();
+      _consecutiveFailures = 0;
+      _totalSuccess++;
+      
+      // Transition from DEGRADED or OFFLINE back to READY
+      if (_driverState == DriverState::DEGRADED || 
+          _driverState == DriverState::OFFLINE) {
+        _driverState = DriverState::READY;
+      }
+    } else {
+      // Failure path
+      _lastError = st;
+      _lastErrorMs = millis();
+      _consecutiveFailures++;
+      _totalFailures++;
+      
+      // Transition READY → DEGRADED on first failure
+      if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
+        _driverState = DriverState::DEGRADED;
+      }
+      
+      // Transition DEGRADED → OFFLINE when threshold reached
+      if (_consecutiveFailures >= _config.offlineThreshold) {
+        _driverState = DriverState::OFFLINE;
+      }
+    }
+    
+    return st;
+  }
+
+When to call _updateHealth():
+
+  DO call _updateHealth() for:
+    - readTime(), setTime(), readUnix(), setUnix()
+    - Alarm, timer, clock output, calibration, temperature, EVI operations
+    - readRegister(), writeRegister() (public)
+    - Any operation that performs real I2C transactions
+    - Final result of multi-step operations (once, after all steps complete)
+
+  DO NOT call _updateHealth() for:
+    - probe() (uses _readRegisterRaw instead)
+    - Configuration validation errors (INVALID_CONFIG)
+    - Parameter validation errors (INVALID_PARAM)
+    - Precondition errors (NOT_INITIALIZED)
+    - Pure getters (state(), isOnline(), getConfig(), etc.)
+
+Example - multi-step operation:
+
+  Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
+    // Precondition check - do NOT call _updateHealth
+    if (!_initialized) {
+      return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+    }
+    
+    // Parameter validation - do NOT call _updateHealth
+    if (minute > 59 || hour > 23 || date > 31 || date == 0) {
+      return Status::Error(Err::INVALID_PARAM, "Invalid alarm values");
+    }
+    
+    // Real I2C operations - track success/failure of entire operation
+    uint8_t minReg = 0, hourReg = 0, dateReg = 0;
+    Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
+    if (!st.ok()) return _updateHealth(st);  // Early exit on failure
+    
+    st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
+    if (!st.ok()) return _updateHealth(st);
+    
+    st = readRegister(cmd::REG_ALARM_DATE, dateReg);
+    if (!st.ok()) return _updateHealth(st);
+    
+    // ... modify registers ...
+    
+    st = writeRegister(cmd::REG_ALARM_MINUTE, minReg);
+    if (!st.ok()) return _updateHealth(st);
+    
+    st = writeRegister(cmd::REG_ALARM_HOUR, hourReg);
+    if (!st.ok()) return _updateHealth(st);
+    
+    st = writeRegister(cmd::REG_ALARM_DATE, dateReg);
+    return _updateHealth(st);  // Final result
+  }
+
+================================================================================
+5. NEW API: probe()
+================================================================================
+
+Add public method:
+
+  /**
+   * @brief Probe RTC device presence and identity
+   * 
+   * Performs blocking I2C read to verify device is present and responding.
+   * Does NOT modify configuration or initialize the driver.
+   * Does NOT update health tracking or driver state.
+   * Can be called before begin() or anytime after.
+   * 
+   * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
+   */
+  Status probe();
+
+Implementation:
+
+  Status RV3032::probe() {
+    // Use raw read that bypasses health tracking
+    uint8_t status = 0;
+    Status st = _readRegisterRaw(cmd::REG_STATUS, status);
+    
+    // Convert I2C errors to DEVICE_NOT_FOUND for clarity
+    if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
+      return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
+    }
+    
+    // Do NOT call _updateHealth() - probe is diagnostic only
+    return st;
+  }
+
+Behavior:
+- Can be called in any driver state (UNINIT, READY, DEGRADED, OFFLINE)
+- Does NOT change driver state
+- Does NOT update health counters (_consecutiveFailures, _totalSuccess, etc.)
+- Uses _readRegisterRaw() to bypass _updateHealth()
+- Returns OK if device responds, error otherwise
+- Useful for pre-initialization checks or diagnostics
+
+Usage example:
+
+  // Check if RTC is present before initializing
+  Status st = rtc.probe();
+  if (!st.ok()) {
+    Serial.println("RTC not detected");
+    return;
+  }
+  
+  // Device present, proceed with initialization
+  rtc.begin(config);
+
+================================================================================
+6. NEW API: recover()
+================================================================================
+
+Add public method:
+
+  /**
+   * @brief Attempt to recover from OFFLINE state
+   * 
+   * Blocking operation that probes device and re-applies configuration.
+   * Only succeeds if device is responsive.
+   * Uses same _applyConfig() helper as begin() for consistency.
+   * 
+   * @return OK if recovered and state is now READY, error otherwise
+   */
+  Status recover();
+
+Implementation:
+
+  Status RV3032::recover() {
+    // Precondition: must be initialized to recover
+    if (!_initialized) {
+      // Do NOT call _updateHealth() for precondition errors
+      return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+    }
+    
+    // Verify device presence first (probe does not update health)
+    Status st = probe();
+    if (!st.ok()) {
+      // Device still not responding - update health to track this attempt
+      _updateHealth(st);
+      return st;
+    }
+    
+    // Re-apply stored configuration using shared helper
+    st = _applyConfig();
+    _updateHealth(st);
+    
+    if (st.ok()) {
+      // Recovery successful - _updateHealth() already set state to READY
+      return Status::Ok();
+    }
+    
+    return st;
+  }
+
+Shared configuration helper (_applyConfig()):
+
+  /**
+   * @brief Apply stored configuration to device
+   * 
+   * Shared by begin() and recover() for consistency.
+   * Does NOT update health tracking - caller must do that.
+   * 
+   * @return OK if config applied, error otherwise
+   */
+  Status RV3032::_applyConfig() {
+    // Read current PMU register
+    uint8_t coe = 0;
+    Status st = _readRegisterRaw(cmd::REG_EEPROM_PMU, coe);
+    if (!st.ok()) return st;
+    
+    // Modify backup mode bits
+    uint8_t newCoe = (coe & ~cmd::PMU_BSM_MASK);
+    switch (_config.backupMode) {
+      case BackupSwitchMode::Off: break;
+      case BackupSwitchMode::Level: newCoe |= cmd::PMU_BSM_LEVEL; break;
+      case BackupSwitchMode::Direct: newCoe |= cmd::PMU_BSM_DIRECT; break;
+    }
+    
+    // Write if changed
+    if (newCoe != coe) {
+      st = writeEepromRegister(cmd::REG_EEPROM_PMU, newCoe);
+      // Treat IN_PROGRESS as success (EEPROM queued)
+      if (!st.ok() && st.code != Err::IN_PROGRESS) {
+        return st;
+      }
+    }
+    
+    return Status::Ok();
+  }
+
+Behavior:
+- Can be called in any initialized state (READY, DEGRADED, OFFLINE)
+- Requires prior successful begin() call (_initialized must be true)
+- On success: resets failure counters, sets state to READY
+- On failure: increments failure counter, may transition to DEGRADED/OFFLINE
+- Blocking operation (no async recovery)
+
+Usage example:
+
+  void loop() {
+    if (rtc.state() == DriverState::OFFLINE) {
+      // Manual recovery attempt
+      static uint32_t lastRecoveryAttempt = 0;
+      if (millis() - lastRecoveryAttempt > 5000) {
+        Status st = rtc.recover();
+        if (st.ok()) {
+          Serial.println("RTC recovered!");
+        }
+        lastRecoveryAttempt = millis();
+      }
+    }
+  }
+
+================================================================================
+7. NEW API: HEALTH GETTERS
+================================================================================
+
+Add public methods:
+
+  /**
+   * @brief Get current driver state
+   * @return UNINIT, READY, DEGRADED, or OFFLINE
+   */
+  DriverState state() const { return _driverState; }
+
+  /**
+   * @brief Check if device is operational
+   * @return true if READY or DEGRADED, false if UNINIT or OFFLINE
+   */
+  bool isOnline() const {
+    return _driverState == DriverState::READY || 
+           _driverState == DriverState::DEGRADED;
+  }
+
+  /**
+   * @brief Get timestamp of last successful operation
+   * @return Milliseconds timestamp from millis()
+   */
+  uint32_t lastOkMs() const { return _lastOkMs; }
+
+  /**
+   * @brief Get most recent error status
+   * @return Status with error code, detail, and message
+   */
+  Status lastError() const { return _lastError; }
+
+  /**
+   * @brief Get consecutive failure count
+   * @return Number of consecutive failures since last success
+   */
+  uint8_t consecutiveFailures() const { return _consecutiveFailures; }
+
+  /**
+   * @brief Get total failure count
+   * @return Total failures since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalFailures() const { return _totalFailures; }
+
+  /**
+   * @brief Get total success count
+   * @return Total successes since begin() (wraps at UINT32_MAX)
+   */
+  uint32_t totalSuccess() const { return _totalSuccess; }
+
+  /**
+   * @brief Get timestamp of last error
+   * @return Milliseconds timestamp from millis(), 0 if no error yet
+   */
+  uint32_t lastErrorMs() const { return _lastErrorMs; }
+
+No other getters needed.
+
+================================================================================
+8. EXISTING API BEHAVIOR
+================================================================================
+
+NO CHANGES to existing function signatures or return values:
+
+- begin(const Config&) remains blocking, returns Status
+- tick(uint32_t) remains void, only advances EEPROM state machine
+- end() remains void
+- readTime(), setTime(), readUnix(), setUnix() unchanged
+- All alarm, timer, clock output, calibration, temperature, EVI functions unchanged
+- readRegister(), writeRegister() unchanged
+- isEepromBusy(), getEepromStatus() unchanged
+
+Internal changes only:
+- All public methods that perform I2C must call _updateHealth(st) before returning
+- begin() must initialize health tracking fields
+- end() must reset health tracking fields
+
+================================================================================
+9. MODIFICATIONS TO begin() AND end()
+================================================================================
+
+begin() changes:
+
+  Status RV3032::begin(const Config& config) {
+    _config = config;
+    _driverState = DriverState::UNINIT;  // Start in UNINIT
+    _initialized = false;
+    _eeprom = EepromOp{};
+    _eepromLastStatus = Status::Ok();
+    
+    // Reset health tracking
+    _lastOkMs = 0;
+    _lastError = Status::Ok();
+    _lastErrorMs = 0;
+    _consecutiveFailures = 0;
+    _totalFailures = 0;
+    _totalSuccess = 0;
+    
+    // Clamp offlineThreshold (values < 1 make no sense)
+    if (_config.offlineThreshold < 1) {
+      _config.offlineThreshold = 1;
+    }
+    
+    // Validate configuration - do NOT call _updateHealth for config errors
+    if (!_config.i2cWrite || !_config.i2cWriteRead) {
+      return Status::Error(Err::INVALID_CONFIG, "I2C callbacks null");
+    }
+    // ... other validation (no _updateHealth for config errors) ...
+    
+    // Test device presence (probe does not update health)
+    Status st = probe();
+    if (!st.ok()) {
+      // First real I2C attempt failed - update health
+      _updateHealth(st);
+      return st;
+    }
+    
+    // Apply stored configuration using shared helper
+    st = _applyConfig();
+    if (!st.ok() && st.code != Err::IN_PROGRESS) {
+      // Config application failed
+      _updateHealth(st);
+      return st;
+    }
+    
+    // Success - set initialized flag and update health
+    _initialized = true;
+    _updateHealth(Status::Ok());  // Sets state to READY, updates counters
+    
+    return Status::Ok();
+  }
+
+Key points for begin():
+- Do NOT call _updateHealth() for config validation errors (INVALID_CONFIG)
+- DO call _updateHealth() for I2C results (probe failure, config application)
+- On success, call _updateHealth(Status::Ok()) to ensure consistent state
+- Uses same _applyConfig() as recover() for consistency
+- Clamps offlineThreshold to minimum 1
+
+end() changes:
+
+  void RV3032::end() {
+    _initialized = false;
+    _driverState = DriverState::UNINIT;
+    _eeprom = EepromOp{};
+    _eepromLastStatus = Status::Ok();
+    
+    // Reset health tracking
+    _lastOkMs = 0;
+    _lastError = Status::Ok();
+    _lastErrorMs = 0;
+    _consecutiveFailures = 0;
+    _totalFailures = 0;
+    _totalSuccess = 0;
+  }
+
+tick() remains UNCHANGED - only advances EEPROM, no recovery logic.
+
+================================================================================
+10. EXAMPLE USAGE
+================================================================================
+
+Minimal Arduino example showing new features:
+
+  #include <Wire.h>
+  #include "RV3032/RV3032.h"
+  #include "examples/common/I2cTransport.h"
+
+  RV3032::RV3032 rtc;
+
+  void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+
+    // Optional: Probe before initialization
+    Serial.print("Probing RTC... ");
+    RV3032::Status st = rtc.probe();
+    if (!st.ok()) {
+      Serial.printf("FAILED: %s\n", st.msg);
+      return;
+    }
+    Serial.println("OK");
+
+    // Configure and initialize
+    RV3032::Config cfg;
+    cfg.i2cWrite = example::i2cWrite;
+    cfg.i2cWriteRead = example::i2cWriteRead;
+    cfg.i2cUser = &Wire;
+    cfg.offlineThreshold = 3;  // NEW: configure offline threshold
+
+    st = rtc.begin(cfg);
+    if (!st.ok()) {
+      Serial.printf("Init failed: %s\n", st.msg);
+      return;
+    }
+
+    Serial.println("RTC initialized");
+    Serial.printf("State: %s\n", stateToString(rtc.state()));
+  }
+
+  void loop() {
+    rtc.tick(millis());  // Advance EEPROM state machine
+
+    // Check driver state (NEW)
+    if (!rtc.isOnline()) {
+      Serial.printf("RTC offline (failures: %d)\n", 
+                    rtc.consecutiveFailures());
+      
+      // Attempt recovery every 5 seconds
+      static uint32_t lastRecovery = 0;
+      if (millis() - lastRecovery > 5000) {
+        Serial.print("Attempting recovery... ");
+        RV3032::Status st = rtc.recover();
+        if (st.ok()) {
+          Serial.println("SUCCESS");
+        } else {
+          Serial.printf("FAILED: %s\n", st.msg);
+        }
+        lastRecovery = millis();
+      }
+      
+      delay(1000);
+      return;
+    }
+
+    // Normal operation
+    RV3032::DateTime dt;
+    RV3032::Status st = rtc.readTime(dt);
+    if (st.ok()) {
+      Serial.printf("%04d-%02d-%02d %02d:%02d:%02d [%s]\n",
+                    dt.year, dt.month, dt.day,
+                    dt.hour, dt.minute, dt.second,
+                    stateToString(rtc.state()));
+    } else {
+      Serial.printf("Read failed: %s (state=%s, failures=%d)\n",
+                    st.msg, stateToString(rtc.state()),
+                    rtc.consecutiveFailures());
+    }
+
+    // Show health metrics every 10 seconds
+    static uint32_t lastHealth = 0;
+    if (millis() - lastHealth > 10000) {
+      Serial.printf("Health: success=%lu, failures=%lu, consecutive=%d\n",
+                    rtc.totalSuccess(), rtc.totalFailures(),
+                    rtc.consecutiveFailures());
+      lastHealth = millis();
+    }
+
+    delay(1000);
+  }
+
+  // Helper function for state display
+  const char* stateToString(RV3032::DriverState state) {
+    switch (state) {
+      case RV3032::DriverState::UNINIT: return "UNINIT";
+      case RV3032::DriverState::READY: return "READY";
+      case RV3032::DriverState::DEGRADED: return "DEGRADED";
+      case RV3032::DriverState::OFFLINE: return "OFFLINE";
+      default: return "UNKNOWN";
+    }
+  }
+
+================================================================================
+11. SUMMARY OF CHANGES
+================================================================================
+
+ADDED TO Config:
+  - uint8_t offlineThreshold = 3;    (clamped to minimum 1 in begin())
+
+ADDED TO RV3032 CLASS (public):
+  - Status probe();
+  - Status recover();
+  - DriverState state() const;
+  - bool isOnline() const;
+  - uint32_t lastOkMs() const;
+  - Status lastError() const;
+  - uint8_t consecutiveFailures() const;
+  - uint32_t totalFailures() const;
+  - uint32_t totalSuccess() const;
+  - uint32_t lastErrorMs() const;
+
+ADDED TO RV3032 CLASS (private):
+  - DriverState _driverState;
+  - uint32_t _lastOkMs;
+  - Status _lastError;
+  - uint32_t _lastErrorMs;
+  - uint8_t _consecutiveFailures;
+  - uint32_t _totalFailures;
+  - uint32_t _totalSuccess;
+  - Status _readRegisterRaw(uint8_t reg, uint8_t& value);  // bypasses health
+  - Status _updateHealth(const Status& st);
+  - Status _applyConfig();  // shared by begin() and recover()
+
+MODIFIED (internal only, no signature changes):
+  - begin(): Initialize health tracking, use _applyConfig(), call _updateHealth()
+  - end(): Reset health tracking
+  - All public methods that perform I2C: Add _updateHealth(st) before return
+
+KEY DESIGN DECISIONS:
+  - probe() uses _readRegisterRaw() - does NOT update health
+  - _updateHealth() NOT called for INVALID_CONFIG, INVALID_PARAM, NOT_INITIALIZED
+  - Err::IN_PROGRESS treated as success (EEPROM queuing is not a failure)
+  - begin() and recover() share _applyConfig() for consistency
+  - _initialized and _driverState always kept consistent (see section 0)
+
+NOT CHANGED:
+  - tick() - still only advances EEPROM, no automatic recovery
+  - All existing function signatures
+  - EEPROM state machine
+  - Any data read/write logic
+
+NOT ADDED:
+  - No async behavior beyond existing EEPROM
+  - No automatic recovery in tick()
+  - No data caching or DataValidity
+  - No allowCached parameters
+  - No PROBING, INIT, RECOVERING, SLEEPING, FAULT states
+
+================================================================================
+12. IMPLEMENTATION ESTIMATE
+================================================================================
+
+Lines of code: ~150-200 lines
+Time: 3-4 hours including testing
+Risk: LOW (additive changes, no refactoring, no async complexity)
+Benefit: HIGH (production-grade health tracking with minimal overhead)
+
+Next steps:
+1. Add DriverState enum to header
+2. Add Config::offlineThreshold field
+3. Add health tracking private members
+4. Implement _readRegisterRaw() helper (raw I2C, no health)
+5. Implement _updateHealth() helper (with IN_PROGRESS handling)
+6. Implement _applyConfig() helper (shared by begin/recover)
+7. Implement probe() (uses _readRegisterRaw, no health update)
+8. Implement recover() (uses _applyConfig, updates health)
+9. Add health getters
+10. Modify begin()/end() to initialize/reset health tracking
+11. Add _updateHealth() calls to all I2C operations (not config errors)
+12. Test with simulated I2C failures
+
+================================================================================
+END OF OPTION A PROPOSAL
+================================================================================
