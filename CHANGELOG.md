@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-20
+
+### Added
+- EEPROM write statistics: `eepromWriteCount()`, `eepromWriteFailures()`, `eepromQueueDepth()`
+- Driver health tracking with `DriverState` (READY, DEGRADED, OFFLINE)
+- Health diagnostics: `state()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
+- Recovery API: `recover()` for manual device recovery after failures
+- Probe function for diagnostic checks without affecting driver health
+- `_beginInProgress` flag for proper initialization state management
+
+### Changed
+- Improved health tracking architecture with tracked vs raw transport wrappers
+- Enhanced `begin()` and `recover()` to properly track I2C failures
+- Reduced EEPROM write timeout for improved performance
+- Disabled verbose mode by default in examples
+
+### Fixed
+- Initialization state management during `begin()` execution
+- Health tracking now correctly excludes validation errors
+
 ## [1.1.0] - 2026-01-12
 
 ### Added
@@ -54,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.0.0
