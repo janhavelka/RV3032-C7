@@ -250,9 +250,10 @@ class RV3032 {
    * @brief Probe RTC device presence and identity
    * 
    * Performs blocking I2C read to verify device is present and responding.
+   * Requires begin() so I2C callbacks are configured.
    * Does NOT modify configuration or initialize the driver.
    * Does NOT update health tracking or driver state.
-   * Can be called before begin() or anytime after.
+   * Can be called anytime after begin().
    * 
    * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
    */
@@ -335,6 +336,24 @@ class RV3032 {
    * @return IN_PROGRESS if active, OK if last op succeeded, or error status
    */
   Status getEepromStatus() const;
+
+  /**
+   * @brief Get count of successful EEPROM commits since begin()
+   * @return Number of successful EEPROM writes
+   */
+  uint32_t eepromWriteCount() const { return _eepromWriteCount; }
+
+  /**
+   * @brief Get count of failed EEPROM commits since begin()
+   * @return Number of failed EEPROM writes
+   */
+  uint32_t eepromWriteFailures() const { return _eepromWriteFailures; }
+
+  /**
+   * @brief Get current EEPROM queue depth
+   * @return Number of queued EEPROM writes
+   */
+  uint8_t eepromQueueDepth() const { return _eeprom.queueCount; }
 
   // ===== Time/Date Operations =====
 
@@ -732,6 +751,7 @@ class RV3032 {
     uint8_t value = 0;
     uint8_t control1 = 0;
     bool control1Valid = false;
+    bool countPending = false;
     uint32_t deadlineMs = 0;
     
     // Circular buffer queue
@@ -745,6 +765,8 @@ class RV3032 {
   bool _initialized = false;
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
+  uint32_t _eepromWriteCount = 0;
+  uint32_t _eepromWriteFailures = 0;
 
   // Driver state and health tracking
   DriverState _driverState = DriverState::UNINIT;

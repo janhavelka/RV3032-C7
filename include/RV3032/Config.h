@@ -63,7 +63,7 @@ struct Config {
   /// @note Applied during begin(). Off=no backup, Level=threshold, Direct=immediate
   BackupSwitchMode backupMode = BackupSwitchMode::Level;
 
-  /// @brief Enable automatic EEPROM write for persistent config changes (default: false)
+  /// @brief Enable automatic EEPROM write for persistent config changes (default: true)
   /// @note When true, config changes (clock output, offset) persist across power loss.
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
   ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
@@ -71,7 +71,7 @@ struct Config {
   ///       EEPROM has ~100k write endurance - use sparingly in production.
   bool enableEepromWrites = true;
 
-  /// @brief EEPROM write timeout in milliseconds (default: 200ms)
+  /// @brief EEPROM write timeout in milliseconds (default: 100ms)
   /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
   ///       Must be > 0 when enableEepromWrites is true.
   uint32_t eepromTimeoutMs = 100;
