@@ -328,8 +328,8 @@ static constexpr uint8_t USER_EEPROM_END = 0xEA;
 // ========== Register Bit Masks & Control Values ==========
 
 // Status register bits (REG_STATUS, 0x0D)
-static constexpr uint8_t STATUS_VLF_BIT = 1;          ///< Voltage Low Flag
-static constexpr uint8_t STATUS_PORF_BIT = 0;         ///< Power-On Reset Flag
+static constexpr uint8_t STATUS_VLF_BIT = 0;          ///< Voltage Low Flag
+static constexpr uint8_t STATUS_PORF_BIT = 1;         ///< Power-On Reset Flag
 static constexpr uint8_t STATUS_EVF_BIT = 2;          ///< External Event Flag
 static constexpr uint8_t STATUS_AF_BIT = 3;           ///< Alarm Flag
 static constexpr uint8_t STATUS_TF_BIT = 4;           ///< Timer Flag
@@ -377,6 +377,8 @@ static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit 
 static constexpr uint8_t EEPROM_CMD_UPDATE = 0x21;    ///< EEPROM update/write command
 static constexpr uint8_t EEPROM_BUSY_BIT = 2;         ///< EEPROM operation busy flag (in REG_TEMP_LSB)
 static constexpr uint8_t EEPROM_ERROR_BIT = 3;        ///< EEPROM operation error flag (in REG_TEMP_LSB)
+static constexpr uint8_t TEMP_CLKF_BIT = 1;           ///< Clock flag (in REG_TEMP_LSB)
+static constexpr uint8_t TEMP_BSF_BIT = 0;            ///< Backup switchover flag (in REG_TEMP_LSB)
 
 // I2C Address
 static constexpr uint8_t I2C_ADDR_7BIT = 0x51;        ///< 7-bit I2C slave address

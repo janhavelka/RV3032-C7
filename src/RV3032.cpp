@@ -47,9 +47,12 @@ Status RV3032::begin(const Config& config) {
 
   // Validation passed - now initialize all state
   _initialized = false;
+  _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _eepromLastStatus = Status::Ok();
+  _eepromWriteCount = 0;
+  _eepromWriteFailures = 0;
   _lastOkMs = 0;
   _lastError = Status::Ok();
   _lastErrorMs = 0;
@@ -59,6 +62,7 @@ Status RV3032::begin(const Config& config) {
 
   // Copy validated config
   _config = config;
+  _beginInProgress = true;
 
   // Clamp offlineThreshold (values < 1 make no sense)
   if (_config.offlineThreshold < 1) {
@@ -70,6 +74,7 @@ Status RV3032::begin(const Config& config) {
   if (!st.ok()) {
     // Device not found - remain in UNINIT with clean health state
     // (no health tracking since begin() failed)
+    _beginInProgress = false;
     return st;
   }
 
@@ -77,11 +82,13 @@ Status RV3032::begin(const Config& config) {
   // Health is updated automatically via tracked wrappers
   st = _applyConfig();
   if (!st.ok() && st.code != Err::IN_PROGRESS) {
+    _beginInProgress = false;
     return st;
   }
 
   // Success - set initialized flag and let _updateHealth() transition to READY
   _initialized = true;
+  _beginInProgress = false;
   return _updateHealth(Status::Ok());
 }
 
@@ -94,9 +101,12 @@ void RV3032::tick(uint32_t now_ms) {
 
 void RV3032::end() {
   _initialized = false;
+  _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _eepromLastStatus = Status::Ok();
+  _eepromWriteCount = 0;
+  _eepromWriteFailures = 0;
 
   // Reset health tracking
   _lastOkMs = 0;
@@ -122,6 +132,12 @@ Status RV3032::getEepromStatus() const {
 // ===== Driver State and Health =====
 
 Status RV3032::probe() {
+  if (!_initialized && !_beginInProgress) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (!_config.i2cWriteRead) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C callbacks not configured");
+  }
   // Read a known register to verify device presence.
   // Uses raw I2C (no health tracking) - this is a diagnostic-only function.
   // The status register value is not used; we only check if I2C succeeds.
@@ -205,8 +221,9 @@ Status RV3032::_updateHealth(const Status& st) {
     // State transitions only when initialized
     // (during begin(), we track counters but don't transition states)
     if (_initialized) {
-      // Transition from DEGRADED or OFFLINE back to READY
-      if (_driverState == DriverState::DEGRADED ||
+      // Transition to READY on first success after init or recovery.
+      if (_driverState == DriverState::UNINIT ||
+          _driverState == DriverState::DEGRADED ||
           _driverState == DriverState::OFFLINE) {
         _driverState = DriverState::READY;
       }
@@ -762,6 +779,29 @@ Status RV3032::readStatus(uint8_t& status) {
   return readRegister(cmd::REG_STATUS, status);
 }
 
+Status RV3032::readStatusFlags(StatusFlags& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t status = 0;
+  Status st = readRegister(cmd::REG_STATUS, status);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.tempHigh = (status & (1u << cmd::STATUS_THF_BIT)) != 0;
+  out.tempLow = (status & (1u << cmd::STATUS_TLF_BIT)) != 0;
+  out.update = (status & (1u << cmd::STATUS_UF_BIT)) != 0;
+  out.timer = (status & (1u << cmd::STATUS_TF_BIT)) != 0;
+  out.alarm = (status & (1u << cmd::STATUS_AF_BIT)) != 0;
+  out.event = (status & (1u << cmd::STATUS_EVF_BIT)) != 0;
+  out.powerOnReset = (status & (1u << cmd::STATUS_PORF_BIT)) != 0;
+  out.voltageLow = (status & (1u << cmd::STATUS_VLF_BIT)) != 0;
+
+  return Status::Ok();
+}
+
 Status RV3032::clearStatus(uint8_t mask) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
@@ -861,6 +901,9 @@ bool RV3032::parseBuildTime(DateTime& out) {
 // ===== Private Helper Functions =====
 
 Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
+  if (!_initialized && !_beginInProgress) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
   if (!buf || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid I2C read parameters");
   }
@@ -875,6 +918,9 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
 }
 
 Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
+  if (!_initialized && !_beginInProgress) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
   if (!buf || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid I2C write parameters");
   }
@@ -1036,6 +1082,14 @@ void RV3032::processEeprom(uint32_t now_ms) {
           _eepromLastStatus = st;
         }
       }
+      if (_eeprom.countPending) {
+        if (_eepromLastStatus.ok()) {
+          _eepromWriteCount++;
+        } else {
+          _eepromWriteFailures++;
+        }
+        _eeprom.countPending = false;
+      }
       _eeprom.control1Valid = false;
       _eeprom.state = EepromState::Idle;
       
@@ -1070,6 +1124,7 @@ Status RV3032::startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {
   _eeprom.reg = reg;
   _eeprom.value = value;
   _eeprom.control1Valid = false;
+  _eeprom.countPending = true;
   _eeprom.deadlineMs = now_ms + kEepromPreCmdTimeoutMs;
   _eeprom.state = EepromState::ReadControl1;
   _eepromLastStatus = Status::Ok();
@@ -1217,21 +1272,35 @@ bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
 }
 
 Status RV3032::readValidity(ValidityFlags& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
     return st;
   }
 
-  out.voltageLow = (status & 0x01) != 0;      // VLF bit
-  out.powerOnReset = (status & 0x02) != 0;    // PORF bit
-  out.backupSwitched = (status & 0x04) != 0;  // BSF bit
+  uint8_t tempLsb = 0;
+  st = readRegister(cmd::REG_TEMP_LSB, tempLsb);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.voltageLow = (status & (1u << cmd::STATUS_VLF_BIT)) != 0;
+  out.powerOnReset = (status & (1u << cmd::STATUS_PORF_BIT)) != 0;
+  out.backupSwitched = (tempLsb & (1u << cmd::TEMP_BSF_BIT)) != 0;
   out.timeInvalid = out.powerOnReset || out.voltageLow;
 
   return Status::Ok();
 }
 
 Status RV3032::clearPowerOnResetFlag() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
@@ -1245,6 +1314,10 @@ Status RV3032::clearPowerOnResetFlag() {
 }
 
 Status RV3032::clearVoltageLowFlag() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
   uint8_t status = 0;
   Status st = readRegister(cmd::REG_STATUS, status);
   if (!st.ok()) {
@@ -1258,16 +1331,20 @@ Status RV3032::clearVoltageLowFlag() {
 }
 
 Status RV3032::clearBackupSwitchFlag() {
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t tempLsb = 0;
+  Status st = readRegister(cmd::REG_TEMP_LSB, tempLsb);
   if (!st.ok()) {
     return st;
   }
 
-  // Clear BSF (bit 2)
-  status &= ~0x04;
+  // Clear BSF (bit 0 in REG_TEMP_LSB)
+  tempLsb = static_cast<uint8_t>(tempLsb & ~(1u << cmd::TEMP_BSF_BIT));
 
-  return writeRegister(cmd::REG_STATUS, status);
+  return writeRegister(cmd::REG_TEMP_LSB, tempLsb);
 }
 
 // ===== Public Static Conversion Functions =====

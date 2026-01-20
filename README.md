@@ -119,6 +119,9 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `const Config& getConfig() const` | Get current configuration |
 | `bool isEepromBusy() const` | Check if EEPROM persistence is active |
 | `Status getEepromStatus() const` | Get last EEPROM persistence status |
+| `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
+| `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
+| `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
 
 ### Time/Date Operations
 
@@ -189,6 +192,9 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
 | `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
 | `Status getEepromStatus() const` | Get last EEPROM commit status |
+| `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
+| `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
+| `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
 | `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
 | `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
 
@@ -217,8 +223,8 @@ namespace RV3032 {
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
     uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
     BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
-    bool enableEepromWrites = false;             // Persistent config (EEPROM)
-    uint32_t eepromTimeoutMs = 200;              // EEPROM write timeout
+    bool enableEepromWrites = true;              // Persistent config (EEPROM)
+    uint32_t eepromTimeoutMs = 100;              // EEPROM write timeout
   };
 }
 ```
@@ -228,8 +234,8 @@ namespace RV3032 {
 - `i2cAddress`: Valid 7-bit range 0x08-0x77
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
-- `enableEepromWrites`: When `false` (default), config changes are RAM-only (faster, saves EEPROM wear). When `true`, changes persist across power loss and complete asynchronously.
-- `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 200ms)
+- `enableEepromWrites`: When `false`, config changes are RAM-only (faster, saves EEPROM wear). When `true` (default), changes persist across power loss and complete asynchronously.
+- `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
 
 ## Error Handling
 
