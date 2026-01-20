@@ -47,6 +47,7 @@ Status RV3032::begin(const Config& config) {
 
   // Validation passed - now initialize all state
   _initialized = false;
+  _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _eepromLastStatus = Status::Ok();
@@ -61,6 +62,7 @@ Status RV3032::begin(const Config& config) {
 
   // Copy validated config
   _config = config;
+  _beginInProgress = true;
 
   // Clamp offlineThreshold (values < 1 make no sense)
   if (_config.offlineThreshold < 1) {
@@ -72,6 +74,7 @@ Status RV3032::begin(const Config& config) {
   if (!st.ok()) {
     // Device not found - remain in UNINIT with clean health state
     // (no health tracking since begin() failed)
+    _beginInProgress = false;
     return st;
   }
 
@@ -79,11 +82,13 @@ Status RV3032::begin(const Config& config) {
   // Health is updated automatically via tracked wrappers
   st = _applyConfig();
   if (!st.ok() && st.code != Err::IN_PROGRESS) {
+    _beginInProgress = false;
     return st;
   }
 
   // Success - set initialized flag and let _updateHealth() transition to READY
   _initialized = true;
+  _beginInProgress = false;
   return _updateHealth(Status::Ok());
 }
 
@@ -96,6 +101,7 @@ void RV3032::tick(uint32_t now_ms) {
 
 void RV3032::end() {
   _initialized = false;
+  _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _eepromLastStatus = Status::Ok();
@@ -126,7 +132,7 @@ Status RV3032::getEepromStatus() const {
 // ===== Driver State and Health =====
 
 Status RV3032::probe() {
-  if (!_initialized) {
+  if (!_initialized && !_beginInProgress) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!_config.i2cWriteRead) {
@@ -895,7 +901,7 @@ bool RV3032::parseBuildTime(DateTime& out) {
 // ===== Private Helper Functions =====
 
 Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
-  if (!_initialized) {
+  if (!_initialized && !_beginInProgress) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!buf || len == 0) {
@@ -912,7 +918,7 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
 }
 
 Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
-  if (!_initialized) {
+  if (!_initialized && !_beginInProgress) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!buf || len == 0) {

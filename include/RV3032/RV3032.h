@@ -763,6 +763,7 @@ class RV3032 {
 
   Config _config;
   bool _initialized = false;
+  bool _beginInProgress = false;
   EepromOp _eeprom;
   Status _eepromLastStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
