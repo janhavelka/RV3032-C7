@@ -69,12 +69,12 @@ struct Config {
   ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
   ///       until tick() completes the EEPROM update.
   ///       EEPROM has ~100k write endurance - use sparingly in production.
-  bool enableEepromWrites = false;
+  bool enableEepromWrites = true;
 
   /// @brief EEPROM write timeout in milliseconds (default: 200ms)
   /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
   ///       Must be > 0 when enableEepromWrites is true.
-  uint32_t eepromTimeoutMs = 200;
+  uint32_t eepromTimeoutMs = 100;
 
   /// @brief Consecutive failure threshold before transitioning to OFFLINE
   /// @note Default: 5. DEGRADED = [1, offlineThreshold-1], OFFLINE >= offlineThreshold.

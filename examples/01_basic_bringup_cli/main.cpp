@@ -140,17 +140,17 @@ static void print_help() {
   Serial.println(F("Commands:"));
   Serial.println(F("  help              - Show this help"));
   Serial.println(F("  time              - Read current time"));
-  Serial.println(F("  set YYYY MM DD HH MM SS - Set time (e.g., set 2026 01 10 15 30 00)"));
+  Serial.println(F("  set [YYYY MM DD HH MM SS] - Set time (no args = show)"));
   Serial.println(F("  setbuild          - Set time to build timestamp"));
   Serial.println(F("  unix              - Read Unix timestamp"));
   Serial.println(F("  temp              - Read temperature"));
   Serial.println(F("  alarm             - Show alarm configuration"));
-  Serial.println(F("  alarm_set MM HH DD - Set alarm time"));
-  Serial.println(F("  alarm_match M H D  - Enable match (1=on, 0=off)"));
-  Serial.println(F("  alarm_int 0|1     - Disable/enable alarm interrupt"));
+  Serial.println(F("  alarm_set [MM HH DD] - Set alarm time (no args = show)"));
+  Serial.println(F("  alarm_match [M H D]  - Enable match (1=on, 0=off), no args = show"));
+  Serial.println(F("  alarm_int [0|1]     - Disable/enable alarm interrupt (no args = show)"));
   Serial.println(F("  alarm_clear       - Clear alarm flag"));
-  Serial.println(F("  clkout 0|1        - Disable/enable clock output"));
-  Serial.println(F("  clkout_freq 0..3  - Set frequency (0=32768Hz, 1=1024Hz, 2=64Hz, 3=1Hz)"));
+  Serial.println(F("  clkout [0|1]      - Disable/enable clock output (no args = show)"));
+  Serial.println(F("  clkout_freq [0..3] - Set frequency (0=32768Hz, 1=1024Hz, 2=64Hz, 3=1Hz), no args = show"));
   Serial.println(F("  offset [ppm]      - Read or set frequency offset"));
   Serial.println(F("  status            - Read status register"));
   Serial.println(F("  validity          - Read PORF/VLF/BSF validity flags"));
@@ -198,6 +198,11 @@ static void cmd_time() {
  * Example: "set 2026 01 10 15 30 00"
  */
 static void cmd_set(const String& args) {
+  if (args.length() == 0) {
+    cmd_time();
+    return;
+  }
+
   int year, month, day, hour, minute, second;
   if (sscanf(args.c_str(), "%d %d %d %d %d %d",
              &year, &month, &day, &hour, &minute, &second) != 6) {
@@ -302,6 +307,18 @@ static void cmd_alarm() {
  * Example: "alarm_set 30 15 10" (minute hour date)
  */
 static void cmd_alarm_set(const String& args) {
+  if (args.length() == 0) {
+    RV3032::AlarmConfig cfg;
+    RV3032::Status st = g_rtc.getAlarmConfig(cfg);
+    if (!st.ok()) {
+      LOGE("getAlarmConfig() failed: %s", st.msg);
+      return;
+    }
+    Serial.printf("Alarm time: %02d:%02d (date=%02d)\n",
+                  cfg.hour, cfg.minute, cfg.date);
+    return;
+  }
+
   int minute, hour, date;
   if (sscanf(args.c_str(), "%d %d %d", &minute, &hour, &date) != 3) {
     LOGE("Invalid format. Usage: alarm_set MM HH DD");
@@ -321,6 +338,18 @@ static void cmd_alarm_set(const String& args) {
  * Example: "alarm_match 1 1 0" (minute hour date)
  */
 static void cmd_alarm_match(const String& args) {
+  if (args.length() == 0) {
+    RV3032::AlarmConfig cfg;
+    RV3032::Status st = g_rtc.getAlarmConfig(cfg);
+    if (!st.ok()) {
+      LOGE("getAlarmConfig() failed: %s", st.msg);
+      return;
+    }
+    Serial.printf("Match: minute=%d hour=%d date=%d\n",
+                  cfg.matchMinute, cfg.matchHour, cfg.matchDate);
+    return;
+  }
+
   int matchMin, matchHour, matchDate;
   if (sscanf(args.c_str(), "%d %d %d", &matchMin, &matchHour, &matchDate) != 3) {
     LOGE("Invalid format. Usage: alarm_match M H D (1=on, 0=off)");
@@ -340,6 +369,17 @@ static void cmd_alarm_match(const String& args) {
  * Example: "alarm_int 1"
  */
 static void cmd_alarm_int(const String& args) {
+  if (args.length() == 0) {
+    bool enabled = false;
+    RV3032::Status st = g_rtc.getAlarmInterruptEnabled(enabled);
+    if (!st.ok()) {
+      LOGE("getAlarmInterruptEnabled() failed: %s", st.msg);
+      return;
+    }
+    Serial.printf("Alarm interrupt: %s\n", enabled ? "enabled" : "disabled");
+    return;
+  }
+
   bool enable = (args.toInt() != 0);
   RV3032::Status st = g_rtc.enableAlarmInterrupt(enable);
   if (!st.ok()) {
@@ -365,12 +405,25 @@ static void cmd_alarm_clear() {
  * @brief Handle 'clkout' command - enable/disable clock output.
  */
 static void cmd_clkout(const String& args) {
+  if (args.length() == 0) {
+    bool enabled = false;
+    RV3032::Status st = g_rtc.getClkoutEnabled(enabled);
+    if (!st.ok()) {
+      LOGE("getClkoutEnabled() failed: %s", st.msg);
+      return;
+    }
+    Serial.printf("Clock output: %s\n", enabled ? "enabled" : "disabled");
+    return;
+  }
+
   bool enable = (args.toInt() != 0);
   RV3032::Status st = g_rtc.setClkoutEnabled(enable);
-  if (!st.ok()) {
-    LOGE("setClkoutEnabled() failed: %s", st.msg);
-  } else {
+  if (st.ok()) {
     LOGI("Clock output %s", enable ? "enabled" : "disabled");
+  } else if (st.code == RV3032::Err::IN_PROGRESS) {
+    LOGI("Clock output %s (EEPROM update queued)", enable ? "enabled" : "disabled");
+  } else {
+    LOGE("setClkoutEnabled() failed: %s", st.msg);
   }
 }
 
@@ -379,6 +432,19 @@ static void cmd_clkout(const String& args) {
  * Example: "clkout_freq 3" (0=32768Hz, 1=1024Hz, 2=64Hz, 3=1Hz)
  */
 static void cmd_clkout_freq(const String& args) {
+  const char* freqStr[] = {"32768Hz", "1024Hz", "64Hz", "1Hz"};
+  if (args.length() == 0) {
+    RV3032::ClkoutFrequency freq = RV3032::ClkoutFrequency::Hz32768;
+    RV3032::Status st = g_rtc.getClkoutFrequency(freq);
+    if (!st.ok()) {
+      LOGE("getClkoutFrequency() failed: %s", st.msg);
+      return;
+    }
+    const uint8_t idx = static_cast<uint8_t>(freq);
+    Serial.printf("Clock output frequency: %s\n", freqStr[idx]);
+    return;
+  }
+
   int freq = args.toInt();
   if (freq < 0 || freq > 3) {
     LOGE("Invalid frequency. Range: 0..3");
@@ -387,11 +453,12 @@ static void cmd_clkout_freq(const String& args) {
 
   RV3032::ClkoutFrequency freqEnum = static_cast<RV3032::ClkoutFrequency>(freq);
   RV3032::Status st = g_rtc.setClkoutFrequency(freqEnum);
-  if (!st.ok()) {
-    LOGE("setClkoutFrequency() failed: %s", st.msg);
-  } else {
-    const char* freqStr[] = {"32768Hz", "1024Hz", "64Hz", "1Hz"};
+  if (st.ok()) {
     LOGI("Clock output frequency set to %s", freqStr[freq]);
+  } else if (st.code == RV3032::Err::IN_PROGRESS) {
+    LOGI("Clock output frequency set to %s (EEPROM update queued)", freqStr[freq]);
+  } else {
+    LOGE("setClkoutFrequency() failed: %s", st.msg);
   }
 }
 
@@ -413,10 +480,12 @@ static void cmd_offset(const String& args) {
     // Set offset
     float ppm = args.toFloat();
     RV3032::Status st = g_rtc.setOffsetPpm(ppm);
-    if (!st.ok()) {
-      LOGE("setOffsetPpm() failed: %s", st.msg);
-    } else {
+    if (st.ok()) {
       LOGI("Frequency offset set to %.2f ppm", ppm);
+    } else if (st.code == RV3032::Err::IN_PROGRESS) {
+      LOGI("Frequency offset set to %.2f ppm (EEPROM update queued)", ppm);
+    } else {
+      LOGE("setOffsetPpm() failed: %s", st.msg);
     }
   }
 }
@@ -932,8 +1001,6 @@ void setup() {
   cfg.i2cWrite = transport::wireWrite;
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
-  cfg.backupMode = RV3032::BackupSwitchMode::Level;
-  cfg.enableEepromWrites = false;  // RAM-only mode for frequent testing
 
   RV3032::Status st = g_rtc.begin(cfg);
   if (!st.ok()) {
