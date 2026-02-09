@@ -6,6 +6,7 @@
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
 #include <Arduino.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -14,11 +15,25 @@ namespace RV3032 {
 // Implementation-only constants (not part of public API)
 namespace {
 constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
+constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
+constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
+constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
 /// Uses signed arithmetic to handle millis() wraparound (~49 days).
 bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
+}
+
+bool isI2cFailure(const Status& st) {
+  return st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT;
+}
+
+Status mapPresenceError(const Status& st) {
+  if (!st.ok() && isI2cFailure(st)) {
+    return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
+  }
+  return st;
 }
 }  // namespace
 
@@ -34,6 +49,9 @@ Status RV3032::begin(const Config& config) {
   // Validate configuration FIRST - don't modify any state until validation passes
   if (!config.i2cWrite || !config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
+  }
+  if (config.i2cAddress != cmd::I2C_ADDR_7BIT) {
+    return Status::Error(Err::INVALID_CONFIG, "RV3032 I2C address must be 0x51");
   }
   if (config.i2cTimeoutMs == 0) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be > 0");
@@ -86,10 +104,11 @@ Status RV3032::begin(const Config& config) {
     return st;
   }
 
-  // Success - set initialized flag and let _updateHealth() transition to READY
+  // Success - public lifecycle methods do not call _updateHealth().
   _initialized = true;
+  _driverState = DriverState::READY;
   _beginInProgress = false;
-  return _updateHealth(Status::Ok());
+  return Status::Ok();
 }
 
 void RV3032::tick(uint32_t now_ms) {
@@ -145,13 +164,8 @@ Status RV3032::probe() {
   Status st = _readRegisterRaw(cmd::REG_STATUS, statusReg);
   (void)statusReg;  // Value unused - we only verify I2C communication works
 
-  // Convert I2C errors to DEVICE_NOT_FOUND for clarity
-  if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
-    return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
-  }
-
   // Do NOT call _updateHealth() - probe is diagnostic only
-  return st;
+  return mapPresenceError(st);
 }
 
 Status RV3032::recover() {
@@ -161,18 +175,18 @@ Status RV3032::recover() {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
 
-  // Verify device presence first (probe uses raw I2C)
-  Status st = probe();
+  // Verify device presence with tracked I2C so recovery failures affect health.
+  uint8_t statusReg = 0;
+  Status st = readRegister(cmd::REG_STATUS, statusReg);
+  (void)statusReg;
+  st = mapPresenceError(st);
   if (!st.ok()) {
-    // Track failed recovery attempt - this IS a real I2C failure
-    // (unlike probe() called standalone, here we're actively trying to recover)
-    return _updateHealth(st);
+    return st;
   }
 
   // Re-apply stored configuration
   st = _applyConfig();
-  // Track final result of recovery operation
-  return _updateHealth(st);
+  return st;
 }
 
 // ===== I2C Transport Wrappers =====
@@ -232,7 +246,9 @@ Status RV3032::_updateHealth(const Status& st) {
     // Failure path
     _lastError = st;
     _lastErrorMs = millis();
-    _consecutiveFailures++;
+    if (_consecutiveFailures < 0xFFu) {
+      ++_consecutiveFailures;
+    }
     _totalFailures++;
 
     // State transitions only when initialized
@@ -256,7 +272,7 @@ Status RV3032::_updateHealth(const Status& st) {
 Status RV3032::_applyConfig() {
   // Read current PMU register
   uint8_t coe = 0;
-  Status st = _readRegisterRaw(cmd::REG_EEPROM_PMU, coe);
+  Status st = readRegister(cmd::REG_EEPROM_PMU, coe);
   if (!st.ok()) return st;
 
   // Modify backup mode bits
@@ -444,12 +460,26 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
   st = readRegister(cmd::REG_ALARM_DATE, dateReg);
   if (!st.ok()) return st;
 
+  const uint8_t minRaw = static_cast<uint8_t>(minReg & 0x7F);
+  const uint8_t hourRaw = static_cast<uint8_t>(hourReg & 0x7F);
+  const uint8_t dateRaw = static_cast<uint8_t>(dateReg & 0x7F);
+  if (!isValidBcd(minRaw) || !isValidBcd(hourRaw) || !isValidBcd(dateRaw)) {
+    return Status::Error(Err::INVALID_PARAM, "Alarm registers contain invalid BCD");
+  }
+
+  const uint8_t minute = bcdToBin(minRaw);
+  const uint8_t hour = bcdToBin(hourRaw);
+  const uint8_t date = bcdToBin(dateRaw);
+  if (minute > 59 || hour > 23 || date == 0 || date > 31) {
+    return Status::Error(Err::INVALID_PARAM, "Alarm registers out of range");
+  }
+
   out.matchMinute = ((minReg & 0x80) == 0);
   out.matchHour = ((hourReg & 0x80) == 0);
   out.matchDate = ((dateReg & 0x80) == 0);
-  out.minute = bcdToBin(static_cast<uint8_t>(minReg & 0x7F));
-  out.hour = bcdToBin(static_cast<uint8_t>(hourReg & 0x7F));
-  out.date = bcdToBin(static_cast<uint8_t>(dateReg & 0x7F));
+  out.minute = minute;
+  out.hour = hour;
+  out.date = date;
 
   return Status::Ok();
 }
@@ -514,6 +544,10 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   if (ticks > 0x0FFF) {
     return Status::Error(Err::INVALID_PARAM, "Timer ticks out of range");
   }
+  const uint8_t freqRaw = static_cast<uint8_t>(freq);
+  if (freqRaw > kMaxTimerFrequency) {
+    return Status::Error(Err::INVALID_PARAM, "Timer frequency out of range");
+  }
 
   uint8_t control1 = 0;
   Status st = readRegister(cmd::REG_CONTROL1, control1);
@@ -522,18 +556,23 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   }
 
   control1 = static_cast<uint8_t>(control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT)));
-  control1 = static_cast<uint8_t>(control1 | (static_cast<uint8_t>(freq) & cmd::CTRL1_TD_MASK));
+  control1 = static_cast<uint8_t>(control1 | (freqRaw & cmd::CTRL1_TD_MASK));
   if (enable) {
     control1 = static_cast<uint8_t>(control1 | (1u << cmd::CTRL1_TE_BIT));
   }
+
+  uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
+  uint8_t currentHigh = 0;
+  st = readRegister(cmd::REG_TIMER_HIGH, currentHigh);
+  if (!st.ok()) {
+    return st;
+  }
+  uint8_t high = static_cast<uint8_t>((currentHigh & 0xF0u) | ((ticks >> 8) & 0x0Fu));
 
   st = writeRegister(cmd::REG_CONTROL1, control1);
   if (!st.ok()) {
     return st;
   }
-
-  uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
-  uint8_t high = static_cast<uint8_t>((ticks >> 8) & 0x0F);
 
   st = writeRegister(cmd::REG_TIMER_LOW, low);
   if (!st.ok()) return st;
@@ -598,6 +637,10 @@ Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
+  const uint8_t freqRaw = static_cast<uint8_t>(freq);
+  if (freqRaw > kMaxClkoutFrequency) {
+    return Status::Error(Err::INVALID_PARAM, "CLKOUT frequency out of range");
+  }
 
   uint8_t clkout = 0;
   Status st = readRegister(cmd::REG_EEPROM_CLKOUT2, clkout);
@@ -606,7 +649,7 @@ Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
   }
 
   uint8_t newClkout = static_cast<uint8_t>(clkout & ~cmd::CLKOUT_FREQ_MASK);
-  newClkout = static_cast<uint8_t>(newClkout | ((static_cast<uint8_t>(freq) << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK));
+  newClkout = static_cast<uint8_t>(newClkout | ((freqRaw << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK));
 
   return writeEepromRegister(cmd::REG_EEPROM_CLKOUT2, newClkout);
 }
@@ -636,6 +679,9 @@ Status RV3032::getClkoutFrequency(ClkoutFrequency& freq) {
 Status RV3032::setOffsetPpm(float ppm) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (!std::isfinite(ppm)) {
+    return Status::Error(Err::INVALID_PARAM, "Offset must be finite");
   }
 
   float steps = ppm / 0.2384f;
@@ -722,6 +768,10 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
+  const uint8_t debounceRaw = static_cast<uint8_t>(debounce);
+  if (debounceRaw > kMaxEviDebounce) {
+    return Status::Error(Err::INVALID_PARAM, "EVI debounce out of range");
+  }
 
   uint8_t control = 0;
   Status st = readRegister(cmd::REG_EVI_CONTROL, control);
@@ -730,7 +780,7 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
   }
 
   uint8_t newControl = static_cast<uint8_t>(control & ~cmd::EVI_DB_MASK);
-  newControl = static_cast<uint8_t>(newControl | ((static_cast<uint8_t>(debounce) << cmd::EVI_DB_SHIFT) & cmd::EVI_DB_MASK));
+  newControl = static_cast<uint8_t>(newControl | ((debounceRaw << cmd::EVI_DB_SHIFT) & cmd::EVI_DB_MASK));
 
   return writeRegister(cmd::REG_EVI_CONTROL, newControl);
 }
@@ -984,6 +1034,26 @@ void RV3032::processEeprom(uint32_t now_ms) {
     return;
   }
 
+  auto finishEepromOperation = [&](const Status& finalStatus) {
+    _eepromLastStatus = finalStatus;
+    if (_eeprom.countPending) {
+      if (finalStatus.ok()) {
+        _eepromWriteCount++;
+      } else {
+        _eepromWriteFailures++;
+      }
+      _eeprom.countPending = false;
+    }
+    _eeprom.control1Valid = false;
+    _eeprom.state = EepromState::Idle;
+
+    uint8_t nextReg = 0;
+    uint8_t nextValue = 0;
+    if (eepromQueuePop(nextReg, nextValue)) {
+      startEepromUpdate(nextReg, nextValue, now_ms);
+    }
+  };
+
   Status st;
   bool busy = false;
   bool failed = false;
@@ -992,8 +1062,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
     case EepromState::ReadControl1:
       st = readRegister(cmd::REG_CONTROL1, _eeprom.control1);
       if (!st.ok()) {
-        _eepromLastStatus = st;
-        _eeprom.state = EepromState::Idle;
+        finishEepromOperation(st);
         break;
       }
       _eeprom.control1Valid = true;
@@ -1075,29 +1144,15 @@ void RV3032::processEeprom(uint32_t now_ms) {
       }
       break;
     case EepromState::RestoreControl1: {
+      Status finalStatus = _eepromLastStatus;
       if (_eeprom.control1Valid) {
         uint8_t restore = static_cast<uint8_t>(_eeprom.control1 & ~(1u << cmd::CTRL1_EERD_BIT));
         st = writeRegister(cmd::REG_CONTROL1, restore);
-        if (!st.ok() && _eepromLastStatus.ok()) {
-          _eepromLastStatus = st;
+        if (!st.ok() && finalStatus.ok()) {
+          finalStatus = st;
         }
       }
-      if (_eeprom.countPending) {
-        if (_eepromLastStatus.ok()) {
-          _eepromWriteCount++;
-        } else {
-          _eepromWriteFailures++;
-        }
-        _eeprom.countPending = false;
-      }
-      _eeprom.control1Valid = false;
-      _eeprom.state = EepromState::Idle;
-      
-      // Check if there's a queued operation
-      uint8_t nextReg, nextValue;
-      if (eepromQueuePop(nextReg, nextValue)) {
-        startEepromUpdate(nextReg, nextValue, now_ms);
-      }
+      finishEepromOperation(finalStatus);
       break;
     }
     case EepromState::Idle:
@@ -1233,30 +1288,28 @@ bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
 
   // Find year
   uint16_t year = 1970;
-  while (true) {
+  for (; year <= 2099; ++year) {
     uint16_t daysInYear = isLeapYear(year) ? 366 : 365;
     if (days < daysInYear) {
       break;
     }
     days -= daysInYear;
-    ++year;
-    if (year > 2099) {
-      return false;  // Out of RTC range
-    }
+  }
+  if (year > 2099) {
+    return false;  // Out of RTC range
   }
 
   // Find month
   uint8_t month = 1;
-  while (true) {
+  for (; month <= 12; ++month) {
     uint8_t dim = daysInMonth(year, month);
     if (days < dim) {
       break;
     }
     days -= dim;
-    ++month;
-    if (month > 12) {
-      return false;
-    }
+  }
+  if (month > 12) {
+    return false;
   }
 
   out.year = year;

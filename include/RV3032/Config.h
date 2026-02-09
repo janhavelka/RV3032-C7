@@ -50,8 +50,8 @@ struct Config {
   /// @brief User context passed to I2C callbacks (e.g., TwoWire*).
   void* i2cUser = nullptr;
 
-  /// @brief I2C address of RV3032-C7 (default: 0x51, not user-configurable on hardware)
-  /// @note Valid 7-bit range: 0x08-0x77.
+  /// @brief I2C address of RV3032-C7 (fixed at 0x51 on hardware)
+  /// @note begin() validates this is exactly 0x51.
   uint8_t i2cAddress = 0x51;
 
   /// @brief I2C transaction timeout in milliseconds (default: 50ms)
