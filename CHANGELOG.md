@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-02-22
+
+### Fixed
+- **Critical**: Undefined behavior in `readTemperatureC()` from left-shifting negative signed value; replaced with unsigned arithmetic and explicit 12-bit sign extension
+- `setTime()` called `computeWeekday()` before validating inputs, risking garbage computation when month=0
+- `_totalFailures` / `_totalSuccess` counters silently wrapped to 0 instead of saturating at `UINT32_MAX`
+- `clearPowerOnResetFlag()` / `clearVoltageLowFlag()` used magic numbers instead of named bit constants
+- `binToBcd()` produced corrupt BCD for values > 99; now clamps defensively
+- `unixToDate()` accepted timestamps before year 2000, producing dates rejected by `setTime()`
+
+### Changed
+- `setAlarmTime()`, `setAlarmMatch()`, `getAlarmConfig()` now use burst I2C reads/writes instead of 6 individual transactions each
+
 ## [1.2.0] - 2026-01-20
 
 ### Added

@@ -6,6 +6,7 @@
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
 #include <Arduino.h>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,7 @@ constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
 constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
 constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
+constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
 /// Uses signed arithmetic to handle millis() wraparound (~49 days).
@@ -230,7 +232,9 @@ Status RV3032::_updateHealth(const Status& st) {
     // Success path
     _lastOkMs = millis();
     _consecutiveFailures = 0;
-    _totalSuccess++;
+    if (_totalSuccess < UINT32_MAX) {
+      ++_totalSuccess;
+    }
 
     // State transitions only when initialized
     // (during begin(), we track counters but don't transition states)
@@ -249,7 +253,9 @@ Status RV3032::_updateHealth(const Status& st) {
     if (_consecutiveFailures < 0xFFu) {
       ++_consecutiveFailures;
     }
-    _totalFailures++;
+    if (_totalFailures < UINT32_MAX) {
+      ++_totalFailures;
+    }
 
     // State transitions only when initialized
     // (during begin(), we track counters but don't transition states)
@@ -348,12 +354,16 @@ Status RV3032::setTime(const DateTime& time) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  uint8_t weekday = computeWeekday(time.year, time.month, time.day);
-  DateTime validated = time;
-  validated.weekday = weekday;
-  if (!isValidDateTime(validated)) {
+  // Validate input fields BEFORE computing weekday to avoid calling
+  // dateToDays() with out-of-range month/day values.
+  if (time.year < 2000 || time.year > 2099 ||
+      time.month < 1 || time.month > 12 ||
+      time.day < 1 || time.day > daysInMonth(time.year, time.month) ||
+      time.hour > 23 || time.minute > 59 || time.second > 59) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time values");
   }
+
+  uint8_t weekday = computeWeekday(time.year, time.month, time.day);
 
   uint8_t buf[7] = {
     binToBcd(time.second),
@@ -404,23 +414,16 @@ Status RV3032::setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
     return Status::Error(Err::INVALID_PARAM, "Invalid alarm time values");
   }
 
-  uint8_t minReg = 0, hourReg = 0, dateReg = 0;
-  Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_DATE, dateReg);
+  // Burst-read all 3 alarm registers (0x08-0x0A) to preserve enable bits
+  uint8_t buf[3] = {0};
+  Status st = readRegs(cmd::REG_ALARM_MINUTE, buf, sizeof(buf));
   if (!st.ok()) return st;
 
-  minReg = static_cast<uint8_t>((minReg & 0x80) | binToBcd(minute));
-  hourReg = static_cast<uint8_t>((hourReg & 0x80) | binToBcd(hour));
-  dateReg = static_cast<uint8_t>((dateReg & 0x80) | binToBcd(date));
+  buf[0] = static_cast<uint8_t>((buf[0] & 0x80) | binToBcd(minute));
+  buf[1] = static_cast<uint8_t>((buf[1] & 0x80) | binToBcd(hour));
+  buf[2] = static_cast<uint8_t>((buf[2] & 0x80) | binToBcd(date));
 
-  st = writeRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return st;
-  st = writeRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return st;
-  return writeRegister(cmd::REG_ALARM_DATE, dateReg);
+  return writeRegs(cmd::REG_ALARM_MINUTE, buf, sizeof(buf));
 }
 
 Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
@@ -428,23 +431,16 @@ Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  uint8_t minReg = 0, hourReg = 0, dateReg = 0;
-  Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_DATE, dateReg);
+  // Burst-read all 3 alarm registers (0x08-0x0A) to preserve time values
+  uint8_t buf[3] = {0};
+  Status st = readRegs(cmd::REG_ALARM_MINUTE, buf, sizeof(buf));
   if (!st.ok()) return st;
 
-  minReg = static_cast<uint8_t>((minReg & 0x7F) | (matchMinute ? 0 : 0x80));
-  hourReg = static_cast<uint8_t>((hourReg & 0x7F) | (matchHour ? 0 : 0x80));
-  dateReg = static_cast<uint8_t>((dateReg & 0x7F) | (matchDate ? 0 : 0x80));
+  buf[0] = static_cast<uint8_t>((buf[0] & 0x7F) | (matchMinute ? 0 : 0x80));
+  buf[1] = static_cast<uint8_t>((buf[1] & 0x7F) | (matchHour ? 0 : 0x80));
+  buf[2] = static_cast<uint8_t>((buf[2] & 0x7F) | (matchDate ? 0 : 0x80));
 
-  st = writeRegister(cmd::REG_ALARM_MINUTE, minReg);
-  if (!st.ok()) return st;
-  st = writeRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return st;
-  return writeRegister(cmd::REG_ALARM_DATE, dateReg);
+  return writeRegs(cmd::REG_ALARM_MINUTE, buf, sizeof(buf));
 }
 
 Status RV3032::getAlarmConfig(AlarmConfig& out) {
@@ -452,13 +448,14 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  uint8_t minReg = 0, hourReg = 0, dateReg = 0;
-  Status st = readRegister(cmd::REG_ALARM_MINUTE, minReg);
+  // Burst-read all 3 alarm registers (0x08-0x0A)
+  uint8_t buf[3] = {0};
+  Status st = readRegs(cmd::REG_ALARM_MINUTE, buf, sizeof(buf));
   if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_HOUR, hourReg);
-  if (!st.ok()) return st;
-  st = readRegister(cmd::REG_ALARM_DATE, dateReg);
-  if (!st.ok()) return st;
+
+  const uint8_t minReg = buf[0];
+  const uint8_t hourReg = buf[1];
+  const uint8_t dateReg = buf[2];
 
   const uint8_t minRaw = static_cast<uint8_t>(minReg & 0x7F);
   const uint8_t hourRaw = static_cast<uint8_t>(hourReg & 0x7F);
@@ -736,10 +733,14 @@ Status RV3032::readTemperatureC(float& celsius) {
     return st;
   }
 
-  uint8_t lsb = buf[0];
-  int8_t msb = static_cast<int8_t>(buf[1]);
-  int16_t raw = static_cast<int16_t>(static_cast<int16_t>(msb) << 4)
-                | static_cast<int16_t>(lsb >> 4);
+  // Combine MSB (integer, two's complement) and LSB upper nibble (fractional)
+  // into a 12-bit value using unsigned arithmetic to avoid UB from shifting negatives.
+  uint16_t rawU = static_cast<uint16_t>(
+      (static_cast<uint16_t>(buf[1]) << 4) | (buf[0] >> 4));
+  // Sign-extend 12-bit two's complement to 16-bit
+  int16_t raw = (rawU & 0x0800u)
+      ? static_cast<int16_t>(rawU | 0xF000u)
+      : static_cast<int16_t>(rawU);
   celsius = static_cast<float>(raw) / 16.0f;
 
   return Status::Ok();
@@ -1235,6 +1236,9 @@ uint8_t RV3032::bcdToBin(uint8_t v) {
 }
 
 uint8_t RV3032::binToBcd(uint8_t v) {
+  // Precondition: v must be <= 99. All call sites validate before calling.
+  // Return 0x99 (max valid BCD) as a safe, detectable sentinel if violated.
+  if (v > 99) { return 0x99; }
   return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
 }
 
@@ -1283,6 +1287,11 @@ uint32_t RV3032::dateToDays(uint16_t year, uint8_t month, uint8_t day) {
 }
 
 bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
+  // Reject timestamps before 2000-01-01 (RTC valid range is 2000-2099)
+  if (ts < kEpoch2000) {
+    return false;
+  }
+
   uint32_t days = ts / 86400UL;
   uint32_t rem = ts % 86400UL;
 
@@ -1295,7 +1304,7 @@ bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
     }
     days -= daysInYear;
   }
-  if (year > 2099) {
+  if (year > 2099 || year < 2000) {
     return false;  // Out of RTC range
   }
 
@@ -1360,8 +1369,7 @@ Status RV3032::clearPowerOnResetFlag() {
     return st;
   }
 
-  // Clear PORF (bit 1)
-  status &= ~0x02;
+  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_PORF_BIT));
 
   return writeRegister(cmd::REG_STATUS, status);
 }
@@ -1377,8 +1385,7 @@ Status RV3032::clearVoltageLowFlag() {
     return st;
   }
 
-  // Clear VLF (bit 0)
-  status &= ~0x01;
+  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_VLF_BIT));
 
   return writeRegister(cmd::REG_STATUS, status);
 }
