@@ -19,6 +19,7 @@ constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
 constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
 constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
+constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
 /// Uses signed arithmetic to handle millis() wraparound (~49 days).
@@ -1235,8 +1236,9 @@ uint8_t RV3032::bcdToBin(uint8_t v) {
 }
 
 uint8_t RV3032::binToBcd(uint8_t v) {
-  // Clamp to valid BCD range — values > 99 would produce invalid nibbles
-  if (v > 99) { v = 99; }
+  // Precondition: v must be <= 99. All call sites validate before calling.
+  // Return 0x99 (max valid BCD) as a safe, detectable sentinel if violated.
+  if (v > 99) { return 0x99; }
   return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
 }
 
@@ -1286,7 +1288,6 @@ uint32_t RV3032::dateToDays(uint16_t year, uint8_t month, uint8_t day) {
 
 bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
   // Reject timestamps before 2000-01-01 (RTC valid range is 2000-2099)
-  static constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
   if (ts < kEpoch2000) {
     return false;
   }
