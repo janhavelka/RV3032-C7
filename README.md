@@ -96,9 +96,9 @@ The library version is defined in [library.json](library.json). A pre-build scri
 ```cpp
 #include "RV3032/Version.h"
 
-Serial.println(RV3032::VERSION);           // "1.0.0"
-Serial.println(RV3032::VERSION_FULL);      // "1.0.0 (a1b2c3d, 2026-01-10 15:30:00)"
-Serial.println(RV3032::BUILD_TIMESTAMP);   // "2026-01-10 15:30:00"
+Serial.println(RV3032::VERSION);           // "1.2.2"
+Serial.println(RV3032::VERSION_FULL);      // "1.2.2 (a1b2c3d, 2026-02-28 12:34:56)"
+Serial.println(RV3032::BUILD_TIMESTAMP);   // "2026-02-28 12:34:56"
 Serial.println(RV3032::GIT_COMMIT);        // "a1b2c3d"
 ```
 
@@ -354,6 +354,14 @@ README.md               - This file
 CHANGELOG.md            - Version history
 AGENTS.md               - Coding guidelines
 ```
+
+## Documentation
+
+- `CHANGELOG.md` - full release history
+- `docs/UNIFICATION_STANDARD.md` - shared API/CLI/test conventions
+- `docs/IDF_PORT.md` - ESP-IDF portability guidance
+- `release_notes.md` - latest release summary
+- `docs/DOXYGEN.md` - how to build and browse API docs
 
 ## Contributing
 

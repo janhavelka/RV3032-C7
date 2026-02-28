@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-02-28
+
+### Added
+- Unified bringup CLI support files under `examples/common/*` for consistent cross-library diagnostics and command flow
+- CLI/timing contract check tools (`tools/check_cli_contract.py`, `tools/check_core_timing_guard.py`)
+- `docs/UNIFICATION_STANDARD.md` with shared unification conventions
+
+### Changed
+- `examples/01_basic_bringup_cli` help and command output style aligned to the common I2C CLI appearance
+- Repository test/CI profile aligned with the wave-based unification quality gates
+
+### Fixed
+- Release metadata and changelog links synchronized to the `v1.2.2` release
+
 ## [1.2.1] - 2026-02-22
 
 ### Fixed
@@ -87,7 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.0.0
