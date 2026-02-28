@@ -222,6 +222,7 @@ static void print_help() {
 
   helpSection("Common");
   helpItem("help / ?", "Show this help");
+  helpItem("version / ver", "Print firmware and library version info");
   helpItem("scan", "Scan I2C bus");
   helpItem("read", "Alias of time");
   helpItem("cfg / settings", "Alias of drv");
@@ -270,6 +271,15 @@ static void print_help() {
   helpItem("stress_mix [N]", "Run N iterations mixed operations test");
   helpItem("selftest", "Run safe command self-test report");
   Serial.println();
+}
+
+static void cmd_version() {
+  Serial.println("=== Version Info ===");
+  Serial.printf("  Example firmware build: %s %s\n", __DATE__, __TIME__);
+  Serial.printf("  RV3032 library version: %s\n", RV3032::VERSION);
+  Serial.printf("  RV3032 library full: %s\n", RV3032::VERSION_FULL);
+  Serial.printf("  RV3032 library build: %s\n", RV3032::BUILD_TIMESTAMP);
+  Serial.printf("  RV3032 library commit: %s (%s)\n", RV3032::GIT_COMMIT, RV3032::GIT_STATUS);
 }
 
 /**
@@ -1571,6 +1581,8 @@ static void process_command(const String& line) {
 
   if (cmd == "help" || cmd == "?") {
     print_help();
+  } else if (cmd == "version" || cmd == "ver") {
+    cmd_version();
   } else if (cmd == "scan") {
     bus_diag::scan();
   } else if (cmd == "read") {
