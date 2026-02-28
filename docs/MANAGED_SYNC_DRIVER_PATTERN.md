@@ -1,4 +1,4 @@
-# Managed Synchronous Driver Pattern
+﻿# Managed Synchronous Driver Pattern
 
 A reusable architecture for embedded I2C device drivers with health tracking and offline detection.
 
@@ -45,8 +45,8 @@ enum class DriverState : uint8_t {
 | `_driverState` (enum) | Reflects device health | UNINIT/READY/DEGRADED/OFFLINE |
 
 **Consistency Rules**:
-- `_initialized == false` → `_driverState == UNINIT` (always)
-- `_initialized == true` → `_driverState ∈ {READY, DEGRADED, OFFLINE}`
+- `_initialized == false` -> `_driverState == UNINIT` (always)
+- `_initialized == true` -> `_driverState ∈ {READY, DEGRADED, OFFLINE}`
 
 ---
 
@@ -177,7 +177,7 @@ Status _readRegisterRaw(uint8_t reg, uint8_t& value) {
 
 ---
 
-## 5. Health Tracking — `_updateHealth()`
+## 5. Health Tracking -- `_updateHealth()`
 
 Called **only** by tracked transport wrappers:
 
@@ -222,7 +222,7 @@ Status _updateHealth(const Status& st) {
 
 ---
 
-## 6. Register Helpers — Use Tracked Wrappers
+## 6. Register Helpers -- Use Tracked Wrappers
 
 ```cpp
 Status readRegs(uint8_t reg, uint8_t* buf, size_t len) {
@@ -259,7 +259,7 @@ Status writeRegister(uint8_t reg, uint8_t value) {
 
 ---
 
-## 7. Public API — No Direct `_updateHealth()` Calls
+## 7. Public API -- No Direct `_updateHealth()` Calls
 
 After this refactor, public API methods **never** call `_updateHealth()` directly:
 
@@ -310,9 +310,9 @@ Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
 
 ---
 
-## 8. Diagnostics — Use Raw Path
+## 8. Diagnostics -- Use Raw Path
 
-### `probe()` — No Health Tracking
+### `probe()` -- No Health Tracking
 
 ```cpp
 Status probe() {
@@ -332,7 +332,7 @@ Status probe() {
 - Can be called in ANY state (even UNINIT)
 - Does NOT modify `_driverState`
 - Does NOT update health counters
-- Uses `_readRegisterRaw()` → `_i2cWriteReadRaw()`
+- Uses `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
 
 ---
 
@@ -445,23 +445,23 @@ void end() {
 
 ### Functions Using Tracked Wrappers
 
-- `readRegs()` → `_i2cWriteReadTracked()`
-- `writeRegs()` → `_i2cWriteTracked()`
+- `readRegs()` -> `_i2cWriteReadTracked()`
+- `writeRegs()` -> `_i2cWriteTracked()`
 - All public API via `readRegister()`/`writeRegister()`
 
 ### Functions Using Raw Wrappers
 
-- `probe()` → `_readRegisterRaw()` → `_i2cWriteReadRaw()`
-- `_applyConfig()` reads → `_readRegisterRaw()` → `_i2cWriteReadRaw()`
+- `probe()` -> `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
+- `_applyConfig()` reads -> `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
 
 ---
 
 ## 12. Key Design Principles
 
-1. **Centralized health tracking** — All `_updateHealth()` calls inside tracked transport wrappers
-2. **Public API never calls `_updateHealth()`** — Tracking is automatic via wrappers
-3. **Diagnostic isolation** — `probe()` and raw register reads bypass health tracking
-4. **Precondition errors don't affect health** — Config/param validation errors return early
-5. **IN_PROGRESS is success** — Queued async ops don't count as failures
-6. **Per-transaction tracking** — Multi-step ops update health per I2C call (intentional)
-7. **Transport agnostic** — Driver never touches Wire/I2C directly
+1. **Centralized health tracking** -- All `_updateHealth()` calls inside tracked transport wrappers
+2. **Public API never calls `_updateHealth()`** -- Tracking is automatic via wrappers
+3. **Diagnostic isolation** -- `probe()` and raw register reads bypass health tracking
+4. **Precondition errors don't affect health** -- Config/param validation errors return early
+5. **IN_PROGRESS is success** -- Queued async ops don't count as failures
+6. **Per-transaction tracking** -- Multi-step ops update health per I2C call (intentional)
+7. **Transport agnostic** -- Driver never touches Wire/I2C directly

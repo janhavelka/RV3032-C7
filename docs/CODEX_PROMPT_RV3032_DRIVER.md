@@ -1,4 +1,4 @@
-# CODEX PROMPT — Build a production-grade RV-3032-C7 RTC driver library (ESP32 / Arduino / PlatformIO)
+# CODEX PROMPT -- Build a production-grade RV-3032-C7 RTC driver library (ESP32 / Arduino / PlatformIO)
 
 You are implementing a **new reusable library** for the Micro Crystal **RV-3032-C7** (DTCXO RTC module).
 
@@ -42,9 +42,9 @@ Create a main class `Rv3032` with:
 - `Status getDateTime(DateTime& out);`
 - `Status setDateTime(const DateTime& dt);`
 Where `DateTime` uses validated ranges and stores:
-- year (e.g., 2000–2099), month 1–12, day 1–31
-- hour 0–23, minute 0–59, second 0–59
-- weekday (1–7 or 0–6; document mapping)
+- year (e.g., 2000-2099), month 1-12, day 1-31
+- hour 0-23, minute 0-59, second 0-59
+- weekday (1-7 or 0-6; document mapping)
 
 Implementation requirements:
 - Use **burst read** of the whole time block to get a coherent snapshot.
@@ -60,7 +60,7 @@ Provide explicit, boring structs:
 
 Rules:
 - Never clear flags implicitly.
-- In examples, demonstrate “read flags → handle → clear”.
+- In examples, demonstrate "read flags -> handle -> clear".
 
 ### Temperature API
 - `Status readTemperatureC(float& outC);` (or fixed-point int)
@@ -111,9 +111,9 @@ No dynamic allocation; no virtual calls needed; keep it simple and explicit.
 - Keep `lastError()`.
 
 ## Examples to include
-- `examples/00_read_time/` — print time every second, show burst reads
-- `examples/01_set_time_alarm/` — set time + configure an alarm + handle interrupt flags
-- Optional: `examples/02_eeprom_config/` — unlock, write a config, commit, poll busy via tick()
+- `examples/00_read_time/` -- print time every second, show burst reads
+- `examples/01_set_time_alarm/` -- set time + configure an alarm + handle interrupt flags
+- Optional: `examples/02_eeprom_config/` -- unlock, write a config, commit, poll busy via tick()
 
 ## Deliverables (files to create)
 - `include/Rv3032/Status.h`, `Config.h`, `Rv3032.h`, `Types.h`

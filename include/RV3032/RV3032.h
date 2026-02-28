@@ -804,6 +804,7 @@ class RV3032 {
 
   // Health tracking (called only by tracked transport wrappers)
   Status _updateHealth(const Status& st);
+  uint32_t _nowMs() const;
   
   // Configuration application helper
   Status _applyConfig();

@@ -1,10 +1,10 @@
-# RV3032-C7 — ESP-IDF Migration Prompt
+# RV3032-C7 -- ESP-IDF Migration Prompt
 
 > **Library**: RV3032-C7 (Micro Crystal RTC with temperature compensation)
-> **Current version**: 1.2.1 → **Target**: 2.0.0
+> **Current version**: 1.2.1 -> **Target**: 2.0.0
 > **Namespace**: `RV3032`
 > **Include path**: `#include "RV3032/RV3032.h"`
-> **Difficulty**: Easy — 3× `millis()` replacement in .cpp only, I2C already callback-based
+> **Difficulty**: Easy -- 3x `millis()` replacement in .cpp only, I2C already callback-based
 
 ---
 
@@ -16,7 +16,7 @@ git tag v1.2.1   # freeze Arduino-era version
 
 ---
 
-## Current State — Arduino Dependencies (exact)
+## Current State -- Arduino Dependencies (exact)
 
 | API | Count | Locations |
 |-----|-------|-----------|
@@ -45,13 +45,13 @@ static inline uint32_t nowMs() {
 }
 ```
 
-### 3. Replace all 3× `millis()` → `nowMs()`
+### 3. Replace all 3x `millis()` -> `nowMs()`
 
 At lines 233, 252, 1017.
 
 ### 4. Optionally modernize C headers
 
-Replace `<string.h>` → `<cstring>`, `<stdint.h>` → `<cstdint>`, etc. This is cosmetic but keeps things consistent.
+Replace `<string.h>` -> `<cstring>`, `<stdint.h>` -> `<cstdint>`, etc. This is cosmetic but keeps things consistent.
 
 ### 5. Add `CMakeLists.txt` (library root)
 
@@ -77,8 +77,8 @@ dependencies:
 
 ### 7. Version bump
 
-- `library.json` → `2.0.0`
-- `Version.h` (if present) → `2.0.0`
+- `library.json` -> `2.0.0`
+- `Version.h` (if present) -> `2.0.0`
 
 ### 8. Replace Arduino example with ESP-IDF example
 

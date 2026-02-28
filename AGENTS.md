@@ -1,4 +1,4 @@
-# AGENTS.md - RV3032-C7 Production Embedded Guidelines
+﻿# AGENTS.md - RV3032-C7 Production Embedded Guidelines
 
 ## Role and Target
 You are a professional embedded software engineer building a production-grade RV3032-C7 RTC library.
@@ -92,7 +92,7 @@ The driver follows a **managed synchronous** model with health tracking:
 
 - All public I2C operations are **blocking** (no async beyond EEPROM persistence).
 - `tick()` only advances the EEPROM state machine; no automatic recovery.
-- Health is tracked via **tracked transport wrappers** — public API never calls `_updateHealth()` directly.
+- Health is tracked via **tracked transport wrappers** -- public API never calls `_updateHealth()` directly.
 - Recovery is **manual** via `recover()` - the application controls retry strategy.
 
 ### DriverState (4 states only)
@@ -107,11 +107,11 @@ enum class DriverState : uint8_t {
 ```
 
 State transitions:
-- `begin()` success → READY
-- Any I2C failure in READY → DEGRADED
-- Success in DEGRADED/OFFLINE → READY
-- Failures reach `offlineThreshold` → OFFLINE
-- `end()` → UNINIT
+- `begin()` success -> READY
+- Any I2C failure in READY -> DEGRADED
+- Success in DEGRADED/OFFLINE -> READY
+- Failures reach `offlineThreshold` -> OFFLINE
+- `end()` -> UNINIT
 
 ### Transport Wrapper Architecture
 
@@ -123,7 +123,7 @@ Public API (readTime, setTime, etc.)
 Register helpers (readRegs, writeRegs)
     ↓
 TRACKED wrappers (_i2cWriteReadTracked, _i2cWriteTracked)
-    ↓  ← _updateHealth() called here ONLY
+    ↓  <- _updateHealth() called here ONLY
 RAW wrappers (_i2cWriteReadRaw, _i2cWriteRaw)
     ↓
 Transport callbacks (Config::i2cWrite, i2cWriteRead)
@@ -131,8 +131,8 @@ Transport callbacks (Config::i2cWrite, i2cWriteRead)
 
 **Rules:**
 - Public API methods NEVER call `_updateHealth()` directly
-- `readRegs()`/`writeRegs()` use TRACKED wrappers → health updated automatically
-- `probe()` uses RAW wrappers → no health tracking (diagnostic only)
+- `readRegs()`/`writeRegs()` use TRACKED wrappers -> health updated automatically
+- `probe()` uses RAW wrappers -> no health tracking (diagnostic only)
 - `recover()` tracks probe failures (driver is initialized, so failures count)
 
 ### Health Tracking Rules

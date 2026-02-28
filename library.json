@@ -1,6 +1,6 @@
 {
   "name": "RV3032-C7",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Robust ESP32 driver for Micro Crystal RV-3032-C7 real-time clock module with I2C interface, battery backup, alarms, and temperature compensation.",
   "keywords": [
     "esp32",

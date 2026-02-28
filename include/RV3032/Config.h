@@ -33,6 +33,11 @@ using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* tx, size_t txLen,
                                   uint8_t* rx, size_t rxLen, uint32_t timeoutMs,
                                   void* user);
 
+/// Millisecond timestamp callback.
+/// @param user User context pointer passed through from Config
+/// @return Current monotonic milliseconds
+using NowMsFn = uint32_t (*)(void* user);
+
 /**
  * @struct Config
  * @brief RTC configuration parameters
@@ -49,6 +54,13 @@ struct Config {
 
   /// @brief User context passed to I2C callbacks (e.g., TwoWire*).
   void* i2cUser = nullptr;
+
+  /// @brief Monotonic millisecond source callback (optional).
+  /// @note If null, the library falls back to Arduino millis().
+  NowMsFn nowMs = nullptr;
+
+  /// @brief User context passed to timing callbacks.
+  void* timeUser = nullptr;
 
   /// @brief I2C address of RV3032-C7 (fixed at 0x51 on hardware)
   /// @note begin() validates this is exactly 0x51.

@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to this project will be documented in this file.
 
@@ -70,8 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Periodic countdown timer with programmable frequency
 - External event input (EVI) with debouncing and timestamping
 - Programmable CLKOUT output (32.768 kHz to 1 Hz)
-- Frequency offset calibration in PPM (±200 ppm range)
-- Built-in temperature sensor reading (±3°C accuracy)
+- Frequency offset calibration in PPM (+/-200 ppm range)
+- Built-in temperature sensor reading (+/-3 degC accuracy)
 - Battery backup modes: Off, Level (threshold), Direct (immediate)
 - EEPROM persistence for configuration (optional, off by default)
 - Status error model with detailed error codes

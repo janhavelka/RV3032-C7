@@ -230,7 +230,7 @@ Status RV3032::_updateHealth(const Status& st) {
 
   if (isSuccess) {
     // Success path
-    _lastOkMs = millis();
+    _lastOkMs = _nowMs();
     _consecutiveFailures = 0;
     if (_totalSuccess < UINT32_MAX) {
       ++_totalSuccess;
@@ -249,7 +249,7 @@ Status RV3032::_updateHealth(const Status& st) {
   } else {
     // Failure path
     _lastError = st;
-    _lastErrorMs = millis();
+    _lastErrorMs = _nowMs();
     if (_consecutiveFailures < 0xFFu) {
       ++_consecutiveFailures;
     }
@@ -273,6 +273,13 @@ Status RV3032::_updateHealth(const Status& st) {
   }
 
   return st;
+}
+
+uint32_t RV3032::_nowMs() const {
+  if (_config.nowMs != nullptr) {
+    return _config.nowMs(_config.timeUser);
+  }
+  return millis();
 }
 
 Status RV3032::_applyConfig() {
@@ -457,26 +464,49 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
   const uint8_t hourReg = buf[1];
   const uint8_t dateReg = buf[2];
 
-  const uint8_t minRaw = static_cast<uint8_t>(minReg & 0x7F);
-  const uint8_t hourRaw = static_cast<uint8_t>(hourReg & 0x7F);
-  const uint8_t dateRaw = static_cast<uint8_t>(dateReg & 0x7F);
-  if (!isValidBcd(minRaw) || !isValidBcd(hourRaw) || !isValidBcd(dateRaw)) {
-    return Status::Error(Err::INVALID_PARAM, "Alarm registers contain invalid BCD");
-  }
-
-  const uint8_t minute = bcdToBin(minRaw);
-  const uint8_t hour = bcdToBin(hourRaw);
-  const uint8_t date = bcdToBin(dateRaw);
-  if (minute > 59 || hour > 23 || date == 0 || date > 31) {
-    return Status::Error(Err::INVALID_PARAM, "Alarm registers out of range");
-  }
-
   out.matchMinute = ((minReg & 0x80) == 0);
   out.matchHour = ((hourReg & 0x80) == 0);
   out.matchDate = ((dateReg & 0x80) == 0);
-  out.minute = minute;
-  out.hour = hour;
-  out.date = date;
+
+  const uint8_t minRaw = static_cast<uint8_t>(minReg & 0x7F);
+  const uint8_t hourRaw = static_cast<uint8_t>(hourReg & 0x7F);
+  const uint8_t dateRaw = static_cast<uint8_t>(dateReg & 0x7F);
+
+  auto decodeAlarmField = [&](uint8_t rawBcd, bool fieldEnabled,
+                              uint8_t minValue, uint8_t maxValue,
+                              uint8_t disabledFallback,
+                              uint8_t& outValue) -> Status {
+    if (!isValidBcd(rawBcd)) {
+      if (fieldEnabled) {
+        return Status::Error(Err::INVALID_PARAM, "Alarm registers contain invalid BCD");
+      }
+      outValue = disabledFallback;
+      return Status::Ok();
+    }
+    const uint8_t value = bcdToBin(rawBcd);
+    if (value < minValue || value > maxValue) {
+      if (fieldEnabled) {
+        return Status::Error(Err::INVALID_PARAM, "Alarm registers out of range");
+      }
+      outValue = disabledFallback;
+      return Status::Ok();
+    }
+    outValue = value;
+    return Status::Ok();
+  };
+
+  Status decode = decodeAlarmField(minRaw, out.matchMinute, 0, 59, 0, out.minute);
+  if (!decode.ok()) {
+    return decode;
+  }
+  decode = decodeAlarmField(hourRaw, out.matchHour, 0, 23, 0, out.hour);
+  if (!decode.ok()) {
+    return decode;
+  }
+  decode = decodeAlarmField(dateRaw, out.matchDate, 1, 31, 1, out.date);
+  if (!decode.ok()) {
+    return decode;
+  }
 
   return Status::Ok();
 }
@@ -1014,7 +1044,7 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
     return Status::Ok();
   }
 
-  return queueEepromUpdate(reg, value, millis());
+  return queueEepromUpdate(reg, value, _nowMs());
 }
 
 void RV3032::processEeprom(uint32_t now_ms) {

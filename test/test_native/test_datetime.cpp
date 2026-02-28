@@ -279,6 +279,30 @@ void test_get_alarm_config_rejects_invalid_bcd() {
                           static_cast<uint8_t>(st.code));
 }
 
+void test_get_alarm_config_tolerates_disabled_field_garbage() {
+  FakeI2cBus bus;
+  resetBus(bus);
+  // Minute/hour enabled and valid.
+  bus.regs[RV3032::cmd::REG_ALARM_MINUTE] = 0x12;  // 12
+  bus.regs[RV3032::cmd::REG_ALARM_HOUR] = 0x08;    // 08
+  // Date disabled (bit7=1) with invalid BCD payload in lower bits.
+  bus.regs[RV3032::cmd::REG_ALARM_DATE] = 0xFA;
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  RV3032::AlarmConfig alarm;
+  st = rtc.getAlarmConfig(alarm);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(alarm.matchMinute);
+  TEST_ASSERT_TRUE(alarm.matchHour);
+  TEST_ASSERT_FALSE(alarm.matchDate);
+  TEST_ASSERT_EQUAL_UINT8(12, alarm.minute);
+  TEST_ASSERT_EQUAL_UINT8(8, alarm.hour);
+  TEST_ASSERT_EQUAL_UINT8(1, alarm.date);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_bcd_roundtrip);
@@ -293,5 +317,6 @@ int main(int, char**) {
   RUN_TEST(test_set_timer_preserves_reserved_high_bits);
   RUN_TEST(test_invalid_runtime_params_are_rejected);
   RUN_TEST(test_get_alarm_config_rejects_invalid_bcd);
+  RUN_TEST(test_get_alarm_config_tolerates_disabled_field_garbage);
   return UNITY_END();
 }
