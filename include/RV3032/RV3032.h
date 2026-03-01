@@ -42,7 +42,7 @@
  * }
  * 
  * void loop() {
- *   rtc.tick(millis());  // Non-blocking update
+ *   rtc.tick(nowMs);  // Non-blocking update from app timebase
  *   
  *   RV3032::DateTime dt;
  *   if (rtc.readTime(dt).ok()) {
@@ -218,7 +218,7 @@ class RV3032 {
   /**
    * @brief Cooperative update (non-blocking)
    * 
-   * @param now_ms Current time in milliseconds (from millis())
+   * @param now_ms Current monotonic time in milliseconds
    * @note Advances EEPROM persistence state machine when enabled. Performs bounded work.
    */
   void tick(uint32_t now_ms);
@@ -287,7 +287,7 @@ class RV3032 {
 
   /**
    * @brief Get timestamp of last successful operation
-   * @return Milliseconds timestamp from millis()
+   * @return Milliseconds timestamp from driver timebase
    */
   uint32_t lastOkMs() const { return _lastOkMs; }
 
@@ -317,7 +317,7 @@ class RV3032 {
 
   /**
    * @brief Get timestamp of last error
-   * @return Milliseconds timestamp from millis(), 0 if no error yet
+   * @return Milliseconds timestamp from driver timebase, 0 if no error yet
    */
   uint32_t lastErrorMs() const { return _lastErrorMs; }
 
@@ -519,7 +519,7 @@ class RV3032 {
   /**
    * @brief Set frequency offset in parts-per-million
    * 
-   * @param ppm Frequency offset in ppm (typical range: ±200 ppm)
+   * @param ppm Frequency offset in ppm (typical range: +/-200 ppm)
    * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Positive values increase frequency, negative decrease it.
    *       Persistent if Config::enableEepromWrites is true.
