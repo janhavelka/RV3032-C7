@@ -11,14 +11,14 @@ namespace {
 
 struct FakeI2cBus {
   uint8_t regs[256];
-  bool failNextRead = false;
-  bool failNextWrite = false;
+  RV3032::Status nextReadStatus = RV3032::Status::Ok();
+  RV3032::Status nextWriteStatus = RV3032::Status::Ok();
 };
 
 void resetBus(FakeI2cBus& bus) {
   std::memset(bus.regs, 0, sizeof(bus.regs));
-  bus.failNextRead = false;
-  bus.failNextWrite = false;
+  bus.nextReadStatus = RV3032::Status::Ok();
+  bus.nextWriteStatus = RV3032::Status::Ok();
   bus.regs[RV3032::cmd::REG_STATUS] = 0x00;
   bus.regs[RV3032::cmd::REG_EEPROM_PMU] = RV3032::cmd::PMU_BSM_LEVEL;
   bus.regs[RV3032::cmd::REG_TIMER_HIGH] = 0xA0;
@@ -37,9 +37,10 @@ RV3032::Status fakeI2cWrite(uint8_t addr, const uint8_t* data, size_t len,
   }
 
   FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
-  if (bus->failNextWrite) {
-    bus->failNextWrite = false;
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "forced write failure", -2);
+  if (!bus->nextWriteStatus.ok()) {
+    RV3032::Status st = bus->nextWriteStatus;
+    bus->nextWriteStatus = RV3032::Status::Ok();
+    return st;
   }
 
   const uint8_t reg = data[0];
@@ -62,9 +63,10 @@ RV3032::Status fakeI2cWriteRead(uint8_t addr, const uint8_t* tx, size_t txLen,
   }
 
   FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
-  if (bus->failNextRead) {
-    bus->failNextRead = false;
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "forced read failure", -3);
+  if (!bus->nextReadStatus.ok()) {
+    RV3032::Status st = bus->nextReadStatus;
+    bus->nextReadStatus = RV3032::Status::Ok();
+    return st;
   }
 
   const uint8_t reg = tx[0];
@@ -196,10 +198,12 @@ void test_probe_failure_does_not_update_health() {
                           static_cast<uint8_t>(rtc.state()));
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
 
-  bus.failNextRead = true;
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT,
+                                              "forced probe timeout", -7);
   st = rtc.probe();
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
                           static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-7, st.detail);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
                           static_cast<uint8_t>(rtc.state()));
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
@@ -214,10 +218,12 @@ void test_recover_failure_updates_health_once() {
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
 
-  bus.failNextRead = true;
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
+                                             "forced recover nack", -8);
   st = rtc.recover();
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
                           static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-8, st.detail);
   TEST_ASSERT_EQUAL_UINT8(1, rtc.consecutiveFailures());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::DEGRADED),
                           static_cast<uint8_t>(rtc.state()));

@@ -22,11 +22,13 @@ namespace transport {
  * @brief Wire-based I2C write implementation.
  *
  * Pass to Config::i2cWrite, and pass &Wire (or custom TwoWire*) to i2cUser.
+ * The application owns the actual Wire timeout configuration; `timeoutMs` is
+ * advisory and should be set in initWire().
  *
  * @param addr I2C 7-bit address
  * @param data Data buffer to send
  * @param len Number of bytes
- * @param timeoutMs Timeout (used to set Wire timeout if supported)
+ * @param timeoutMs Advisory timeout requested by the driver
  * @param user Pointer to TwoWire instance
  * @return Status OK on success, I2C error on failure
  */
@@ -46,11 +48,7 @@ inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
                                  static_cast<int32_t>(len));
   }
 
-#if defined(ARDUINO_ARCH_ESP32)
-  wire->setTimeOut(static_cast<uint16_t>(timeoutMs));
-#else
   (void)timeoutMs;
-#endif
 
   wire->beginTransmission(addr);
   size_t written = wire->write(data, len);
@@ -64,15 +62,15 @@ inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
     case 0:
       return RV3032::Status::Ok();
     case 1:
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C data too long", result);
+      return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C data too long", result);
     case 2:
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C address NACK", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR, "I2C address NACK", result);
     case 3:
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C data NACK", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA, "I2C data NACK", result);
     case 4:
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C bus error", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_BUS, "I2C bus error", result);
     case 5:
-      return RV3032::Status::Error(RV3032::Err::TIMEOUT, "I2C timeout", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT, "I2C timeout", result);
     default:
       return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C unknown error", result);
   }
@@ -82,13 +80,15 @@ inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
  * @brief Wire-based I2C write-read implementation.
  *
  * Pass to Config::i2cWriteRead, and pass &Wire (or custom TwoWire*) to i2cUser.
+ * The application owns the actual Wire timeout configuration; `timeoutMs` is
+ * advisory and should be set in initWire().
  *
  * @param addr I2C 7-bit address
  * @param tx TX buffer to send
  * @param txLen TX length
  * @param rx RX buffer for readback
  * @param rxLen RX length
- * @param timeoutMs Timeout (used to set Wire timeout if supported)
+ * @param timeoutMs Advisory timeout requested by the driver
  * @param user Pointer to TwoWire instance
  * @return Status OK on success, I2C error on failure
  */
@@ -109,11 +109,7 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx, size_t txLe
     return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C read exceeds buffer");
   }
 
-#if defined(ARDUINO_ARCH_ESP32)
-  wire->setTimeOut(static_cast<uint16_t>(timeoutMs));
-#else
   (void)timeoutMs;
-#endif
 
   wire->beginTransmission(addr);
   size_t written = wire->write(tx, txLen);
@@ -124,7 +120,20 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx, size_t txLe
 
   uint8_t result = wire->endTransmission(false);  // Repeated start
   if (result != 0) {
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C write failed", result);
+    switch (result) {
+      case 1:
+        return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C data too long", result);
+      case 2:
+        return RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR, "I2C address NACK", result);
+      case 3:
+        return RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA, "I2C data NACK", result);
+      case 4:
+        return RV3032::Status::Error(RV3032::Err::I2C_BUS, "I2C bus error", result);
+      case 5:
+        return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT, "I2C timeout", result);
+      default:
+        return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C write failed", result);
+    }
   }
 
   size_t read = wire->requestFrom(addr, static_cast<uint8_t>(rxLen));

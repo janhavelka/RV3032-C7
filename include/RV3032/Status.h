@@ -27,7 +27,11 @@ enum class Err : uint8_t {
   REGISTER_WRITE_FAILED, ///< Register write operation failed
   QUEUE_FULL,            ///< EEPROM write queue is full (too many pending writes)
   BUSY,                  ///< Operation deferred because device is busy
-  IN_PROGRESS            ///< Operation scheduled; call tick() to complete
+  IN_PROGRESS,           ///< Operation scheduled; call tick() to complete
+  I2C_NACK_ADDR,         ///< I2C address not acknowledged
+  I2C_NACK_DATA,         ///< I2C data byte not acknowledged
+  I2C_TIMEOUT,           ///< I2C transaction timed out
+  I2C_BUS                ///< I2C bus error (arbitration lost, etc.)
 };
 
 /**

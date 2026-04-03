@@ -59,6 +59,7 @@
 #include <stddef.h>
 #include "Status.h"
 #include "Config.h"
+#include "Version.h"
 
 namespace RV3032 {
 

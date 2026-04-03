@@ -28,7 +28,17 @@ bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
 }
 
 bool isI2cFailure(const Status& st) {
-  return st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT;
+  switch (st.code) {
+    case Err::I2C_ERROR:
+    case Err::TIMEOUT:
+    case Err::I2C_NACK_ADDR:
+    case Err::I2C_NACK_DATA:
+    case Err::I2C_TIMEOUT:
+    case Err::I2C_BUS:
+      return true;
+    default:
+      return false;
+  }
 }
 
 Status mapPresenceError(const Status& st) {

@@ -96,8 +96,8 @@ The library version is defined in [library.json](library.json). A pre-build scri
 ```cpp
 #include "RV3032/Version.h"
 
-Serial.println(RV3032::VERSION);           // "1.2.2"
-Serial.println(RV3032::VERSION_FULL);      // "1.2.2 (a1b2c3d, 2026-02-28 12:34:56)"
+Serial.println(RV3032::VERSION);           // "1.3.1"
+Serial.println(RV3032::VERSION_FULL);      // "1.3.1 (a1b2c3d, 2026-02-28 12:34:56)"
 Serial.println(RV3032::BUILD_TIMESTAMP);   // "2026-02-28 12:34:56"
 Serial.println(RV3032::GIT_COMMIT);        // "a1b2c3d"
 ```
@@ -231,7 +231,7 @@ namespace RV3032 {
 
 **Configuration rules:**
 - `i2cWrite` and `i2cWriteRead` must be provided before `begin()`
-- `i2cAddress`: Valid 7-bit range 0x08-0x77
+- `i2cAddress`: Fixed at `0x51` on RV3032-C7 hardware
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
 - `enableEepromWrites`: When `false`, config changes are RAM-only (faster, saves EEPROM wear). When `true` (default), changes persist across power loss and complete asynchronously.
@@ -265,6 +265,10 @@ struct Status {
 - `REGISTER_WRITE_FAILED` - Register write failed
 - `IN_PROGRESS` - EEPROM persistence queued or active
 - `QUEUE_FULL` - EEPROM persistence queue full
+- `I2C_NACK_ADDR` - I2C address not acknowledged
+- `I2C_NACK_DATA` - I2C data byte not acknowledged
+- `I2C_TIMEOUT` - I2C transaction timed out
+- `I2C_BUS` - I2C bus error (arbitration lost, stuck bus, etc.)
 
 **Example error handling:**
 ```cpp
@@ -294,7 +298,7 @@ if (!st.ok()) {
 
 EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
 
-EEPROM has ~100k write endurance. Use `enableEepromWrites = false` (default) in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
+EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
 ## Supported Targets
 
@@ -358,10 +362,10 @@ AGENTS.md               - Coding guidelines
 ## Documentation
 
 - `CHANGELOG.md` - full release history
-- `docs/UNIFICATION_STANDARD.md` - shared API/CLI/test conventions
+- `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
-- `release_notes.md` - latest release summary
-- `docs/DOXYGEN.md` - how to build and browse API docs
+- `docs/RV3032_Register_Reference.md` - register reference guide
+- `docs/RV-3032-C7.pdf` - device datasheet
 
 ## Contributing
 

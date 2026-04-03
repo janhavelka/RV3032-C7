@@ -43,8 +43,5 @@
   "build": {
     "includeDir": "include",
     "srcDir": "src"
-  },
-  "dependencies": {
-    "Wire": "*"
   }
 }
