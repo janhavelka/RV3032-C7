@@ -362,6 +362,7 @@ AGENTS.md               - Coding guidelines
 ## Documentation
 
 - `CHANGELOG.md` - full release history
+- `release_notes.md` - latest release summary
 - `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
 - `docs/RV3032_Register_Reference.md` - register reference guide

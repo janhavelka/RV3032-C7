@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [1.4.0] - 2026-04-03
+
+### Added
+- Granular I2C transport status codes: `I2C_NACK_ADDR`, `I2C_NACK_DATA`, `I2C_TIMEOUT`, and `I2C_BUS`.
+
+### Changed
 - Removed the unnecessary `Wire` library dependency from metadata.
 - Aligned README configuration and documentation references with the current RV3032-C7 API.
 - Added granular I2C transport status codes and updated the example transport adapter to treat `timeoutMs` as advisory.
@@ -125,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.1...v1.2.2
