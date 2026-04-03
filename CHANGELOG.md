@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Removed the unnecessary `Wire` library dependency from metadata.
-- Aligned README configuration and documentation references with the current RV3032-C7 API.
-- Added granular I2C transport status codes and updated the example transport adapter to treat `timeoutMs` as advisory.
+- `RV3032/RV3032.h` now exposes `Version.h`, keeping version constants available from the canonical public include path.
+- Updated the example transport adapter to treat `timeoutMs` as advisory and leave bus-timeout ownership with the application.
+- Aligned README configuration and documentation references with the current RV3032-C7 API and shipped docs.
 
 ## [1.3.1] - 2026-04-03
 
