@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-04-02
+
+### Added
+- `inProgress()` convenience method on `Status` struct.
+- `CommandHandler.h` example helper for serial command parsing (`cmd::readLine`, `cmd::match`, `cmd::parseInt`).
+- `HealthDiag.h` example helper with verbose health diagnostics, color-coded output, snapshots, diffs, and `HealthMonitor` class for continuous monitoring.
+
+### Changed
+- `I2cScanner.h`: standardized to `LOG_SERIAL` macro, added common address hints for all supported devices.
+- `Log.h`: added `LOGV` runtime-verbose macro, ESP32-S3 USB CDC delay in `log_begin()`.
+
 ## [1.3.0] - 2026-03-01
 
 ### Changed

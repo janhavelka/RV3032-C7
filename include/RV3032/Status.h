@@ -59,6 +59,12 @@ struct Status {
   constexpr bool ok() const { return code == Err::OK; }
 
   /**
+   * @brief Check if operation is in progress (not a failure)
+   * @return true if code == Err::IN_PROGRESS
+   */
+  constexpr bool inProgress() const { return code == Err::IN_PROGRESS; }
+
+  /**
    * @brief Create successful status
    */
   static constexpr Status Ok() { return Status{Err::OK, 0, "OK"}; }

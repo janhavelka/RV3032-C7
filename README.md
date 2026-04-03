@@ -347,7 +347,7 @@ src/
   - RV3032.cpp          - Implementation
 examples/
   - 01_basic_bringup_cli/  - Interactive CLI example
-  - common/                - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h, I2cScanner.h)
+  - common/                - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h, I2cScanner.h, CommandHandler.h, HealthDiag.h)
 platformio.ini          - Build environments
 library.json            - PlatformIO metadata
 README.md               - This file

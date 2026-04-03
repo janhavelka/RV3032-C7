@@ -53,24 +53,24 @@ inline void recoverBus(int sda, int scl) {
  */
 inline void scan(TwoWire& wire, uint16_t timeoutMs = 50) {
   LOGI("Scanning I2C bus (timeout=%dms)...", timeoutMs);
-  Serial.flush();
+  LOG_SERIAL.flush();
 
 #if defined(ARDUINO_ARCH_ESP32)
   wire.setTimeOut(timeoutMs);
 #endif
 
   LOGI("     0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F");
-  Serial.flush();
+  LOG_SERIAL.flush();
 
   uint8_t count = 0;
   for (uint8_t row = 0; row < 8; row++) {
-    Serial.printf("%02X: ", row * 16);
-    Serial.flush();
+    LOG_SERIAL.printf("%02X: ", row * 16);
+    LOG_SERIAL.flush();
 
     for (uint8_t col = 0; col < 16; col++) {
       uint8_t addr = row * 16 + col;
       if (addr < 0x08 || addr > 0x77) {
-        Serial.print("   ");
+        LOG_SERIAL.print("   ");
         continue;
       }
 
@@ -78,26 +78,26 @@ inline void scan(TwoWire& wire, uint16_t timeoutMs = 50) {
       uint8_t error = wire.endTransmission(true);
 
       if (error == 0) {
-        Serial.printf("%02X ", addr);
+        LOG_SERIAL.printf("%02X ", addr);
         count++;
       } else if (error == 5) {
-        Serial.print("TO ");
+        LOG_SERIAL.print("TO ");
       } else {
-        Serial.print("-- ");
+        LOG_SERIAL.print("-- ");
       }
 
       yield();
       delay(1);
     }
-    Serial.println();
-    Serial.flush();
+    LOG_SERIAL.println();
+    LOG_SERIAL.flush();
   }
 
   LOGI("Scan complete. Found %d device(s).", count);
-  Serial.flush();
+  LOG_SERIAL.flush();
 
   if (count > 0) {
-    LOGI("Common addresses: 0x3C/0x3D=OLED, 0x68/0x69=IMU, 0x76/0x77=BMP");
+    LOGI("Common addresses: 0x3C/0x3D=OLED, 0x48-0x4B=ADS1115, 0x51=RV3032, 0x76/0x77=BME280");
   }
 }
 
