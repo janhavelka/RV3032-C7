@@ -366,6 +366,7 @@ AGENTS.md               - Coding guidelines
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
 - `docs/RV3032_Register_Reference.md` - register reference guide
 - `docs/RV-3032-C7.pdf` - device datasheet
+- `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual
 
 ## Contributing
 
