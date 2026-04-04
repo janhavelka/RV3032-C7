@@ -37,3 +37,6 @@ wifi_credentials.h
 *.bak
 *.log
 
+# Auto-generated files
+include/RV3032/Version.h
+
