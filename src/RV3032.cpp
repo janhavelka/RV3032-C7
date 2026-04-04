@@ -722,8 +722,7 @@ Status RV3032::setOffsetPpm(float ppm) {
   }
 
   float steps = ppm / 0.2384f;
-  int value = (steps >= 0.0f) ? static_cast<int>(steps + 0.5f)
-                              : static_cast<int>(steps - 0.5f);
+  int value = lrintf(steps);
 
   if (value < -32) {
     value = -32;
