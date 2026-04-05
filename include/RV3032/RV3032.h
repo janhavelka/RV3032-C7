@@ -8,7 +8,7 @@
  * - Built-in temperature compensated crystal oscillator
  * - Battery backup with automatic switchover
  * - Alarm and periodic timer functionality
- * - External event timestamping
+ * - External event input configuration (edge/debounce/overwrite)
  * - Programmable CLKOUT output
  * - EEPROM for persistent configuration
  * - Temperature sensor for crystal compensation

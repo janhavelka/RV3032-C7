@@ -10,7 +10,7 @@ Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock
 - **Temperature compensated** crystal oscillator (TCXO)
 - **Alarm functionality** with INT pin output
 - **Periodic countdown timer** with programmable frequency
-- **External event timestamping** (EVI pin)
+- **External event input configuration** (EVI edge/debounce/overwrite)
 - **Programmable CLKOUT** output (32.768 kHz to 1 Hz)
 - **Frequency offset calibration** (+/-200 ppm range)
 - **Built-in temperature sensor** (+/-3 C accuracy)
@@ -96,10 +96,10 @@ The library version is defined in [library.json](library.json). A pre-build scri
 ```cpp
 #include "RV3032/Version.h"
 
-Serial.println(RV3032::VERSION);           // "1.3.1"
-Serial.println(RV3032::VERSION_FULL);      // "1.3.1 (a1b2c3d, 2026-02-28 12:34:56)"
-Serial.println(RV3032::BUILD_TIMESTAMP);   // "2026-02-28 12:34:56"
-Serial.println(RV3032::GIT_COMMIT);        // "a1b2c3d"
+Serial.println(RV3032::VERSION);           // "<semver>"
+Serial.println(RV3032::VERSION_FULL);      // "<semver> (<git>, <timestamp>)"
+Serial.println(RV3032::BUILD_TIMESTAMP);   // "<YYYY-MM-DD hh:mm:ss>"
+Serial.println(RV3032::GIT_COMMIT);        // "<git>"
 ```
 
 **Update version:** Edit `library.json` only. `Version.h` is auto-generated on every build.
@@ -117,11 +117,23 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `void end()` | Stop and release resources |
 | `bool isInitialized() const` | Check if RTC initialized |
 | `const Config& getConfig() const` | Get current configuration |
+| `Status recover()` | Re-probe the RTC and return the driver to READY on success |
 | `bool isEepromBusy() const` | Check if EEPROM persistence is active |
 | `Status getEepromStatus() const` | Get last EEPROM persistence status |
 | `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
 | `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
 | `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
+
+### Health / Recovery
+
+| Method | Description |
+|--------|-------------|
+| `DriverState state() const` | Current driver health state |
+| `bool isOnline() const` | `true` in READY or DEGRADED |
+| `Status lastError() const` | Most recent tracked transport error |
+| `uint32_t lastOkMs() const` / `lastErrorMs() const` | Last success/error timestamps from the driver timebase |
+| `uint8_t consecutiveFailures() const` | Consecutive tracked failures since last success |
+| `uint32_t totalSuccess() const` / `totalFailures() const` | Lifetime tracked I2C counters |
 
 ### Time/Date Operations
 
@@ -181,6 +193,9 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status setEviOverwrite(bool enable)` | Allow overwriting timestamps |
 | `Status getEviConfig(EviConfig& out)` | Read EVI configuration |
 
+The current public API configures EVI behavior, but it does not expose the latched
+event timestamp registers yet.
+
 ### Status & Low-Level
 
 | Method | Description |
@@ -190,6 +205,8 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status readStatusFlags(StatusFlags& out)` | Read decoded status flags |
 | `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF validity flags |
 | `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
+| `Status clearPowerOnResetFlag()` | Clear the PORF validity flag after handling a reset event |
+| `Status clearVoltageLowFlag()` | Clear the VLF validity flag after voltage monitoring |
 | `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
 | `Status getEepromStatus() const` | Get last EEPROM commit status |
 | `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
@@ -220,11 +237,14 @@ namespace RV3032 {
     I2cWriteFn i2cWrite = nullptr;               // I2C write callback (required)
     I2cWriteReadFn i2cWriteRead = nullptr;       // I2C write-read callback (required)
     void* i2cUser = nullptr;                     // User context (e.g., TwoWire*)
+    NowMsFn nowMs = nullptr;                     // Optional monotonic clock callback
+    void* timeUser = nullptr;                    // User context for timing callback
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
     uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
     BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
     bool enableEepromWrites = true;              // Persistent config (EEPROM)
     uint32_t eepromTimeoutMs = 100;              // EEPROM write timeout
+    uint8_t offlineThreshold = 5;                // Failures before OFFLINE
   };
 }
 ```
@@ -236,6 +256,8 @@ namespace RV3032 {
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
 - `enableEepromWrites`: When `false`, config changes are RAM-only (faster, saves EEPROM wear). When `true` (default), changes persist across power loss and complete asynchronously.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
+- `nowMs` / `timeUser`: Optional injected timebase used for health timestamps and non-blocking EEPROM deadlines
+- `offlineThreshold`: Consecutive tracked I2C failures required before transitioning to `OFFLINE`
 
 ## Error Handling
 

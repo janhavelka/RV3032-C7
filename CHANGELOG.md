@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-04-05
+
+### Changed
+- README now correctly describes the current public EVI surface as configuration support rather than exposed timestamp readout.
+- README configuration and API tables now include the current health/recovery accessors, timing hooks, validity-flag helpers, and `offlineThreshold`.
+- Top-level Doxygen and README version examples now match the current release-prep state and avoid overstating capabilities.
+
 ## [1.4.0] - 2026-04-03
 
 ### Added
@@ -131,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.2...v1.3.0
