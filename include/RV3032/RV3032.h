@@ -181,6 +181,35 @@ struct EviConfig {
 };
 
 /**
+ * @struct SettingsSnapshot
+ * @brief Cached configuration and runtime state that can be read without I2C.
+ */
+struct SettingsSnapshot {
+  bool initialized = false;                   ///< True after begin() succeeds
+  DriverState state = DriverState::UNINIT;     ///< Current driver state
+  uint8_t i2cAddress = 0x51;                   ///< Active 7-bit address
+  uint32_t i2cTimeoutMs = 0;                   ///< Active I2C timeout
+  uint8_t offlineThreshold = 0;                ///< Failure threshold for OFFLINE
+  bool hasNowMsHook = false;                   ///< True when Config::nowMs is set
+
+  bool beginInProgress = false;                ///< True while begin() is probing/applying config
+  BackupSwitchMode backupMode = BackupSwitchMode::Level;  ///< Configured backup switching mode
+  bool enableEepromWrites = false;             ///< Persistent EEPROM writes enabled
+  uint32_t eepromTimeoutMs = 0;                ///< EEPROM write timeout
+  bool eepromBusy = false;                     ///< True while EEPROM state machine is active
+  Status eepromLastStatus = Status::Ok();      ///< Last EEPROM state-machine status
+  uint32_t eepromWriteCount = 0;               ///< Successful EEPROM writes since begin()
+  uint32_t eepromWriteFailures = 0;            ///< Failed EEPROM writes since begin()
+  uint8_t eepromQueueDepth = 0;                ///< Pending EEPROM queue depth
+  uint32_t lastOkMs = 0;                       ///< Timestamp of last successful operation
+  uint32_t lastErrorMs = 0;                    ///< Timestamp of last failed operation
+  Status lastError = Status::Ok();             ///< Most recent operation failure
+  uint8_t consecutiveFailures = 0;             ///< Consecutive I2C failures
+  uint32_t totalFailures = 0;                  ///< Lifetime failure count
+  uint32_t totalSuccess = 0;                   ///< Lifetime success count
+};
+
+/**
  * @class RV3032
  * @brief Comprehensive driver for RV-3032-C7 real-time clock module
  * 
@@ -285,6 +314,13 @@ class RV3032 {
     return _driverState == DriverState::READY ||
            _driverState == DriverState::DEGRADED;
   }
+
+  /**
+   * @brief Get cached configuration and runtime state without performing I2C.
+   * @param[out] out Snapshot of the current cached state.
+   * @return Status::Ok() always.
+   */
+  Status getSettings(SettingsSnapshot& out) const;
 
   /**
    * @brief Get timestamp of last successful operation
@@ -662,6 +698,28 @@ class RV3032 {
    * @warning Direct register access can disrupt RTC operation if misused
    */
   Status writeRegister(uint8_t reg, uint8_t value);
+
+  /**
+   * @brief Read a contiguous register block using tracked I2C.
+   *
+   * @param reg Start register address
+   * @param[out] buf Destination buffer
+   * @param len Number of bytes to read
+   * @return Status::Ok() on success, error otherwise
+   * @warning Direct block access can disrupt RTC operation if misused.
+   */
+  Status readRegisters(uint8_t reg, uint8_t* buf, size_t len);
+
+  /**
+   * @brief Write a contiguous register block using tracked I2C.
+   *
+   * @param reg Start register address
+   * @param buf Source buffer
+   * @param len Number of bytes to write
+   * @return Status::Ok() on success, error otherwise
+   * @warning Direct block access can disrupt RTC operation if misused.
+   */
+  Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len);
 
   // ===== Static Utility Functions =====
 

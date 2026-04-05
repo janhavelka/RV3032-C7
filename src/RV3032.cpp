@@ -160,6 +160,32 @@ Status RV3032::getEepromStatus() const {
   return _eepromLastStatus;
 }
 
+Status RV3032::getSettings(SettingsSnapshot& out) const {
+  out.initialized = _initialized;
+  out.state = _driverState;
+  out.i2cAddress = _config.i2cAddress;
+  out.i2cTimeoutMs = _config.i2cTimeoutMs;
+  out.offlineThreshold = _config.offlineThreshold;
+  out.hasNowMsHook = (_config.nowMs != nullptr);
+
+  out.beginInProgress = _beginInProgress;
+  out.backupMode = _config.backupMode;
+  out.enableEepromWrites = _config.enableEepromWrites;
+  out.eepromTimeoutMs = _config.eepromTimeoutMs;
+  out.eepromBusy = isEepromBusy();
+  out.eepromLastStatus = _eepromLastStatus;
+  out.eepromWriteCount = _eepromWriteCount;
+  out.eepromWriteFailures = _eepromWriteFailures;
+  out.eepromQueueDepth = _eeprom.queueCount;
+  out.lastOkMs = _lastOkMs;
+  out.lastErrorMs = _lastErrorMs;
+  out.lastError = _lastError;
+  out.consecutiveFailures = _consecutiveFailures;
+  out.totalFailures = _totalFailures;
+  out.totalSuccess = _totalSuccess;
+  return Status::Ok();
+}
+
 // ===== Driver State and Health =====
 
 Status RV3032::probe() {
@@ -920,6 +946,14 @@ Status RV3032::readRegister(uint8_t reg, uint8_t& value) {
 
 Status RV3032::writeRegister(uint8_t reg, uint8_t value) {
   return writeRegs(reg, &value, 1);
+}
+
+Status RV3032::readRegisters(uint8_t reg, uint8_t* buf, size_t len) {
+  return readRegs(reg, buf, len);
+}
+
+Status RV3032::writeRegisters(uint8_t reg, const uint8_t* buf, size_t len) {
+  return writeRegs(reg, buf, len);
 }
 
 // ===== Static Utility Functions =====

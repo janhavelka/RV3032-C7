@@ -214,6 +214,8 @@ event timestamp registers yet.
 | `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
 | `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
 | `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
+| `Status readRegisters(uint8_t reg, uint8_t* buf, size_t len)` | Read contiguous register block |
+| `Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len)` | Write contiguous register block |
 
 ### Static Utility Functions
 
@@ -326,8 +328,8 @@ EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applicatio
 
 | Board | Environment | Notes |
 |-------|-------------|-------|
-| ESP32-S3-MINI-1U-N4R2 | `ex_bringup_s3` | PSRAM enabled |
-| ESP32-S2-MINI-2-N4 | `ex_bringup_s2` | No PSRAM |
+| ESP32-S3-MINI-1U-N4R2 | `esp32s3dev` | PSRAM enabled |
+| ESP32-S2-MINI-2-N4 | `esp32s2dev` | No PSRAM |
 
 ## Examples
 
@@ -343,22 +345,35 @@ Interactive CLI demonstrating all RTC features:
 
 ```bash
 # Build and upload
-pio run -e ex_bringup_s3 -t upload && pio device monitor -e ex_bringup_s3
+pio run -e esp32s3dev -t upload && pio device monitor -e esp32s3dev
 ```
 
-## Build
+### Example Helpers (`examples/common/`)
+
+These helpers are example-only glue and are not part of the public library API.
+
+| File | Purpose |
+|------|---------|
+| `BoardConfig.h` | Board-specific pin defaults and `Wire` setup |
+| `BuildConfig.h` | Compile-time log-level configuration |
+| `Log.h` | Serial logging helpers |
+| `I2cTransport.h` | Wire-backed transport adapter |
+| `I2cScanner.h` | Bus scan helper |
+| `BusDiag.h` | Bus diagnostics wrapper |
+| `CliShell.h` | Simple serial shell helper |
+| `CommandHandler.h` | Example command parsing helpers |
+| `HealthView.h` | Compact health display helper |
+| `HealthDiag.h` | Verbose health diagnostics helper |
+| `TransportAdapter.h` | Transport alias helper |
+
+## Running Tests
 
 ```bash
-# Clone repository
-git clone https://github.com/janhavelka/RV3032-C7.git
-cd RV3032-C7
-
-# Build for ESP32-S3
-pio run -e ex_bringup_s3
-
-# Upload and monitor
-pio run -e ex_bringup_s3 -t upload
-pio device monitor -e ex_bringup_s3
+pio test -e native
+python tools/check_cli_contract.py
+python tools/check_core_timing_guard.py
+pio run -e esp32s3dev
+pio run -e esp32s2dev
 ```
 
 ## Project Structure
@@ -373,7 +388,7 @@ src/
   - RV3032.cpp          - Implementation
 examples/
   - 01_basic_bringup_cli/  - Interactive CLI example
-  - common/                - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h, I2cScanner.h, CommandHandler.h, HealthDiag.h)
+  - common/                - Example-only helpers (shared CLI/log/transport glue)
 platformio.ini          - Build environments
 library.json            - PlatformIO metadata
 README.md               - This file

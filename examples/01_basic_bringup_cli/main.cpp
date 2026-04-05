@@ -991,10 +991,11 @@ static void cmd_clear_vlf() {
 static void cmd_drv() {
   Serial.println();
   Serial.println(F("=== Driver Health ==="));
-  const RV3032::DriverState state = g_rtc.state();
+  RV3032::SettingsSnapshot snap;
+  (void)g_rtc.getSettings(snap);
+  const RV3032::DriverState state = snap.state;
   const bool online = g_rtc.isOnline();
-  const bool initialized = g_rtc.isInitialized();
-  const RV3032::Config& cfg = g_rtc.getConfig();
+  const bool initialized = snap.initialized;
   const uint32_t totalOk = g_rtc.totalSuccess();
   const uint32_t totalFail = g_rtc.totalFailures();
   const uint32_t total = totalOk + totalFail;
@@ -1013,13 +1014,18 @@ static void cmd_drv() {
                 initialized ? LOG_COLOR_GREEN : LOG_COLOR_RED,
                 log_bool_str(initialized),
                 LOG_COLOR_RESET);
-  Serial.printf("Config: addr=0x%02X i2cTimeout=%lu eepromTimeout=%lu backupMode=%u eepromWrites=%s offlineThreshold=%u\n",
-                static_cast<unsigned>(cfg.i2cAddress),
-                static_cast<unsigned long>(cfg.i2cTimeoutMs),
-                static_cast<unsigned long>(cfg.eepromTimeoutMs),
-                static_cast<unsigned>(cfg.backupMode),
-                cfg.enableEepromWrites ? "true" : "false",
-                static_cast<unsigned>(cfg.offlineThreshold));
+  Serial.printf("Config: addr=0x%02X i2cTimeout=%lu offlineThreshold=%u nowMs=%s\n",
+                static_cast<unsigned>(snap.i2cAddress),
+                static_cast<unsigned long>(snap.i2cTimeoutMs),
+                static_cast<unsigned>(snap.offlineThreshold),
+                log_bool_str(snap.hasNowMsHook));
+  Serial.printf("EEPROM: busy=%s writes=%s timeout=%lu queue=%u ok=%lu fail=%lu\n",
+                log_bool_str(snap.eepromBusy),
+                log_bool_str(snap.enableEepromWrites),
+                static_cast<unsigned long>(snap.eepromTimeoutMs),
+                static_cast<unsigned>(snap.eepromQueueDepth),
+                static_cast<unsigned long>(snap.eepromWriteCount),
+                static_cast<unsigned long>(snap.eepromWriteFailures));
   Serial.println();
   
   Serial.println(F("=== Counters ==="));
