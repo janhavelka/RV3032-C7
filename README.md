@@ -117,6 +117,7 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `void end()` | Stop and release resources |
 | `bool isInitialized() const` | Check if RTC initialized |
 | `const Config& getConfig() const` | Get current configuration |
+| `Status getSettings(SettingsSnapshot& out)` | Populate a snapshot of cached config, EEPROM state, and health counters (no I2C) |
 | `Status recover()` | Re-probe the RTC and return the driver to READY on success |
 | `bool isEepromBusy() const` | Check if EEPROM persistence is active |
 | `Status getEepromStatus() const` | Get last EEPROM persistence status |

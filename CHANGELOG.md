@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `SettingsSnapshot` struct for reading cached configuration, EEPROM state, and health counters without I2C.
+- `getSettings(SettingsSnapshot&)` method to populate a settings snapshot.
+- `Status::is(Err)` method for type-safe error code comparison.
+- `Status::operator bool()` explicit conversion for concise success checks.
+- `readRegisters()` and `writeRegisters()` public block-register access methods.
+
 ## [1.4.1] - 2026-04-05
 
 ### Changed
