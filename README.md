@@ -256,6 +256,7 @@ namespace RV3032 {
 - `i2cWrite` and `i2cWriteRead` must be provided before `begin()`
 - `i2cAddress`: Fixed at `0x51` on RV3032-C7 hardware
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
+- Invalid `backupMode` enum values are rejected by `begin()` before any I2C access.
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
 - `enableEepromWrites`: When `false`, config changes are RAM-only (faster, saves EEPROM wear). When `true` (default), changes persist across power loss and complete asynchronously.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
@@ -315,6 +316,8 @@ if (!st.ok()) {
 **Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
 
 **Error Handling:** All errors returned as `Status`. No silent failures.
+
+**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` validate documented RV3032 address windows, reject wraparound and invalid buffers, and do not count local validation failures against driver health.
 
 **EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
 - `setClkoutEnabled()` / `setClkoutFrequency()`

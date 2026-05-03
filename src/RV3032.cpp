@@ -16,6 +16,7 @@ namespace RV3032 {
 // Implementation-only constants (not part of public API)
 namespace {
 constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
+constexpr uint8_t kMaxBackupSwitchMode = static_cast<uint8_t>(BackupSwitchMode::Direct);
 constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
 constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
@@ -47,6 +48,50 @@ Status mapPresenceError(const Status& st) {
   }
   return st;
 }
+
+bool shouldTrackHealth(const Status& st) {
+  switch (st.code) {
+    case Err::INVALID_CONFIG:
+    case Err::INVALID_PARAM:
+    case Err::NOT_INITIALIZED:
+    case Err::INVALID_DATETIME:
+      return false;
+    default:
+      return true;
+  }
+}
+
+bool isKnownRegisterAddress(uint8_t reg) {
+  if (reg <= cmd::REG_TS_EVI_YEAR) {
+    return true;
+  }
+  if (reg >= cmd::REG_PASSWORD0 && reg <= cmd::REG_USER_RAM_END) {
+    return true;
+  }
+  if (reg >= cmd::REG_EEPROM_PMU && reg <= cmd::USER_EEPROM_END) {
+    return true;
+  }
+  return false;
+}
+
+bool isKnownRegisterBlock(uint8_t reg, size_t len) {
+  if (len == 0 || len > 256) {
+    return false;
+  }
+
+  const uint16_t start = reg;
+  const uint16_t end = static_cast<uint16_t>(start + len - 1);
+  if (end > 0xFFu) {
+    return false;
+  }
+
+  for (uint16_t addr = start; addr <= end; ++addr) {
+    if (!isKnownRegisterAddress(static_cast<uint8_t>(addr))) {
+      return false;
+    }
+  }
+  return true;
+}
 }  // namespace
 
 // ===== Lifecycle Functions =====
@@ -73,6 +118,9 @@ Status RV3032::begin(const Config& config) {
   }
   if (config.enableEepromWrites && config.i2cTimeoutMs < kEepromPreCmdTimeoutMs) {
     return Status::Error(Err::INVALID_CONFIG, "I2C timeout must be >= 50ms for EEPROM writes");
+  }
+  if (static_cast<uint8_t>(config.backupMode) > kMaxBackupSwitchMode) {
+    return Status::Error(Err::INVALID_CONFIG, "Invalid backup switch mode");
   }
 
   // Validation passed - now initialize all state
@@ -233,6 +281,9 @@ Status RV3032::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxB
   if (!_config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
   }
+  if ((txLen > 0 && txBuf == nullptr) || rxBuf == nullptr || rxLen == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C read buffers");
+  }
   return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
                               _config.i2cTimeoutMs, _config.i2cUser);
 }
@@ -241,21 +292,33 @@ Status RV3032::_i2cWriteRaw(const uint8_t* buf, size_t len) {
   if (!_config.i2cWrite) {
     return Status::Error(Err::INVALID_CONFIG, "I2C write callback null");
   }
+  if (!buf || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C write buffer");
+  }
   return _config.i2cWrite(_config.i2cAddress, buf, len,
                           _config.i2cTimeoutMs, _config.i2cUser);
 }
 
 Status RV3032::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
   Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
+  if (!shouldTrackHealth(st)) {
+    return st;
+  }
   return _updateHealth(st);
 }
 
 Status RV3032::_i2cWriteTracked(const uint8_t* buf, size_t len) {
   Status st = _i2cWriteRaw(buf, len);
+  if (!shouldTrackHealth(st)) {
+    return st;
+  }
   return _updateHealth(st);
 }
 
 Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
+  if (!isKnownRegisterAddress(reg)) {
+    return Status::Error(Err::INVALID_PARAM, "Register address out of range");
+  }
   uint8_t tx = reg;
   return _i2cWriteReadRaw(&tx, 1, &value, 1);
 }
@@ -1035,6 +1098,9 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
   if (len > 255) {
     return Status::Error(Err::INVALID_PARAM, "I2C read length too large");
   }
+  if (!isKnownRegisterBlock(reg, len)) {
+    return Status::Error(Err::INVALID_PARAM, "Register block out of range");
+  }
 
   uint8_t tx = reg;
   // Use tracked wrapper - health is updated automatically
@@ -1054,6 +1120,9 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
   static constexpr size_t kMaxWriteLen = 16;
   if (len > (kMaxWriteLen - 1)) {  // len is data only, we add 1 for register address
     return Status::Error(Err::INVALID_PARAM, "I2C write length exceeds 15 bytes");
+  }
+  if (!isKnownRegisterBlock(reg, len)) {
+    return Status::Error(Err::INVALID_PARAM, "Register block out of range");
   }
 
   uint8_t tx[kMaxWriteLen] = {0};

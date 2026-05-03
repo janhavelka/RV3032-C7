@@ -13,6 +13,8 @@ struct FakeI2cBus {
   uint8_t regs[256];
   RV3032::Status nextReadStatus = RV3032::Status::Ok();
   RV3032::Status nextWriteStatus = RV3032::Status::Ok();
+  uint32_t readCalls = 0;
+  uint32_t writeCalls = 0;
 };
 
 uint32_t fakeNowMs(void*) {
@@ -23,6 +25,8 @@ void resetBus(FakeI2cBus& bus) {
   std::memset(bus.regs, 0, sizeof(bus.regs));
   bus.nextReadStatus = RV3032::Status::Ok();
   bus.nextWriteStatus = RV3032::Status::Ok();
+  bus.readCalls = 0;
+  bus.writeCalls = 0;
   bus.regs[RV3032::cmd::REG_STATUS] = 0x00;
   bus.regs[RV3032::cmd::REG_EEPROM_PMU] = RV3032::cmd::PMU_BSM_LEVEL;
   bus.regs[RV3032::cmd::REG_TIMER_HIGH] = 0xA0;
@@ -36,11 +40,13 @@ RV3032::Status fakeI2cWrite(uint8_t addr, const uint8_t* data, size_t len,
   if (addr != RV3032::cmd::I2C_ADDR_7BIT) {
     return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "address mismatch", -1);
   }
+
+  FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
+  bus->writeCalls++;
   if (!data || len == 0) {
     return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "write invalid");
   }
 
-  FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
   if (!bus->nextWriteStatus.ok()) {
     RV3032::Status st = bus->nextWriteStatus;
     bus->nextWriteStatus = RV3032::Status::Ok();
@@ -62,11 +68,13 @@ RV3032::Status fakeI2cWriteRead(uint8_t addr, const uint8_t* tx, size_t txLen,
   if (addr != RV3032::cmd::I2C_ADDR_7BIT) {
     return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "address mismatch", -1);
   }
+
+  FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
+  bus->readCalls++;
   if (!tx || txLen != 1 || !rx || rxLen == 0) {
     return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "read invalid");
   }
 
-  FakeI2cBus* bus = static_cast<FakeI2cBus*>(user);
   if (!bus->nextReadStatus.ok()) {
     RV3032::Status st = bus->nextReadStatus;
     bus->nextReadStatus = RV3032::Status::Ok();
@@ -203,6 +211,22 @@ void test_begin_rejects_non_default_address() {
                           static_cast<uint8_t>(st.code));
 }
 
+void test_begin_rejects_invalid_backup_mode() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Config cfg = makeConfig(bus);
+  cfg.backupMode = static_cast<RV3032::BackupSwitchMode>(9);
+
+  RV3032::Status st = rtc.begin(cfg);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_CONFIG),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(rtc.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+}
+
 void test_get_settings_snapshot() {
   FakeI2cBus bus;
   resetBus(bus);
@@ -282,6 +306,25 @@ void test_recover_failure_updates_health_once() {
   TEST_ASSERT_EQUAL_INT32(-8, st.detail);
   TEST_ASSERT_EQUAL_UINT8(1, rtc.consecutiveFailures());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::DEGRADED),
+                          static_cast<uint8_t>(rtc.state()));
+}
+
+void test_transport_validation_status_does_not_update_health() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::INVALID_PARAM,
+                                              "transport validation", -9);
+  uint8_t status = 0;
+  st = rtc.readStatus(status);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
                           static_cast<uint8_t>(rtc.state()));
 }
 
@@ -417,6 +460,42 @@ void test_public_block_register_access_rejects_invalid_params() {
                           static_cast<uint8_t>(st.code));
 }
 
+void test_public_block_register_access_rejects_invalid_ranges_without_i2c() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  const uint32_t readsAfterBegin = bus.readCalls;
+  const uint32_t writesAfterBegin = bus.writeCalls;
+  uint8_t one = 0;
+  uint8_t two[2] = {};
+
+  st = rtc.readRegisters(0x2E, &one, 1);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.readRegisters(RV3032::cmd::REG_TS_EVI_YEAR, two, sizeof(two));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.writeRegisters(0x50, &one, 1);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.writeRegisters(RV3032::cmd::REG_USER_RAM_END, two, sizeof(two));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  TEST_ASSERT_EQUAL_UINT32(readsAfterBegin, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesAfterBegin, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
+                          static_cast<uint8_t>(rtc.state()));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_bcd_roundtrip);
@@ -427,14 +506,17 @@ int main(int, char**) {
   RUN_TEST(test_unix_out_of_rtc_range);
   RUN_TEST(test_invalid_date);
   RUN_TEST(test_begin_rejects_non_default_address);
+  RUN_TEST(test_begin_rejects_invalid_backup_mode);
   RUN_TEST(test_get_settings_snapshot);
   RUN_TEST(test_probe_failure_does_not_update_health);
   RUN_TEST(test_recover_failure_updates_health_once);
+  RUN_TEST(test_transport_validation_status_does_not_update_health);
   RUN_TEST(test_set_timer_preserves_reserved_high_bits);
   RUN_TEST(test_invalid_runtime_params_are_rejected);
   RUN_TEST(test_get_alarm_config_rejects_invalid_bcd);
   RUN_TEST(test_get_alarm_config_tolerates_disabled_field_garbage);
   RUN_TEST(test_public_block_register_access);
   RUN_TEST(test_public_block_register_access_rejects_invalid_params);
+  RUN_TEST(test_public_block_register_access_rejects_invalid_ranges_without_i2c);
   return UNITY_END();
 }

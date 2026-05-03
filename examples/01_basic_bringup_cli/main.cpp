@@ -20,6 +20,7 @@
 #include "examples/common/BoardConfig.h"
 #include "examples/common/BusDiag.h"
 #include "examples/common/I2cTransport.h"
+#include "examples/common/CliStyle.h"
 #include "examples/common/Log.h"
 #include "RV3032/CommandTable.h"
 #include "RV3032/Version.h"
@@ -207,69 +208,62 @@ static String read_line() {
  * @brief Print available commands.
  */
 static void print_help() {
-  auto helpSection = [](const char* title) {
-    Serial.printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET);
-  };
-  auto helpItem = [](const char* cmd, const char* desc) {
-    Serial.printf("  %s%-32s%s - %s\n", LOG_COLOR_CYAN, cmd, LOG_COLOR_RESET, desc);
-  };
-
   Serial.println();
-  Serial.printf("%s=== RV3032-C7 CLI Help ===%s\n", LOG_COLOR_CYAN, LOG_COLOR_RESET);
+  cli::printHelpHeader("RV3032-C7 CLI Help");
   Serial.printf("Version: %s\n", RV3032::VERSION);
   Serial.printf("Built:   %s\n", RV3032::BUILD_TIMESTAMP);
   Serial.printf("Commit:  %s (%s)\n", RV3032::GIT_COMMIT, RV3032::GIT_STATUS);
 
-  helpSection("Common");
-  helpItem("help / ?", "Show this help");
-  helpItem("version / ver", "Print firmware and library version info");
-  helpItem("scan", "Scan I2C bus");
-  helpItem("read", "Alias of time");
-  helpItem("cfg / settings", "Alias of drv");
-  helpItem("time", "Read current time");
-  helpItem("set [YYYY MM DD HH MM SS]", "Set time (no args = show)");
-  helpItem("setbuild", "Set time to build timestamp");
-  helpItem("unix [ts]", "Read or set Unix timestamp");
-  helpItem("temp", "Read temperature");
+  cli::printHelpSection("Common");
+  cli::printHelpItem("help / ?", "Show this help");
+  cli::printHelpItem("version / ver", "Print firmware and library version info");
+  cli::printHelpItem("scan", "Scan I2C bus");
+  cli::printHelpItem("read", "Alias of time");
+  cli::printHelpItem("cfg / settings", "Alias of drv");
+  cli::printHelpItem("time", "Read current time");
+  cli::printHelpItem("set [YYYY MM DD HH MM SS]", "Set time (no args = show)");
+  cli::printHelpItem("setbuild", "Set time to build timestamp");
+  cli::printHelpItem("unix [ts]", "Read or set Unix timestamp");
+  cli::printHelpItem("temp", "Read temperature");
 
-  helpSection("Alarm And Timer");
-  helpItem("alarm", "Show alarm configuration");
-  helpItem("alarm_set [MM HH DD]", "Set alarm time (no args = show)");
-  helpItem("alarm_match [M H D]", "Set alarm match flags (no args = show)");
-  helpItem("alarm_int [0|1]", "Disable/enable alarm interrupt (no args = show)");
-  helpItem("alarm_clear", "Clear alarm flag");
-  helpItem("timer", "Show timer config");
-  helpItem("timer <ticks> <freq 0..3> <en 0|1>", "Set timer");
+  cli::printHelpSection("Alarm And Timer");
+  cli::printHelpItem("alarm", "Show alarm configuration");
+  cli::printHelpItem("alarm_set [MM HH DD]", "Set alarm time (no args = show)");
+  cli::printHelpItem("alarm_match [M H D]", "Set alarm match flags (no args = show)");
+  cli::printHelpItem("alarm_int [0|1]", "Disable/enable alarm interrupt (no args = show)");
+  cli::printHelpItem("alarm_clear", "Clear alarm flag");
+  cli::printHelpItem("timer", "Show timer config");
+  cli::printHelpItem("timer <ticks> <freq 0..3> <en 0|1>", "Set timer");
 
-  helpSection("Clock And Event");
-  helpItem("clkout [0|1]", "Disable/enable clock output (no args = show)");
-  helpItem("clkout_freq [0..3]", "Set clock frequency (no args = show)");
-  helpItem("offset [ppm]", "Read or set frequency offset");
-  helpItem("evi", "Show EVI config");
-  helpItem("evi edge [0|1]", "Set/read EVI edge (0=falling,1=rising)");
-  helpItem("evi debounce [0..3]", "Set/read EVI debounce");
-  helpItem("evi overwrite [0|1]", "Set/read EVI overwrite");
+  cli::printHelpSection("Clock And Event");
+  cli::printHelpItem("clkout [0|1]", "Disable/enable clock output (no args = show)");
+  cli::printHelpItem("clkout_freq [0..3]", "Set clock frequency (no args = show)");
+  cli::printHelpItem("offset [ppm]", "Read or set frequency offset");
+  cli::printHelpItem("evi", "Show EVI config");
+  cli::printHelpItem("evi edge [0|1]", "Set/read EVI edge (0=falling,1=rising)");
+  cli::printHelpItem("evi debounce [0..3]", "Set/read EVI debounce");
+  cli::printHelpItem("evi overwrite [0|1]", "Set/read EVI overwrite");
 
-  helpSection("Status And Registers");
-  helpItem("status", "Read status register");
-  helpItem("statusf", "Read decoded status flags");
-  helpItem("status_clear [mask]", "Clear status flags by mask (default 0xFF)");
-  helpItem("validity", "Read PORF/VLF/BSF validity flags");
-  helpItem("reg <addr>", "Read register byte");
-  helpItem("reg <addr> <val>", "Write register byte");
-  helpItem("eeprom", "EEPROM stats and user EEPROM dump");
-  helpItem("clear_porf", "Clear power-on reset flag");
-  helpItem("clear_vlf", "Clear voltage low flag");
-  helpItem("clear_bsf", "Clear backup switchover flag");
+  cli::printHelpSection("Status And Registers");
+  cli::printHelpItem("status", "Read status register");
+  cli::printHelpItem("statusf", "Read decoded status flags");
+  cli::printHelpItem("status_clear [mask]", "Clear status flags by mask (default 0xFF)");
+  cli::printHelpItem("validity", "Read PORF/VLF/BSF validity flags");
+  cli::printHelpItem("reg <addr>", "Read register byte");
+  cli::printHelpItem("reg <addr> <val>", "Write register byte");
+  cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
+  cli::printHelpItem("clear_porf", "Clear power-on reset flag");
+  cli::printHelpItem("clear_vlf", "Clear voltage low flag");
+  cli::printHelpItem("clear_bsf", "Clear backup switchover flag");
 
-  helpSection("Diagnostics");
-  helpItem("drv", "Show driver state and health");
-  helpItem("probe", "Probe device (no health tracking)");
-  helpItem("recover", "Manual recovery attempt");
-  helpItem("verbose [0|1]", "Enable verbose status output (no args = show)");
-  helpItem("stress [N]", "Run N iterations stress test (default 100)");
-  helpItem("stress_mix [N]", "Run N iterations mixed operations test");
-  helpItem("selftest", "Run safe command self-test report");
+  cli::printHelpSection("Diagnostics");
+  cli::printHelpItem("drv", "Show driver state and health");
+  cli::printHelpItem("probe", "Probe device (no health tracking)");
+  cli::printHelpItem("recover", "Manual recovery attempt");
+  cli::printHelpItem("verbose [0|1]", "Enable verbose status output (no args = show)");
+  cli::printHelpItem("stress [N]", "Run N iterations stress test (default 100)");
+  cli::printHelpItem("stress_mix [N]", "Run N iterations mixed operations test");
+  cli::printHelpItem("selftest", "Run safe command self-test report");
   Serial.println();
 }
 
@@ -1697,7 +1691,7 @@ void setup() {
   LOGI("Driver state: %s", stateToStr(g_rtc.state()));
   LOGI("Type 'help' for available commands");
   LOGI("Type 'drv' for driver health, 'verbose 1' for detailed output");
-  Serial.print("> ");
+  cli::printPrompt();
 }
 
 void loop() {
@@ -1706,7 +1700,7 @@ void loop() {
   const String line = read_line();
   if (line.length() > 0) {
     process_command(line);
-    Serial.print("> ");
+    cli::printPrompt();
   }
 
   delay(10);

@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Status::operator bool()` explicit conversion for concise success checks.
 - `readRegisters()` and `writeRegisters()` public block-register access methods.
 
+### Changed
+- Doxyfile project metadata now matches `library.json`.
+- Low-level register access now rejects undocumented address ranges, wraparound blocks, and invalid buffers before dispatching to I2C.
+- Transport validation/configuration errors are excluded from driver health counters while EEPROM `IN_PROGRESS` remains a successful in-flight state.
+
+### Fixed
+- `begin()` now rejects invalid `BackupSwitchMode` enum values instead of silently treating them as backup-off configuration.
+
 ## [1.4.1] - 2026-04-05
 
 ### Changed

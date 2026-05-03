@@ -240,6 +240,7 @@ class RV3032 {
    * @param config Hardware and behavior configuration
    * @return OK on success (library is ready to use), error otherwise
    * @note The transport callbacks must be provided in Config.
+   *       backupMode must be one of BackupSwitchMode::Off, Level, or Direct.
    *       If EEPROM writes are enabled, call tick() to complete EEPROM work.
    *       Use getEepromStatus() to check if EEPROM persistence is active.
    */
@@ -685,6 +686,8 @@ class RV3032 {
    * @param reg Register address
    * @param[out] value Register value read
    * @return Status::Ok() on success, error otherwise
+   * @note Validates that reg is in a documented RV3032 volatile RAM,
+   *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
    * @warning Direct register access can disrupt RTC operation if misused
    */
   Status readRegister(uint8_t reg, uint8_t& value);
@@ -695,6 +698,8 @@ class RV3032 {
    * @param reg Register address
    * @param value Value to write
    * @return Status::Ok() on success, error otherwise
+   * @note Validates that reg is in a documented RV3032 volatile RAM,
+   *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
    * @warning Direct register access can disrupt RTC operation if misused
    */
   Status writeRegister(uint8_t reg, uint8_t value);
@@ -706,6 +711,8 @@ class RV3032 {
    * @param[out] buf Destination buffer
    * @param len Number of bytes to read
    * @return Status::Ok() on success, error otherwise
+   * @note Rejects zero length, oversized reads, wraparound, and blocks that
+   *       cross undocumented address gaps.
    * @warning Direct block access can disrupt RTC operation if misused.
    */
   Status readRegisters(uint8_t reg, uint8_t* buf, size_t len);
@@ -717,6 +724,8 @@ class RV3032 {
    * @param buf Source buffer
    * @param len Number of bytes to write
    * @return Status::Ok() on success, error otherwise
+   * @note Rejects zero length, writes larger than the fixed stack buffer,
+   *       wraparound, and blocks that cross undocumented address gaps.
    * @warning Direct block access can disrupt RTC operation if misused.
    */
   Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len);
