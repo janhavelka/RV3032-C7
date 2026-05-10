@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Status::is(Err)` method for type-safe error code comparison.
 - `Status::operator bool()` explicit conversion for concise success checks.
 - `readRegisters()` and `writeRegisters()` public block-register access methods.
+- Native coverage proving latched `OFFLINE` blocks normal I2C operations without touching the bus while `recover()` remains the explicit recovery path.
 
 ### Changed
 - Doxyfile project metadata now matches `library.json`.
+- Explicit recovery bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 - Low-level register access now rejects undocumented address ranges, wraparound blocks, and invalid buffers before dispatching to I2C.
 - Transport validation/configuration errors are excluded from driver health counters while EEPROM `IN_PROGRESS` remains a successful in-flight state.
+- Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations and EEPROM `tick()` work return/hold off without touching I2C until `recover()` succeeds.
 
 ### Fixed
 - `begin()` now rejects invalid `BackupSwitchMode` enum values instead of silently treating them as backup-off configuration.

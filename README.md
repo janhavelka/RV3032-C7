@@ -307,7 +307,7 @@ if (!st.ok()) {
 
 ## Behavioral Contracts
 
-**Threading Model:** Single-threaded by default. No FreeRTOS tasks created.
+**Threading Model:** Single-threaded by default. No FreeRTOS tasks created. The driver is not internally synchronized and should not be called from ISRs.
 
 **Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout.
 
@@ -316,6 +316,8 @@ if (!st.ok()) {
 **Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
 
 **Error Handling:** All errors returned as `Status`. No silent failures.
+
+**Health / Recovery:** `OFFLINE` is latched. Normal public I2C operations and EEPROM `tick()` work do not touch the bus while OFFLINE; call `recover()` after application-level bus recovery to return to `READY`.
 
 **Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` validate documented RV3032 address windows, reject wraparound and invalid buffers, and do not count local validation failures against driver health.
 
@@ -406,7 +408,7 @@ AGENTS.md               - Coding guidelines
 - `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
 - `docs/RV3032_Register_Reference.md` - register reference guide
-- `docs/RV-3032-C7.pdf` - device datasheet
+- `docs/RV-3032-C7_datasheet.pdf` - device datasheet
 - `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual
 
 ## Contributing
