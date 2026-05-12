@@ -97,6 +97,27 @@ struct DateTime {
 };
 
 /**
+ * @enum TimestampSource
+ * @brief Hardware timestamp source blocks.
+ */
+enum class TimestampSource : uint8_t {
+  TLow = 0,   ///< Temperature-low event timestamp
+  THigh = 1,  ///< Temperature-high event timestamp
+  Evi = 2     ///< External event input timestamp
+};
+
+/**
+ * @struct Timestamp
+ * @brief Decoded hardware timestamp block.
+ */
+struct Timestamp {
+  uint8_t count = 0;          ///< Raw timestamp event count
+  bool hasHundredths = false; ///< True only for EVI timestamps
+  uint8_t hundredths = 0;     ///< Hundredths of a second for EVI timestamps
+  DateTime time;              ///< Captured date/time, weekday computed from date
+};
+
+/**
  * @struct StatusFlags
  * @brief Decoded status register flags
  */
@@ -308,6 +329,12 @@ class RV3032 {
   DriverState state() const { return _driverState; }
 
   /**
+   * @brief Alias for state() for cross-driver diagnostics
+   * @return UNINIT, READY, DEGRADED, or OFFLINE
+   */
+  DriverState driverState() const { return state(); }
+
+  /**
    * @brief Check if device is operational
    * @return true if READY or DEGRADED, false if UNINIT or OFFLINE
    */
@@ -322,6 +349,16 @@ class RV3032 {
    * @return Status::Ok() always.
    */
   Status getSettings(SettingsSnapshot& out) const;
+
+  /**
+   * @brief Get cached configuration and runtime state without performing I2C.
+   * @return Snapshot of the current cached state.
+   */
+  SettingsSnapshot getSettings() const {
+    SettingsSnapshot out;
+    (void)getSettings(out);
+    return out;
+  }
 
   /**
    * @brief Get timestamp of last successful operation
@@ -617,6 +654,23 @@ class RV3032 {
    */
   Status getEviConfig(EviConfig& out);
 
+  /**
+   * @brief Read and decode a hardware timestamp block.
+   *
+   * @param source Timestamp source to read
+   * @param[out] out Decoded timestamp data
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status readTimestamp(TimestampSource source, Timestamp& out);
+
+  /**
+   * @brief Reset one hardware timestamp block.
+   *
+   * @param source Timestamp source to reset
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status resetTimestamp(TimestampSource source);
+
   // ===== Status Operations =====
 
   /**
@@ -677,6 +731,28 @@ class RV3032 {
    * @note Must be cleared while VDD is present (per datasheet).
    */
   Status clearBackupSwitchFlag();
+
+  // ===== User RAM Operations =====
+
+  /**
+   * @brief Read the 16-byte volatile user RAM area.
+   *
+   * @param offset Offset inside user RAM (0-15)
+   * @param[out] buf Destination buffer
+   * @param len Number of bytes to read
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status readUserRam(uint8_t offset, uint8_t* buf, size_t len);
+
+  /**
+   * @brief Write the 16-byte volatile user RAM area.
+   *
+   * @param offset Offset inside user RAM (0-15)
+   * @param buf Source buffer
+   * @param len Number of bytes to write
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status writeUserRam(uint8_t offset, const uint8_t* buf, size_t len);
 
   // ===== Low-Level Operations =====
 
@@ -845,6 +921,7 @@ class RV3032 {
   uint8_t _consecutiveFailures = 0;    ///< Consecutive failures since last success
   uint32_t _totalFailures = 0;         ///< Total failures since begin()
   uint32_t _totalSuccess = 0;          ///< Total successes since begin()
+  bool _allowOfflineI2c = false;
   
   // Raw I2C transport (no health tracking) - for diagnostics only
   Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
@@ -853,6 +930,7 @@ class RV3032 {
   // Tracked I2C transport (with health tracking) - for normal operations
   Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
   Status _i2cWriteTracked(const uint8_t* buf, size_t len);
+  Status _offlineStatus() const;
 
   // Register-level I2C helpers (use tracked transport internally)
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
@@ -872,7 +950,9 @@ class RV3032 {
 
   // Health tracking (called only by tracked transport wrappers)
   Status _updateHealth(const Status& st);
+  void _reassertOfflineLatch();
   uint32_t _nowMs() const;
+  void _resetRuntimeState();
   
   // Configuration application helper
   Status _applyConfig();

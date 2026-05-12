@@ -21,6 +21,26 @@ constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
 constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
 constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
+constexpr uint8_t kUserRamSize =
+    static_cast<uint8_t>(cmd::REG_USER_RAM_END - cmd::REG_USER_RAM_START + 1U);
+
+class ScopedOfflineI2cAllowance {
+public:
+  explicit ScopedOfflineI2cAllowance(bool& flag, bool allow) : _flag(flag), _old(flag) {
+    _flag = allow;
+  }
+
+  ~ScopedOfflineI2cAllowance() {
+    _flag = _old;
+  }
+
+  ScopedOfflineI2cAllowance(const ScopedOfflineI2cAllowance&) = delete;
+  ScopedOfflineI2cAllowance& operator=(const ScopedOfflineI2cAllowance&) = delete;
+
+private:
+  bool& _flag;
+  bool _old;
+};
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
 /// Uses signed arithmetic to handle millis() wraparound (~49 days).
@@ -92,18 +112,49 @@ bool isKnownRegisterBlock(uint8_t reg, size_t len) {
   }
   return true;
 }
+
+bool timestampBlock(TimestampSource source, uint8_t& startReg, size_t& len) {
+  switch (source) {
+    case TimestampSource::TLow:
+      startReg = cmd::REG_TS_TLOW_COUNT;
+      len = 7;
+      return true;
+    case TimestampSource::THigh:
+      startReg = cmd::REG_TS_THIGH_COUNT;
+      len = 7;
+      return true;
+    case TimestampSource::Evi:
+      startReg = cmd::REG_TS_EVI_COUNT;
+      len = 8;
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool timestampResetBit(TimestampSource source, uint8_t& bit) {
+  switch (source) {
+    case TimestampSource::TLow:
+      bit = cmd::TS_TLOW_RESET_BIT;
+      return true;
+    case TimestampSource::THigh:
+      bit = cmd::TS_THIGH_RESET_BIT;
+      return true;
+    case TimestampSource::Evi:
+      bit = cmd::TS_EVI_RESET_BIT;
+      return true;
+    default:
+      return false;
+  }
+}
 }  // namespace
 
 // ===== Lifecycle Functions =====
 
 Status RV3032::begin(const Config& config) {
-  // Clean up any previous instance to ensure consistent state.
-  // If caller needs to detect accidental re-initialization, check isInitialized() first.
-  if (_initialized) {
-    end();
-  }
+  _resetRuntimeState();
 
-  // Validate configuration FIRST - don't modify any state until validation passes
+  // Validate the input config before storing it.
   if (!config.i2cWrite || !config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C transport callbacks are null");
   }
@@ -123,44 +174,27 @@ Status RV3032::begin(const Config& config) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid backup switch mode");
   }
 
-  // Validation passed - now initialize all state
-  _initialized = false;
-  _beginInProgress = false;
-  _driverState = DriverState::UNINIT;
-  _eeprom = EepromOp{};
-  _eepromLastStatus = Status::Ok();
-  _eepromWriteCount = 0;
-  _eepromWriteFailures = 0;
-  _lastOkMs = 0;
-  _lastError = Status::Ok();
-  _lastErrorMs = 0;
-  _consecutiveFailures = 0;
-  _totalFailures = 0;
-  _totalSuccess = 0;
-
-  // Copy validated config
   _config = config;
-  _beginInProgress = true;
 
-  // Clamp offlineThreshold (values < 1 make no sense)
+  // Normalize the stored copy after validation.
   if (_config.offlineThreshold < 1) {
     _config.offlineThreshold = 1;
   }
 
+  _beginInProgress = true;
+
   // Test device presence (probe uses raw I2C - no health tracking for diagnostic)
   Status st = probe();
   if (!st.ok()) {
-    // Device not found - remain in UNINIT with clean health state
-    // (no health tracking since begin() failed)
-    _beginInProgress = false;
+    _resetRuntimeState();
     return st;
   }
 
-  // Apply stored configuration (uses tracked I2C internally)
-  // Health is updated automatically via tracked wrappers
+  // Tracked wrappers are used here, but _updateHealth() ignores begin-time I2C
+  // while _initialized is false.
   st = _applyConfig();
-  if (!st.ok() && st.code != Err::IN_PROGRESS) {
-    _beginInProgress = false;
+  if (!st.ok() && !st.inProgress()) {
+    _resetRuntimeState();
     return st;
   }
 
@@ -175,26 +209,14 @@ void RV3032::tick(uint32_t now_ms) {
   if (!_initialized) {
     return;
   }
+  if (_driverState == DriverState::OFFLINE) {
+    return;
+  }
   processEeprom(now_ms);
 }
 
 void RV3032::end() {
-  _initialized = false;
-  _beginInProgress = false;
-  _driverState = DriverState::UNINIT;
-  _eeprom = EepromOp{};
-  _eepromLastStatus = Status::Ok();
-  _eepromWriteCount = 0;
-  _eepromWriteFailures = 0;
-
-  // Reset health tracking
-  _lastOkMs = 0;
-  _lastError = Status::Ok();
-  _lastErrorMs = 0;
-  _consecutiveFailures = 0;
-  _totalFailures = 0;
-  _totalSuccess = 0;
-  // No resources to release (I2C managed by application)
+  _resetRuntimeState();
 }
 
 bool RV3032::isEepromBusy() const {
@@ -261,18 +283,25 @@ Status RV3032::recover() {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
 
-  // Verify device presence with tracked I2C so recovery failures affect health.
-  uint8_t statusReg = 0;
-  Status st = readRegister(cmd::REG_STATUS, statusReg);
-  (void)statusReg;
-  st = mapPresenceError(st);
-  if (!st.ok()) {
-    return st;
-  }
+  const bool startedOffline = (_driverState == DriverState::OFFLINE);
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
+  Status result = [&]() -> Status {
+    // Verify device presence with tracked I2C so recovery failures affect health.
+    uint8_t statusReg = 0;
+    Status st = readRegister(cmd::REG_STATUS, statusReg);
+    (void)statusReg;
+    st = mapPresenceError(st);
+    if (!st.ok()) {
+      return st;
+    }
 
-  // Re-apply stored configuration
-  st = _applyConfig();
-  return st;
+    // Re-apply stored configuration
+    return _applyConfig();
+  }();
+  if (startedOffline && !result.ok() && !result.inProgress()) {
+    _reassertOfflineLatch();
+  }
+  return result;
 }
 
 // ===== I2C Transport Wrappers =====
@@ -300,6 +329,9 @@ Status RV3032::_i2cWriteRaw(const uint8_t* buf, size_t len) {
 }
 
 Status RV3032::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
+  if (!_allowOfflineI2c && _initialized && _driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
   Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
   if (!shouldTrackHealth(st)) {
     return st;
@@ -308,11 +340,18 @@ Status RV3032::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t*
 }
 
 Status RV3032::_i2cWriteTracked(const uint8_t* buf, size_t len) {
+  if (!_allowOfflineI2c && _initialized && _driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
   Status st = _i2cWriteRaw(buf, len);
   if (!shouldTrackHealth(st)) {
     return st;
   }
   return _updateHealth(st);
+}
+
+Status RV3032::_offlineStatus() const {
+  return Status::Error(Err::BUSY, "Driver is offline; call recover()");
 }
 
 Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
@@ -324,8 +363,11 @@ Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
 }
 
 Status RV3032::_updateHealth(const Status& st) {
-  // Treat IN_PROGRESS as success (EEPROM queueing is not a failure)
-  bool isSuccess = st.ok() || st.code == Err::IN_PROGRESS;
+  if (!_initialized || st.inProgress()) {
+    return st;
+  }
+
+  bool isSuccess = st.ok();
 
   if (isSuccess) {
     // Success path
@@ -335,15 +377,11 @@ Status RV3032::_updateHealth(const Status& st) {
       ++_totalSuccess;
     }
 
-    // State transitions only when initialized
-    // (during begin(), we track counters but don't transition states)
-    if (_initialized) {
-      // Transition to READY on first success after init or recovery.
-      if (_driverState == DriverState::UNINIT ||
-          _driverState == DriverState::DEGRADED ||
-          _driverState == DriverState::OFFLINE) {
-        _driverState = DriverState::READY;
-      }
+    // Transition to READY on first success after init or recovery.
+    if (_driverState == DriverState::UNINIT ||
+        _driverState == DriverState::DEGRADED ||
+        _driverState == DriverState::OFFLINE) {
+      _driverState = DriverState::READY;
     }
   } else {
     // Failure path
@@ -356,22 +394,26 @@ Status RV3032::_updateHealth(const Status& st) {
       ++_totalFailures;
     }
 
-    // State transitions only when initialized
-    // (during begin(), we track counters but don't transition states)
-    if (_initialized) {
-      // Transition READY → DEGRADED on first failure
-      if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
-        _driverState = DriverState::DEGRADED;
-      }
+    // Transition READY -> DEGRADED on first failure.
+    if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
+      _driverState = DriverState::DEGRADED;
+    }
 
-      // Transition DEGRADED → OFFLINE when threshold reached
-      if (_consecutiveFailures >= _config.offlineThreshold) {
-        _driverState = DriverState::OFFLINE;
-      }
+    // Transition DEGRADED -> OFFLINE when threshold reached.
+    if (_consecutiveFailures >= _config.offlineThreshold) {
+      _driverState = DriverState::OFFLINE;
     }
   }
 
   return st;
+}
+
+void RV3032::_reassertOfflineLatch() {
+  _driverState = DriverState::OFFLINE;
+  const uint8_t threshold = _config.offlineThreshold == 0 ? 1 : _config.offlineThreshold;
+  if (_consecutiveFailures < threshold) {
+    _consecutiveFailures = threshold;
+  }
 }
 
 uint32_t RV3032::_nowMs() const {
@@ -379,6 +421,24 @@ uint32_t RV3032::_nowMs() const {
     return _config.nowMs(_config.timeUser);
   }
   return millis();
+}
+
+void RV3032::_resetRuntimeState() {
+  _config = Config{};
+  _initialized = false;
+  _beginInProgress = false;
+  _driverState = DriverState::UNINIT;
+  _eeprom = EepromOp{};
+  _eepromLastStatus = Status::Ok();
+  _eepromWriteCount = 0;
+  _eepromWriteFailures = 0;
+  _lastOkMs = 0;
+  _lastError = Status::Ok();
+  _lastErrorMs = 0;
+  _consecutiveFailures = 0;
+  _totalFailures = 0;
+  _totalSuccess = 0;
+  _allowOfflineI2c = false;
 }
 
 Status RV3032::_applyConfig() {
@@ -947,6 +1007,82 @@ Status RV3032::getEviConfig(EviConfig& out) {
   out.overwrite = ((ts & (1u << cmd::TS_OVERWRITE_BIT)) != 0);
 
   return Status::Ok();
+}
+
+Status RV3032::readTimestamp(TimestampSource source, Timestamp& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t startReg = 0;
+  size_t len = 0;
+  if (!timestampBlock(source, startReg, len)) {
+    return Status::Error(Err::INVALID_PARAM, "Timestamp source out of range");
+  }
+
+  uint8_t buf[8] = {0};
+  Status st = readRegs(startReg, buf, len);
+  if (!st.ok()) {
+    return st;
+  }
+
+  const bool hasHundredths = (source == TimestampSource::Evi);
+  const size_t timeOffset = hasHundredths ? 2U : 1U;
+  const uint8_t hundredthsReg = hasHundredths ? buf[1] : 0;
+  const uint8_t secReg = static_cast<uint8_t>(buf[timeOffset] & 0x7F);
+  const uint8_t minReg = static_cast<uint8_t>(buf[timeOffset + 1U] & 0x7F);
+  const uint8_t hourReg = static_cast<uint8_t>(buf[timeOffset + 2U] & 0x3F);
+  const uint8_t dayReg = static_cast<uint8_t>(buf[timeOffset + 3U] & 0x3F);
+  const uint8_t monthReg = static_cast<uint8_t>(buf[timeOffset + 4U] & 0x1F);
+  const uint8_t yearReg = buf[timeOffset + 5U];
+
+  if (!isValidBcd(secReg) || !isValidBcd(minReg) || !isValidBcd(hourReg) ||
+      !isValidBcd(dayReg) || !isValidBcd(monthReg) || !isValidBcd(yearReg) ||
+      (hasHundredths && !isValidBcd(hundredthsReg))) {
+    return Status::Error(Err::INVALID_DATETIME, "Timestamp block contains invalid BCD");
+  }
+
+  const uint8_t hundredths = hasHundredths ? bcdToBin(hundredthsReg) : 0;
+  if (hasHundredths && hundredths > 99U) {
+    return Status::Error(Err::INVALID_DATETIME, "Timestamp hundredths out of range");
+  }
+
+  DateTime dt;
+  dt.second = bcdToBin(secReg);
+  dt.minute = bcdToBin(minReg);
+  dt.hour = bcdToBin(hourReg);
+  dt.day = bcdToBin(dayReg);
+  dt.month = bcdToBin(monthReg);
+  dt.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
+  dt.weekday = computeWeekday(dt.year, dt.month, dt.day);
+  if (!isValidDateTime(dt)) {
+    return Status::Error(Err::INVALID_DATETIME, "Timestamp block contains invalid date/time");
+  }
+
+  out.count = buf[0];
+  out.hasHundredths = hasHundredths;
+  out.hundredths = hundredths;
+  out.time = dt;
+  return Status::Ok();
+}
+
+Status RV3032::resetTimestamp(TimestampSource source) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t bit = 0;
+  if (!timestampResetBit(source, bit)) {
+    return Status::Error(Err::INVALID_PARAM, "Timestamp source out of range");
+  }
+
+  uint8_t control = 0;
+  Status st = readRegister(cmd::REG_TS_CONTROL, control);
+  if (!st.ok()) {
+    return st;
+  }
+
+  return writeRegister(cmd::REG_TS_CONTROL, static_cast<uint8_t>(control | (1U << bit)));
 }
 
 // ===== Status Operations =====
@@ -1547,6 +1683,47 @@ Status RV3032::clearBackupSwitchFlag() {
   tempLsb = static_cast<uint8_t>(tempLsb & ~(1u << cmd::TEMP_BSF_BIT));
 
   return writeRegister(cmd::REG_TEMP_LSB, tempLsb);
+}
+
+// ===== User RAM Operations =====
+
+Status RV3032::readUserRam(uint8_t offset, uint8_t* buf, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (buf == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid user RAM read buffer");
+  }
+  if (offset >= kUserRamSize || len > static_cast<size_t>(kUserRamSize - offset)) {
+    return Status::Error(Err::INVALID_PARAM, "User RAM read out of range");
+  }
+
+  return readRegs(static_cast<uint8_t>(cmd::REG_USER_RAM_START + offset), buf, len);
+}
+
+Status RV3032::writeUserRam(uint8_t offset, const uint8_t* buf, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (buf == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid user RAM write buffer");
+  }
+  if (offset >= kUserRamSize || len > static_cast<size_t>(kUserRamSize - offset)) {
+    return Status::Error(Err::INVALID_PARAM, "User RAM write out of range");
+  }
+
+  size_t written = 0;
+  while (written < len) {
+    const size_t chunk = (len - written > 15U) ? 15U : (len - written);
+    Status st = writeRegs(static_cast<uint8_t>(cmd::REG_USER_RAM_START + offset + written),
+                          &buf[written],
+                          chunk);
+    if (!st.ok()) {
+      return st;
+    }
+    written += chunk;
+  }
+  return Status::Ok();
 }
 
 // ===== Public Static Conversion Functions =====

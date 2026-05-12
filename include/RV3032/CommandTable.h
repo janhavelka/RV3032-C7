@@ -114,7 +114,7 @@ static constexpr uint8_t REG_CONTROL3 = 0x12;
 // ========== Timestamp Control (0x13–0x15) ==========
 
 /// @brief Timestamp Control register (0x13, read/write-protectable)
-/// Bits: TSOW, TSOVF, TSOS, TSR1, TSR0, TSHR, TSMIN, TSSEC
+/// Bits: EVR, THR, TLR, EVOW, THOW, TLOW; bits 7:6 read as 0.
 static constexpr uint8_t REG_TS_CONTROL = 0x13;
 
 /// @brief Clock Interrupt Mask register (0x14, read/write-protectable)
@@ -355,7 +355,13 @@ static constexpr uint8_t CTRL2_OUT_A_BIT = 1;         ///< Output A
 static constexpr uint8_t CTRL2_OUT_B_BIT = 0;         ///< Output B
 
 // Timestamp Control register bits (REG_TS_CONTROL, 0x13)
-static constexpr uint8_t TS_OVERWRITE_BIT = 2;        ///< Timestamp overwrite enable
+static constexpr uint8_t TS_TLOW_OVERWRITE_BIT = 0;   ///< TLow timestamp overwrite enable
+static constexpr uint8_t TS_THIGH_OVERWRITE_BIT = 1;  ///< THigh timestamp overwrite enable
+static constexpr uint8_t TS_EVI_OVERWRITE_BIT = 2;    ///< EVI timestamp overwrite enable
+static constexpr uint8_t TS_OVERWRITE_BIT = TS_EVI_OVERWRITE_BIT;  ///< Backward-compatible EVI alias
+static constexpr uint8_t TS_TLOW_RESET_BIT = 3;        ///< Reset TLow timestamp
+static constexpr uint8_t TS_THIGH_RESET_BIT = 4;       ///< Reset THigh timestamp
+static constexpr uint8_t TS_EVI_RESET_BIT = 5;         ///< Reset EVI timestamp
 
 // EVI Control register bits (REG_EVI_CONTROL, 0x15)
 static constexpr uint8_t EVI_EB_BIT = 6;              ///< EVI Edge Bit (0=fall, 1=rise)
@@ -375,6 +381,7 @@ static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit 
 
 // EEPROM Command values
 static constexpr uint8_t EEPROM_CMD_UPDATE = 0x21;    ///< EEPROM update/write command
+static constexpr uint8_t EEPROM_CMD_READ = 0x22;      ///< EEPROM read command
 static constexpr uint8_t EEPROM_BUSY_BIT = 2;         ///< EEPROM operation busy flag (in REG_TEMP_LSB)
 static constexpr uint8_t EEPROM_ERROR_BIT = 3;        ///< EEPROM operation error flag (in REG_TEMP_LSB)
 static constexpr uint8_t TEMP_CLKF_BIT = 1;           ///< Clock flag (in REG_TEMP_LSB)

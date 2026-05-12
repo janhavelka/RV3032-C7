@@ -169,6 +169,9 @@ static RV3032::Status read_user_eeprom_byte(uint8_t addr, uint8_t& value) {
 
   st = g_rtc.writeRegister(RV3032::cmd::REG_EE_ADDRESS, addr);
   if (st.ok()) {
+    st = g_rtc.writeRegister(RV3032::cmd::REG_EE_COMMAND, RV3032::cmd::EEPROM_CMD_READ);
+  }
+  if (st.ok()) {
     st = g_rtc.readRegister(RV3032::cmd::REG_EE_DATA, value);
   }
 
@@ -202,6 +205,62 @@ static String read_line() {
     }
   }
   return "";
+}
+
+static bool pop_token(String& text, String& token) {
+  text.trim();
+  if (text.length() == 0) {
+    return false;
+  }
+  const int split = text.indexOf(' ');
+  if (split < 0) {
+    token = text;
+    text = "";
+    return true;
+  }
+  token = text.substring(0, split);
+  text = text.substring(split + 1);
+  return true;
+}
+
+static bool parse_u8_token(const String& token, uint8_t& value) {
+  if (token.length() == 0) {
+    return false;
+  }
+  char* end = nullptr;
+  const unsigned long parsed = strtoul(token.c_str(), &end, 0);
+  if (end == token.c_str() || *end != '\0' || parsed > 0xFFUL) {
+    return false;
+  }
+  value = static_cast<uint8_t>(parsed);
+  return true;
+}
+
+static bool parse_timestamp_source(String token, RV3032::TimestampSource& source) {
+  token.trim();
+  token.toLowerCase();
+  if (token == "tlow" || token == "low") {
+    source = RV3032::TimestampSource::TLow;
+    return true;
+  }
+  if (token == "thigh" || token == "high") {
+    source = RV3032::TimestampSource::THigh;
+    return true;
+  }
+  if (token == "evi" || token == "event") {
+    source = RV3032::TimestampSource::Evi;
+    return true;
+  }
+  return false;
+}
+
+static const char* timestamp_source_name(RV3032::TimestampSource source) {
+  switch (source) {
+    case RV3032::TimestampSource::TLow: return "TLow";
+    case RV3032::TimestampSource::THigh: return "THigh";
+    case RV3032::TimestampSource::Evi: return "EVI";
+    default: return "unknown";
+  }
 }
 
 /**
@@ -243,12 +302,16 @@ static void print_help() {
   cli::printHelpItem("evi edge [0|1]", "Set/read EVI edge (0=falling,1=rising)");
   cli::printHelpItem("evi debounce [0..3]", "Set/read EVI debounce");
   cli::printHelpItem("evi overwrite [0|1]", "Set/read EVI overwrite");
+  cli::printHelpItem("ts <tlow|thigh|evi>", "Read decoded timestamp block");
+  cli::printHelpItem("ts_reset <tlow|thigh|evi>", "Reset timestamp block");
 
   cli::printHelpSection("Status And Registers");
   cli::printHelpItem("status", "Read status register");
   cli::printHelpItem("statusf", "Read decoded status flags");
   cli::printHelpItem("status_clear [mask]", "Clear status flags by mask (default 0xFF)");
   cli::printHelpItem("validity", "Read PORF/VLF/BSF validity flags");
+  cli::printHelpItem("ram [offset len]", "Dump user RAM (default all 16 bytes)");
+  cli::printHelpItem("ram_write <offset> <byte...>", "Write user RAM bytes");
   cli::printHelpItem("reg <addr>", "Read register byte");
   cli::printHelpItem("reg <addr> <val>", "Write register byte");
   cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
@@ -390,6 +453,44 @@ static void cmd_temp() {
     return;
   }
   Serial.printf("Temperature: %.2f C\n", celsius);
+}
+
+static void cmd_ts(const String& args) {
+  RV3032::TimestampSource source;
+  if (!parse_timestamp_source(args, source)) {
+    LOGE("Usage: ts <tlow|thigh|evi>");
+    return;
+  }
+
+  RV3032::Timestamp ts;
+  RV3032::Status st = g_rtc.readTimestamp(source, ts);
+  if (!st.ok()) {
+    LOGE("readTimestamp(%s) failed: %s", timestamp_source_name(source), st.msg);
+    return;
+  }
+
+  Serial.printf("%s timestamp: count=%u", timestamp_source_name(source), ts.count);
+  if (ts.hasHundredths) {
+    Serial.printf(" hundredths=%u", ts.hundredths);
+  }
+  Serial.println();
+  Serial.print(F("  Time: "));
+  print_datetime(ts.time);
+}
+
+static void cmd_ts_reset(const String& args) {
+  RV3032::TimestampSource source;
+  if (!parse_timestamp_source(args, source)) {
+    LOGE("Usage: ts_reset <tlow|thigh|evi>");
+    return;
+  }
+
+  RV3032::Status st = g_rtc.resetTimestamp(source);
+  if (!st.ok()) {
+    LOGE("resetTimestamp(%s) failed: %s", timestamp_source_name(source), st.msg);
+    return;
+  }
+  LOGI("%s timestamp reset requested", timestamp_source_name(source));
 }
 
 /**
@@ -827,6 +928,85 @@ static void cmd_reg(const String& args) {
     return;
   }
   LOGI("reg[0x%02X] <= 0x%02lX", reg, valueRaw);
+}
+
+static void cmd_ram(const String& args) {
+  String rest = args;
+  String token;
+  uint8_t offset = 0;
+  uint8_t len = 16;
+
+  if (pop_token(rest, token)) {
+    if (!parse_u8_token(token, offset) || offset >= 16) {
+      LOGE("Usage: ram [offset 0..15] [len 1..16]");
+      return;
+    }
+    len = static_cast<uint8_t>(16U - offset);
+    if (pop_token(rest, token)) {
+      if (!parse_u8_token(token, len) || len == 0 || len > static_cast<uint8_t>(16U - offset)) {
+        LOGE("Usage: ram [offset 0..15] [len 1..16]");
+        return;
+      }
+    }
+  }
+  rest.trim();
+  if (rest.length() != 0) {
+    LOGE("Usage: ram [offset 0..15] [len 1..16]");
+    return;
+  }
+
+  uint8_t buf[16] = {};
+  RV3032::Status st = g_rtc.readUserRam(offset, buf, len);
+  if (!st.ok()) {
+    LOGE("readUserRam() failed: %s", st.msg);
+    return;
+  }
+
+  Serial.printf("User RAM offset %u len %u:\n",
+                static_cast<unsigned>(offset),
+                static_cast<unsigned>(len));
+  for (uint8_t i = 0; i < len; ++i) {
+    if ((i % 8) == 0) {
+      Serial.printf("  0x%02X: ", static_cast<unsigned>(offset + i));
+    }
+    Serial.printf("%02X ", buf[i]);
+    if ((i % 8) == 7 || i == static_cast<uint8_t>(len - 1U)) {
+      Serial.println();
+    }
+  }
+}
+
+static void cmd_ram_write(const String& args) {
+  String rest = args;
+  String token;
+  uint8_t offset = 0;
+  if (!pop_token(rest, token) || !parse_u8_token(token, offset) || offset >= 16) {
+    LOGE("Usage: ram_write <offset 0..15> <byte...>");
+    return;
+  }
+
+  uint8_t values[16] = {};
+  size_t len = 0;
+  while (pop_token(rest, token)) {
+    if (len >= static_cast<size_t>(16U - offset) || !parse_u8_token(token, values[len])) {
+      LOGE("Usage: ram_write <offset 0..15> <byte...>");
+      return;
+    }
+    len++;
+  }
+  if (len == 0) {
+    LOGE("Usage: ram_write <offset 0..15> <byte...>");
+    return;
+  }
+
+  RV3032::Status st = g_rtc.writeUserRam(offset, values, len);
+  if (!st.ok()) {
+    LOGE("writeUserRam() failed: %s", st.msg);
+    return;
+  }
+  LOGI("Wrote %u byte(s) to user RAM offset %u",
+       static_cast<unsigned>(len),
+       static_cast<unsigned>(offset));
 }
 
 /**
@@ -1599,6 +1779,10 @@ static void process_command(const String& line) {
     cmd_unix(args);
   } else if (cmd == "temp") {
     cmd_temp();
+  } else if (cmd == "ts") {
+    cmd_ts(args);
+  } else if (cmd == "ts_reset") {
+    cmd_ts_reset(args);
   } else if (cmd == "alarm") {
     cmd_alarm();
   } else if (cmd == "alarm_set") {
@@ -1627,6 +1811,10 @@ static void process_command(const String& line) {
     cmd_status_clear(args);
   } else if (cmd == "validity") {
     cmd_validity();
+  } else if (cmd == "ram") {
+    cmd_ram(args);
+  } else if (cmd == "ram_write") {
+    cmd_ram_write(args);
   } else if (cmd == "reg") {
     cmd_reg(args);
   } else if (cmd == "eeprom") {
