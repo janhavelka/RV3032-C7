@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-05-14
+
 ### Added
 - `SettingsSnapshot` struct for reading cached configuration, EEPROM state, and health counters without I2C.
 - `getSettings(SettingsSnapshot&)` method to populate a settings snapshot.
@@ -157,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.0...v1.3.1

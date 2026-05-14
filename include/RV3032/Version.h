@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #ifndef RV3032_VERSION_STRING
-#define RV3032_VERSION_STRING "1.4.1"
+#define RV3032_VERSION_STRING "1.5.0"
 #endif
 
 #ifndef RV3032_BUILD_DATE
@@ -45,19 +45,19 @@ namespace RV3032 {
 static constexpr uint16_t VERSION_MAJOR = 1;
 
 /// @brief Minor version (backward-compatible features).
-static constexpr uint16_t VERSION_MINOR = 4;
+static constexpr uint16_t VERSION_MINOR = 5;
 
 /// @brief Patch version (backward-compatible fixes).
-static constexpr uint16_t VERSION_PATCH = 1;
+static constexpr uint16_t VERSION_PATCH = 0;
 
 /// @brief Full semantic version string.
 static constexpr const char* VERSION = RV3032_VERSION_STRING;
 
 /// @brief Encoded version for numeric comparison: MAJOR*10000 + MINOR*100 + PATCH.
-static constexpr uint32_t VERSION_CODE = 10401;
+static constexpr uint32_t VERSION_CODE = 10500;
 
 /// @brief Backward-compatible alias used by older repositories.
-static constexpr int VERSION_INT = 10401;
+static constexpr int VERSION_INT = 10500;
 
 /// @brief Build date string.
 static constexpr const char* BUILD_DATE = RV3032_BUILD_DATE;
