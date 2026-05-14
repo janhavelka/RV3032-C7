@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Doxyfile project metadata now matches `library.json`.
+- Reference documentation now uses human-readable vendor PDF names and separates compact RTC notes from full PDF extractions under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
 - Explicit recovery bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 - Low-level register access now rejects undocumented address ranges, wraparound blocks, and invalid buffers before dispatching to I2C.
 - Transport validation/configuration errors are excluded from driver health counters while EEPROM `IN_PROGRESS` remains a successful in-flight state.
