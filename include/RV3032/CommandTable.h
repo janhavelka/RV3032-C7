@@ -374,6 +374,7 @@ static constexpr uint8_t PMU_CLKOUT_DISABLE = 0x40;   ///< CLKOUT disable bit
 static constexpr uint8_t PMU_BSM_MASK = 0x30;         ///< Backup Switching Mode mask
 static constexpr uint8_t PMU_BSM_LEVEL = 0x20;        ///< BSM: Level switching mode
 static constexpr uint8_t PMU_BSM_DIRECT = 0x10;       ///< BSM: Direct switching mode
+static constexpr uint8_t PMU_TRICKLE_MASK = 0x0F;     ///< Trickle-charger resistor/mode bits
 
 // EEPROM CLKOUT 2 register bits (REG_EEPROM_CLKOUT2, 0xC3)
 static constexpr uint8_t CLKOUT_FREQ_MASK = 0x60;     ///< CLKOUT frequency select mask

@@ -203,6 +203,9 @@ event timestamp registers yet.
 
 | Method | Description |
 |--------|-------------|
+| `Status setBackupSwitchMode(BackupSwitchMode mode)` | Set battery-backup switchover mode |
+| `Status setPrimaryBatteryBackupDefaults()` | Apply primary-cell backup defaults: level switching, trickle charger off |
+| `Status getBackupSwitchMode(BackupSwitchMode& mode)` | Read backup switchover mode from PMU |
 | `Status readStatus(uint8_t& status)` | Read status register |
 | `Status clearStatus(uint8_t mask)` | Clear status flags |
 | `Status readStatusFlags(StatusFlags& out)` | Read decoded status flags |
@@ -326,9 +329,11 @@ if (!st.ok()) {
 **EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
 - `setClkoutEnabled()` / `setClkoutFrequency()`
 - `setOffsetPpm()`
-- Backup mode changes in `begin()`
+- Backup mode changes in `begin()`, `setBackupSwitchMode()`, and `setPrimaryBatteryBackupDefaults()`
 
 EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
+
+**Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI command `backup usual` applies those PMU settings, then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 

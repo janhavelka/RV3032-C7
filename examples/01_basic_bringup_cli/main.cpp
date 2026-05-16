@@ -263,6 +263,44 @@ static const char* timestamp_source_name(RV3032::TimestampSource source) {
   }
 }
 
+static RV3032::BackupSwitchMode backup_mode_from_pmu(uint8_t pmu) {
+  switch (pmu & RV3032::cmd::PMU_BSM_MASK) {
+    case RV3032::cmd::PMU_BSM_DIRECT:
+      return RV3032::BackupSwitchMode::Direct;
+    case RV3032::cmd::PMU_BSM_LEVEL:
+      return RV3032::BackupSwitchMode::Level;
+    default:
+      return RV3032::BackupSwitchMode::Off;
+  }
+}
+
+static const char* backup_mode_name(RV3032::BackupSwitchMode mode) {
+  switch (mode) {
+    case RV3032::BackupSwitchMode::Off: return "off";
+    case RV3032::BackupSwitchMode::Level: return "level";
+    case RV3032::BackupSwitchMode::Direct: return "direct";
+    default: return "unknown";
+  }
+}
+
+static bool parse_backup_mode(String token, RV3032::BackupSwitchMode& mode) {
+  token.trim();
+  token.toLowerCase();
+  if (token == "off" || token == "0") {
+    mode = RV3032::BackupSwitchMode::Off;
+    return true;
+  }
+  if (token == "level" || token == "lsm" || token == "1") {
+    mode = RV3032::BackupSwitchMode::Level;
+    return true;
+  }
+  if (token == "direct" || token == "dsm" || token == "2") {
+    mode = RV3032::BackupSwitchMode::Direct;
+    return true;
+  }
+  return false;
+}
+
 /**
  * @brief Print available commands.
  */
@@ -315,6 +353,7 @@ static void print_help() {
   cli::printHelpItem("reg <addr>", "Read register byte");
   cli::printHelpItem("reg <addr> <val>", "Write register byte");
   cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
+  cli::printHelpItem("backup [usual|off|level|direct]", "Show or set battery backup PMU");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
   cli::printHelpItem("clear_vlf", "Clear voltage low flag");
   cli::printHelpItem("clear_bsf", "Clear backup switchover flag");
@@ -1121,6 +1160,90 @@ static void cmd_eeprom() {
 }
 
 /**
+ * @brief Handle 'backup' command - show or set battery-backup PMU settings.
+ */
+static void cmd_backup(const String& args) {
+  String modeArg = args;
+  modeArg.trim();
+  modeArg.toLowerCase();
+
+  if (modeArg.length() == 0 || modeArg == "status") {
+    uint8_t pmu = 0;
+    RV3032::Status st = g_rtc.readRegister(RV3032::cmd::REG_EEPROM_PMU, pmu);
+    if (!st.ok()) {
+      LOGE("readRegister(PMU) failed: %s", st.msg);
+      return;
+    }
+
+    RV3032::SettingsSnapshot snap;
+    (void)g_rtc.getSettings(snap);
+    RV3032::ValidityFlags flags;
+    st = g_rtc.readValidity(flags);
+    if (!st.ok()) {
+      LOGE("readValidity() failed: %s", st.msg);
+      return;
+    }
+
+    const RV3032::BackupSwitchMode mode = backup_mode_from_pmu(pmu);
+    const bool clkoutDisabled = (pmu & RV3032::cmd::PMU_CLKOUT_DISABLE) != 0;
+    const bool trickleEnabled = (pmu & RV3032::cmd::PMU_TRICKLE_MASK) != 0;
+
+    Serial.println();
+    Serial.println(F("=== Battery Backup ==="));
+    Serial.printf("PMU 0xC0: 0x%02X\n", pmu);
+    Serial.printf("Backup mode: %s%s%s\n",
+                  (mode == RV3032::BackupSwitchMode::Level || mode == RV3032::BackupSwitchMode::Direct)
+                      ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
+                  backup_mode_name(mode),
+                  LOG_COLOR_RESET);
+    Serial.printf("Cached config mode: %s\n", backup_mode_name(snap.backupMode));
+    Serial.printf("EEPROM persistence: %s busy=%s queue=%u\n",
+                  log_bool_str(snap.enableEepromWrites),
+                  log_bool_str(snap.eepromBusy),
+                  static_cast<unsigned>(snap.eepromQueueDepth));
+    Serial.printf("CLKOUT disabled bit: %s\n", log_bool_str(clkoutDisabled));
+    Serial.printf("Trickle charger bits: 0x%X (%s)\n",
+                  static_cast<unsigned>(pmu & RV3032::cmd::PMU_TRICKLE_MASK),
+                  trickleEnabled ? "enabled/configured" : "off");
+    Serial.printf("Flags: PORF=%s VLF=%s BSF=%s time=%s\n",
+                  flags.powerOnReset ? "set" : "clear",
+                  flags.voltageLow ? "set" : "clear",
+                  flags.backupSwitched ? "set" : "clear",
+                  flags.timeInvalid ? "invalid" : "valid");
+    Serial.println(F("Time is held by the RTC counter while VBACKUP is present; it is not stored in EEPROM."));
+    Serial.println(F("Usual primary-cell setup: backup usual, set time, then clear_porf/clear_vlf/clear_bsf after verification."));
+    return;
+  }
+
+  RV3032::Status st = RV3032::Status::Ok();
+  if (modeArg == "usual" || modeArg == "coin" || modeArg == "primary") {
+    st = g_rtc.setPrimaryBatteryBackupDefaults();
+    if (st.ok() || st.code == RV3032::Err::IN_PROGRESS) {
+      LOGI("Primary battery backup defaults applied: level switching, trickle charger off%s",
+           st.code == RV3032::Err::IN_PROGRESS ? " (EEPROM update queued)" : "");
+    } else {
+      LOGE("setPrimaryBatteryBackupDefaults() failed: %s", st.msg);
+    }
+    return;
+  }
+
+  RV3032::BackupSwitchMode mode = RV3032::BackupSwitchMode::Off;
+  if (!parse_backup_mode(modeArg, mode)) {
+    LOGE("Expected backup [usual|off|level|direct]");
+    return;
+  }
+
+  st = g_rtc.setBackupSwitchMode(mode);
+  if (st.ok() || st.code == RV3032::Err::IN_PROGRESS) {
+    LOGI("Backup mode set to %s%s",
+         backup_mode_name(mode),
+         st.code == RV3032::Err::IN_PROGRESS ? " (EEPROM update queued)" : "");
+  } else {
+    LOGE("setBackupSwitchMode() failed: %s", st.msg);
+  }
+}
+
+/**
  * @brief Handle 'clear_bsf' command - clear backup switchover flag.
  */
 static void cmd_clear_bsf() {
@@ -1819,6 +1942,8 @@ static void process_command(const String& line) {
     cmd_reg(args);
   } else if (cmd == "eeprom") {
     cmd_eeprom();
+  } else if (cmd == "backup") {
+    cmd_backup(args);
   } else if (cmd == "clear_porf") {
     cmd_clear_porf();
   } else if (cmd == "clear_vlf") {

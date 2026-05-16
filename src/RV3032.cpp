@@ -792,6 +792,87 @@ Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {
   return Status::Ok();
 }
 
+// ===== Power Management / Backup Operations =====
+
+Status RV3032::setBackupSwitchMode(BackupSwitchMode mode) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  const uint8_t modeRaw = static_cast<uint8_t>(mode);
+  if (modeRaw > kMaxBackupSwitchMode) {
+    return Status::Error(Err::INVALID_PARAM, "Backup switch mode out of range");
+  }
+
+  uint8_t pmu = 0;
+  Status st = readRegister(cmd::REG_EEPROM_PMU, pmu);
+  if (!st.ok()) {
+    return st;
+  }
+
+  uint8_t newPmu = static_cast<uint8_t>(pmu & ~cmd::PMU_BSM_MASK);
+  switch (mode) {
+    case BackupSwitchMode::Off:
+      break;
+    case BackupSwitchMode::Level:
+      newPmu = static_cast<uint8_t>(newPmu | cmd::PMU_BSM_LEVEL);
+      break;
+    case BackupSwitchMode::Direct:
+      newPmu = static_cast<uint8_t>(newPmu | cmd::PMU_BSM_DIRECT);
+      break;
+  }
+
+  st = writeEepromRegister(cmd::REG_EEPROM_PMU, newPmu);
+  if (st.ok() || st.code == Err::IN_PROGRESS) {
+    _config.backupMode = mode;
+  }
+  return st;
+}
+
+Status RV3032::setPrimaryBatteryBackupDefaults() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t pmu = 0;
+  Status st = readRegister(cmd::REG_EEPROM_PMU, pmu);
+  if (!st.ok()) {
+    return st;
+  }
+
+  uint8_t newPmu = static_cast<uint8_t>(pmu & ~(cmd::PMU_BSM_MASK | cmd::PMU_TRICKLE_MASK));
+  newPmu = static_cast<uint8_t>(newPmu | cmd::PMU_BSM_LEVEL);
+  st = writeEepromRegister(cmd::REG_EEPROM_PMU, newPmu);
+  if (st.ok() || st.code == Err::IN_PROGRESS) {
+    _config.backupMode = BackupSwitchMode::Level;
+  }
+  return st;
+}
+
+Status RV3032::getBackupSwitchMode(BackupSwitchMode& mode) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t pmu = 0;
+  Status st = readRegister(cmd::REG_EEPROM_PMU, pmu);
+  if (!st.ok()) {
+    return st;
+  }
+
+  switch (pmu & cmd::PMU_BSM_MASK) {
+    case cmd::PMU_BSM_DIRECT:
+      mode = BackupSwitchMode::Direct;
+      break;
+    case cmd::PMU_BSM_LEVEL:
+      mode = BackupSwitchMode::Level;
+      break;
+    default:
+      mode = BackupSwitchMode::Off;
+      break;
+  }
+  return Status::Ok();
+}
+
 // ===== Clock Output Operations =====
 
 Status RV3032::setClkoutEnabled(bool enabled) {

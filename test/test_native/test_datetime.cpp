@@ -496,6 +496,50 @@ void test_invalid_runtime_params_are_rejected() {
   st = rtc.readTimestamp(static_cast<RV3032::TimestampSource>(9), ts);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
                           static_cast<uint8_t>(st.code));
+
+  st = rtc.setBackupSwitchMode(static_cast<RV3032::BackupSwitchMode>(9));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+}
+
+void test_backup_mode_helpers_update_pmu_bits() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::Config cfg = makeConfig(bus);
+  cfg.enableEepromWrites = false;
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.regs[RV3032::cmd::REG_EEPROM_PMU] =
+      static_cast<uint8_t>(RV3032::cmd::PMU_CLKOUT_DISABLE | RV3032::cmd::PMU_TRICKLE_MASK);
+
+  st = rtc.setBackupSwitchMode(RV3032::BackupSwitchMode::Direct);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(RV3032::cmd::PMU_CLKOUT_DISABLE |
+                                             RV3032::cmd::PMU_BSM_DIRECT |
+                                             RV3032::cmd::PMU_TRICKLE_MASK),
+                         bus.regs[RV3032::cmd::REG_EEPROM_PMU]);
+
+  RV3032::BackupSwitchMode mode = RV3032::BackupSwitchMode::Off;
+  st = rtc.getBackupSwitchMode(mode);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::BackupSwitchMode::Direct),
+                          static_cast<uint8_t>(mode));
+
+  st = rtc.setPrimaryBatteryBackupDefaults();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(RV3032::cmd::PMU_CLKOUT_DISABLE |
+                                             RV3032::cmd::PMU_BSM_LEVEL),
+                         bus.regs[RV3032::cmd::REG_EEPROM_PMU]);
+
+  st = rtc.getBackupSwitchMode(mode);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::BackupSwitchMode::Level),
+                          static_cast<uint8_t>(mode));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::BackupSwitchMode::Level),
+                          static_cast<uint8_t>(rtc.getSettings().backupMode));
 }
 
 void test_get_alarm_config_rejects_invalid_bcd() {
@@ -793,6 +837,7 @@ int main(int, char**) {
   RUN_TEST(test_transport_validation_status_does_not_update_health);
   RUN_TEST(test_set_timer_preserves_reserved_high_bits);
   RUN_TEST(test_invalid_runtime_params_are_rejected);
+  RUN_TEST(test_backup_mode_helpers_update_pmu_bits);
   RUN_TEST(test_get_alarm_config_rejects_invalid_bcd);
   RUN_TEST(test_get_alarm_config_tolerates_por_inactive_date_alarm);
   RUN_TEST(test_get_alarm_config_tolerates_disabled_field_garbage);

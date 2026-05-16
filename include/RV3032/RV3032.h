@@ -553,6 +553,36 @@ class RV3032 {
    */
   Status getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled);
 
+  // ===== Power Management / Backup Operations =====
+
+  /**
+   * @brief Set backup switchover mode.
+   *
+   * @param mode Off, Level, or Direct switchover mode
+   * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
+   * @note Persistent if Config::enableEepromWrites is true. This preserves
+   *       existing trickle-charger and CLKOUT PMU bits.
+   */
+  Status setBackupSwitchMode(BackupSwitchMode mode);
+
+  /**
+   * @brief Apply common primary-cell time-retention settings.
+   *
+   * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
+   * @note Selects Level Switching Mode and disables the PMU trickle charger.
+   *       Intended for non-rechargeable VBACKUP cells such as CR2032.
+   *       Persistent if Config::enableEepromWrites is true.
+   */
+  Status setPrimaryBatteryBackupDefaults();
+
+  /**
+   * @brief Read backup switchover mode from the PMU register.
+   *
+   * @param[out] mode Decoded backup mode. Both disabled PMU encodings map to Off.
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status getBackupSwitchMode(BackupSwitchMode& mode);
+
   // ===== Clock Output Operations =====
 
   /**

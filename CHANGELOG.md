@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.5.0] - 2026-05-14
 
 ### Added
+- Backup PMU helpers for reading and setting backup switchover mode, plus primary-cell defaults that select level switching and disable the trickle charger.
+- CLI `backup` command to show PMU/validity state and apply the usual primary-cell time-retention setup.
 - `SettingsSnapshot` struct for reading cached configuration, EEPROM state, and health counters without I2C.
 - `getSettings(SettingsSnapshot&)` method to populate a settings snapshot.
 - `Status::is(Err)` method for type-safe error code comparison.
