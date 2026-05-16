@@ -156,6 +156,8 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status clearAlarmFlag()` | Clear alarm flag |
 | `Status enableAlarmInterrupt(bool enable)` | Enable/disable INT pin output |
 
+`getAlarmConfig()` reports `AlarmConfig::date == 0` for the RV3032-C7 reset/default alarm state where the date alarm register is `00h` and the alarm function is inactive.
+
 ### Timer Operations
 
 | Method | Description |

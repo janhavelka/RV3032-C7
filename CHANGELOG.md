@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `begin()` now rejects invalid `BackupSwitchMode` enum values instead of silently treating them as backup-off configuration.
+- `getAlarmConfig()` now accepts the documented POR alarm state where `AE_D=0` and Date Alarm is `00h`, preventing the safe self-test from failing on a reset/default RTC.
 
 ## [1.4.1] - 2026-04-05
 

@@ -152,7 +152,7 @@ struct ValidityFlags {
 struct AlarmConfig {
   uint8_t minute = 0;       ///< Alarm minute (0-59)
   uint8_t hour = 0;         ///< Alarm hour (0-23)
-  uint8_t date = 0;         ///< Alarm date (day of month, 1-31)
+  uint8_t date = 0;         ///< Alarm date (1-31), or 0 for the documented inactive POR state
   bool matchMinute = false; ///< Enable minute matching
   bool matchHour = false;   ///< Enable hour matching
   bool matchDate = false;   ///< Enable date matching (day of month)

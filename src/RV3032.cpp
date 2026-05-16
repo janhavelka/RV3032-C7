@@ -634,6 +634,7 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
   auto decodeAlarmField = [&](uint8_t rawBcd, bool fieldEnabled,
                               uint8_t minValue, uint8_t maxValue,
                               uint8_t disabledFallback,
+                              bool allowEnabledZero,
                               uint8_t& outValue) -> Status {
     if (!isValidBcd(rawBcd)) {
       if (fieldEnabled) {
@@ -644,6 +645,10 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
     }
     const uint8_t value = bcdToBin(rawBcd);
     if (value < minValue || value > maxValue) {
+      if (fieldEnabled && allowEnabledZero && value == 0) {
+        outValue = 0;
+        return Status::Ok();
+      }
       if (fieldEnabled) {
         return Status::Error(Err::INVALID_PARAM, "Alarm registers out of range");
       }
@@ -654,15 +659,17 @@ Status RV3032::getAlarmConfig(AlarmConfig& out) {
     return Status::Ok();
   };
 
-  Status decode = decodeAlarmField(minRaw, out.matchMinute, 0, 59, 0, out.minute);
+  Status decode = decodeAlarmField(minRaw, out.matchMinute, 0, 59, 0, false, out.minute);
   if (!decode.ok()) {
     return decode;
   }
-  decode = decodeAlarmField(hourRaw, out.matchHour, 0, 23, 0, out.hour);
+  decode = decodeAlarmField(hourRaw, out.matchHour, 0, 23, 0, false, out.hour);
   if (!decode.ok()) {
     return decode;
   }
-  decode = decodeAlarmField(dateRaw, out.matchDate, 1, 31, 1, out.date);
+  // RV-3032-C7 reset state uses AE_D=0 with Date Alarm=00h to keep the alarm
+  // function inactive. Report that documented hardware state instead of failing.
+  decode = decodeAlarmField(dateRaw, out.matchDate, 1, 31, 1, true, out.date);
   if (!decode.ok()) {
     return decode;
   }
