@@ -1,6 +1,6 @@
 # RV3032-C7
 
-Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module using **Arduino framework** with **PlatformIO**.
+Robust **ESP32-S2/S3** driver for **Micro Crystal RV-3032-C7** real-time clock module with a framework-neutral core, Arduino/PlatformIO examples, and native ESP-IDF component/example support.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
@@ -405,6 +405,10 @@ python tools/check_cli_contract.py
 python tools/check_core_timing_guard.py
 pio run -e esp32s3dev
 pio run -e esp32s2dev
+idf.py -C examples/espidf_basic set-target esp32s3
+idf.py -C examples/espidf_basic build
+idf.py -C examples/espidf_basic set-target esp32s2
+idf.py -C examples/espidf_basic build
 ```
 
 ## Project Structure

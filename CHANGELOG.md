@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Core default timing fallback now supports ESP-IDF via `esp_timer_get_time()` without requiring Arduino headers.
+- `library.json` now advertises both Arduino and ESP-IDF framework support.
+- README opening and validation commands now match the implemented dual-framework port.
 
 ## [1.5.0] - 2026-05-14
 
