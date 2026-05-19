@@ -5,11 +5,33 @@
 
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
-#include <Arduino.h>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+
+#if defined(ARDUINO)
+#define RV3032_HAS_ARDUINO_TIME 1
+#elif !defined(ESP_PLATFORM) && defined(__has_include)
+#if __has_include(<Arduino.h>)
+#define RV3032_HAS_ARDUINO_TIME 1
+#endif
+#endif
+
+#ifndef RV3032_HAS_ARDUINO_TIME
+#define RV3032_HAS_ARDUINO_TIME 0
+#endif
+
+#if RV3032_HAS_ARDUINO_TIME
+#include <Arduino.h>
+#elif defined(ESP_PLATFORM)
+#include <esp_timer.h>
+#define RV3032_HAS_IDF_TIME 1
+#endif
+
+#ifndef RV3032_HAS_IDF_TIME
+#define RV3032_HAS_IDF_TIME 0
+#endif
 
 namespace RV3032 {
 
@@ -420,7 +442,13 @@ uint32_t RV3032::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
+#if RV3032_HAS_ARDUINO_TIME
   return millis();
+#elif RV3032_HAS_IDF_TIME
+  return static_cast<uint32_t>(esp_timer_get_time() / 1000LL);
+#else
+  return 0U;
+#endif
 }
 
 void RV3032::_resetRuntimeState() {

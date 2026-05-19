@@ -88,6 +88,24 @@ void loop() {
 }
 ```
 
+## ESP-IDF Component
+
+The driver core also builds as an ESP-IDF component. Applications still own the
+I2C bus, SDA/SCL pins, pull-ups, optional INT/EVI GPIOs, and bus lifetime
+through the `Config` transport callbacks.
+
+- Root `CMakeLists.txt` registers `src/RV3032.cpp` and exports `include/`.
+- `idf_component.yml` targets ESP32-S2/S3 with ESP-IDF `>=6.0.1`.
+- `examples/espidf_basic` reuses the same bring-up CLI source as the Arduino
+  example through example-only compatibility glue in `examples/common/`.
+
+Build from the example directory with a configured ESP-IDF shell:
+
+```sh
+idf.py set-target esp32s3
+idf.py build
+```
+
 ## Versioning
 
 The library version is defined in [library.json](library.json). A pre-build script automatically generates `include/RV3032/Version.h` with version constants.
@@ -414,6 +432,7 @@ AGENTS.md               - Coding guidelines
 - `CHANGELOG.md` - full release history
 - `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
+- `docs/IDF_PORT_IMPLEMENTATION.md` - implemented ESP-IDF port notes
 - `docs/RV3032_Register_Reference.md` - register reference guide
 - `docs/RV-3032-C7_datasheet.pdf` - device datasheet
 - `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual

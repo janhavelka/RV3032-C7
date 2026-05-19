@@ -1,0 +1,10 @@
+version: "1.5.0"
+description: "Robust RV3032-C7 real-time clock driver"
+license: "MIT"
+url: "https://github.com/janhavelka/RV3032-C7"
+repository: "https://github.com/janhavelka/RV3032-C7.git"
+targets:
+  - esp32s2
+  - esp32s3
+dependencies:
+  idf: ">=6.0.1"

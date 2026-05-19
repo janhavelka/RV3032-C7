@@ -56,7 +56,8 @@ struct Config {
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
-  /// @note If null, the library falls back to Arduino millis().
+  /// @note If null, Arduino builds fall back to millis() and ESP-IDF builds
+  ///       fall back to esp_timer_get_time() / 1000.
   NowMsFn nowMs = nullptr;
 
   /// @brief User context passed to timing callbacks.
