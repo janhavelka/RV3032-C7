@@ -10,29 +10,6 @@
 #include <cstdio>
 #include <cstring>
 
-#if defined(ARDUINO)
-#define RV3032_HAS_ARDUINO_TIME 1
-#elif !defined(ESP_PLATFORM) && defined(__has_include)
-#if __has_include(<Arduino.h>)
-#define RV3032_HAS_ARDUINO_TIME 1
-#endif
-#endif
-
-#ifndef RV3032_HAS_ARDUINO_TIME
-#define RV3032_HAS_ARDUINO_TIME 0
-#endif
-
-#if RV3032_HAS_ARDUINO_TIME
-#include <Arduino.h>
-#elif defined(ESP_PLATFORM)
-#include <esp_timer.h>
-#define RV3032_HAS_IDF_TIME 1
-#endif
-
-#ifndef RV3032_HAS_IDF_TIME
-#define RV3032_HAS_IDF_TIME 0
-#endif
-
 namespace RV3032 {
 
 // Implementation-only constants (not part of public API)
@@ -65,7 +42,7 @@ private:
 };
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
-/// Uses signed arithmetic to handle millis() wraparound (~49 days).
+/// Uses signed arithmetic to handle 32-bit millisecond wraparound.
 bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
@@ -442,13 +419,7 @@ uint32_t RV3032::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
-#if RV3032_HAS_ARDUINO_TIME
-  return millis();
-#elif RV3032_HAS_IDF_TIME
-  return static_cast<uint32_t>(esp_timer_get_time() / 1000LL);
-#else
   return 0U;
-#endif
 }
 
 void RV3032::_resetRuntimeState() {

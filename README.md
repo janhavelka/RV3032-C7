@@ -96,8 +96,10 @@ through the `Config` transport callbacks.
 
 - Root `CMakeLists.txt` registers `src/RV3032.cpp` and exports `include/`.
 - `idf_component.yml` targets ESP32-S2/S3 with ESP-IDF `>=6.0.1`.
-- `examples/espidf_basic` reuses the same bring-up CLI source as the Arduino
-  example through example-only compatibility glue in `examples/common/`.
+- `examples/espidf_basic` is a native IDF example using `app_main`,
+  `driver/i2c_master.h`, `esp_timer`, `vTaskDelay`, and fixed C command
+  buffers. It follows the same command contract as the Arduino CLI without
+  including Arduino sources or compatibility facades.
 
 Build from the example directory with a configured ESP-IDF shell:
 

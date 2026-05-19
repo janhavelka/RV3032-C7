@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- ESP-IDF component metadata and `examples/espidf_basic` for the shared bring-up CLI.
-- Example-only ESP-IDF Arduino/Wire compatibility shim for the CLI.
+- ESP-IDF component metadata and a native `examples/espidf_basic` bring-up CLI using the same command contract as the Arduino example.
+- `tools/check_idf_example_contract.py` to enforce the native ESP-IDF example boundary.
 
 ### Changed
-- Core default timing fallback now supports ESP-IDF via `esp_timer_get_time()` without requiring Arduino headers.
+- Core health timestamps now come only from injected `Config::nowMs`; framework time sources live in examples/application glue.
 - `library.json` now advertises both Arduino and ESP-IDF framework support.
 - README opening and validation commands now match the implemented dual-framework port.
 

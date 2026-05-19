@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import runpy
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -22,8 +23,52 @@ REQUIRED_COMMON = [
     "HealthDiag.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "drv", "read", "verbose", "stress"]
-IDF_EXAMPLE_MACRO = "RV3032_EXAMPLE_PLATFORM_IDF"
+MANDATORY_COMMANDS = [
+    "help",
+    "?",
+    "version",
+    "ver",
+    "scan",
+    "read",
+    "cfg",
+    "settings",
+    "time",
+    "set",
+    "setbuild",
+    "unix",
+    "temp",
+    "alarm",
+    "alarm_set",
+    "alarm_match",
+    "alarm_int",
+    "alarm_clear",
+    "timer",
+    "clkout",
+    "clkout_freq",
+    "offset",
+    "evi",
+    "ts",
+    "ts_reset",
+    "status",
+    "statusf",
+    "status_clear",
+    "validity",
+    "ram",
+    "ram_write",
+    "reg",
+    "eeprom",
+    "backup",
+    "clear_porf",
+    "clear_vlf",
+    "clear_bsf",
+    "drv",
+    "probe",
+    "recover",
+    "verbose",
+    "stress",
+    "stress_mix",
+    "selftest",
+]
 IDF_REQUIRED_COMPONENTS = [
     "RV3032-C7",
     "esp_driver_i2c",
@@ -31,14 +76,6 @@ IDF_REQUIRED_COMPONENTS = [
     "esp_timer",
     "freertos",
     "vfs",
-]
-IDF_COMPAT_TOKENS = [
-    "i2c_new_master_bus",
-    "i2c_master_transmit_receive",
-    "i2c_master_probe",
-    "class String",
-    "class IdfConsole",
-    "class TwoWire",
 ]
 
 
@@ -62,13 +99,11 @@ def main() -> int:
     bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
     idf_main = ROOT / "examples" / "espidf_basic" / "main" / "main.cpp"
     idf_cmake = ROOT / "examples" / "espidf_basic" / "main" / "CMakeLists.txt"
-    idf_compat = common_dir / "IdfArduinoCompat.h"
 
     ensure_exists(common_dir, "common example directory")
     ensure_exists(bringup_main, "bringup CLI example")
     ensure_exists(idf_main, "ESP-IDF bringup entry point")
     ensure_exists(idf_cmake, "ESP-IDF bringup CMake file")
-    ensure_exists(idf_compat, "ESP-IDF compatibility helper")
 
     ensure_missing(ROOT / "examples" / "00_smoke_boot", "deprecated example 00_smoke_boot")
     ensure_missing(
@@ -82,6 +117,10 @@ def main() -> int:
     text = bringup_main.read_text(encoding="utf-8", errors="replace")
 
     for cmd in MANDATORY_COMMANDS:
+        if cmd == "?":
+            if '"?"' not in text and " / ?" not in text:
+                fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
+            continue
         if re.search(rf"\b{re.escape(cmd)}\b", text) is None:
             fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
 
@@ -89,12 +128,6 @@ def main() -> int:
         fail("either 'cfg' or 'settings' command must be present")
 
     idf_text = idf_main.read_text(encoding="utf-8", errors="replace")
-    if f"#define {IDF_EXAMPLE_MACRO} 1" not in idf_text:
-        fail(f"{IDF_EXAMPLE_MACRO}=1 missing from ESP-IDF entry point")
-    if '#include "examples/common/IdfArduinoCompat.h"' not in idf_text:
-        fail("ESP-IDF entry point must include IdfArduinoCompat.h")
-    if '#include "examples/01_basic_bringup_cli/main.cpp"' not in idf_text:
-        fail("ESP-IDF entry point must include the Arduino CLI source")
     if 'extern "C" void app_main(void)' not in idf_text:
         fail("ESP-IDF entry point must define app_main()")
 
@@ -103,10 +136,8 @@ def main() -> int:
         if re.search(rf"\b{re.escape(component)}\b", cmake_text) is None:
             fail(f"ESP-IDF CMake file missing required component '{component}'")
 
-    compat_text = idf_compat.read_text(encoding="utf-8", errors="replace")
-    for token in IDF_COMPAT_TOKENS:
-        if token not in compat_text:
-            fail(f"ESP-IDF compatibility helper missing token '{token}'")
+    idf_contract = runpy.run_path(str(ROOT / "tools" / "check_idf_example_contract.py"))
+    idf_contract["main"]()
 
     print("CLI contract PASSED")
     return 0
