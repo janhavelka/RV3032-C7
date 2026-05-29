@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - ESP-IDF component metadata and a native `examples/espidf_basic` bring-up CLI using the same command contract as the Arduino example.
 - `tools/check_idf_example_contract.py` to enforce the native ESP-IDF example boundary.
+- Strict confirmation dry-run output for native ESP-IDF mutating commands, including volatile/persistent scope and exact confirmed command forms.
 
 ### Changed
 - Core health timestamps now come only from injected `Config::nowMs`; framework time sources live in examples/application glue.
 - `library.json` now advertises both Arduino and ESP-IDF framework support.
 - README opening and validation commands now match the implemented dual-framework port.
+- ESP-IDF port docs now call out persistent command risks and pending hardware validation.
 
 ## [1.5.0] - 2026-05-14
 

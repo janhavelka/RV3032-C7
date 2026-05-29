@@ -101,6 +101,18 @@ through the `Config` transport callbacks.
   buffers. It follows the same command contract as the Arduino CLI without
   including Arduino sources or compatibility facades.
 
+The ESP-IDF CLI uses strict confirmation for mutating commands. Commands that
+change RTC time, alarms, timers, CLKOUT, offset calibration, backup PMU,
+status flags, timestamp reset bits, user RAM, or direct registers first print
+what would change, whether the change is volatile or persistent, why
+confirmation is required, and the exact command to run. Confirm by appending a
+final `confirm` token, for example `set 2026 01 10 15 30 00 confirm` or
+`backup usual confirm`.
+
+ESP-IDF hardware validation is still pending on physical ESP32-S2/S3 hardware
+with an RV3032-C7 attached; the current guard covers native-IDF source
+boundaries and command-surface parity.
+
 Build from the example directory with a configured ESP-IDF shell:
 
 ```sh
@@ -357,6 +369,12 @@ EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
+The native ESP-IDF CLI requires explicit confirmation before mutating time,
+alarm, timer, CLKOUT, offset, backup, status, timestamp, user RAM, direct
+register, or EEPROM-backed state. Treat persistent commands as
+hardware-affecting operations: they can consume EEPROM endurance, alter time
+retention, drive CLKOUT, or change calibration across power cycles.
+
 ## Supported Targets
 
 | Board | Environment | Notes |
@@ -380,6 +398,13 @@ Interactive CLI demonstrating all RTC features:
 # Build and upload
 pio run -e esp32s3dev -t upload && pio device monitor -e esp32s3dev
 ```
+
+### espidf_basic
+
+Native ESP-IDF CLI with the same command contract as the Arduino CLI and an
+IDF-local strict confirmation policy for mutating commands. Build it with
+`idf.py build` from `examples/espidf_basic`. Hardware validation is pending;
+verify on the target board before using mutating commands in field workflows.
 
 ### Example Helpers (`examples/common/`)
 
