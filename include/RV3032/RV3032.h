@@ -49,7 +49,7 @@
  *     Serial.printf("%04d-%02d-%02d %02d:%02d:%02d\n",
  *                   dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
  *   }
- *   delay(1000);
+ *   wait_or_sleep_1000_ms();
  * }
  * @endcode
  */

@@ -1,6 +1,6 @@
 # RV3032-C7
 
-Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module using **Arduino framework** with **PlatformIO**.
+Robust **ESP32-S2/S3** driver for **Micro Crystal RV-3032-C7** real-time clock module with a framework-neutral core, Arduino/PlatformIO examples, and native ESP-IDF component/example support.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
@@ -86,6 +86,38 @@ void loop() {
   }
   delay(1000);
 }
+```
+
+## ESP-IDF Component
+
+The driver core also builds as an ESP-IDF component. Applications still own the
+I2C bus, SDA/SCL pins, pull-ups, optional INT/EVI GPIOs, and bus lifetime
+through the `Config` transport callbacks.
+
+- Root `CMakeLists.txt` registers `src/RV3032.cpp` and exports `include/`.
+- `idf_component.yml` targets ESP32-S2/S3 with ESP-IDF `>=6.0.1`.
+- `examples/espidf_basic` is a native IDF example using `app_main`,
+  `driver/i2c_master.h`, `esp_timer`, `vTaskDelay`, and fixed C command
+  buffers. It follows the same command contract as the Arduino CLI without
+  including Arduino sources or compatibility facades.
+
+The ESP-IDF CLI uses strict confirmation for mutating commands. Commands that
+change RTC time, alarms, timers, CLKOUT, offset calibration, backup PMU,
+status flags, timestamp reset bits, user RAM, or direct registers first print
+what would change, whether the change is volatile or persistent, why
+confirmation is required, and the exact command to run. Confirm by appending a
+final `confirm` token, for example `set 2026 01 10 15 30 00 confirm` or
+`backup usual confirm`.
+
+ESP-IDF hardware validation is still pending on physical ESP32-S2/S3 hardware
+with an RV3032-C7 attached; the current guard covers native-IDF source
+boundaries and command-surface parity.
+
+Build from the example directory with a configured ESP-IDF shell:
+
+```sh
+idf.py set-target esp32s3
+idf.py build
 ```
 
 ## Versioning
@@ -337,6 +369,12 @@ EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_
 
 EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
+The native ESP-IDF CLI requires explicit confirmation before mutating time,
+alarm, timer, CLKOUT, offset, backup, status, timestamp, user RAM, direct
+register, or EEPROM-backed state. Treat persistent commands as
+hardware-affecting operations: they can consume EEPROM endurance, alter time
+retention, drive CLKOUT, or change calibration across power cycles.
+
 ## Supported Targets
 
 | Board | Environment | Notes |
@@ -360,6 +398,13 @@ Interactive CLI demonstrating all RTC features:
 # Build and upload
 pio run -e esp32s3dev -t upload && pio device monitor -e esp32s3dev
 ```
+
+### espidf_basic
+
+Native ESP-IDF CLI with the same command contract as the Arduino CLI and an
+IDF-local strict confirmation policy for mutating commands. Build it with
+`idf.py build` from `examples/espidf_basic`. Hardware validation is pending;
+verify on the target board before using mutating commands in field workflows.
 
 ### Example Helpers (`examples/common/`)
 
@@ -387,6 +432,10 @@ python tools/check_cli_contract.py
 python tools/check_core_timing_guard.py
 pio run -e esp32s3dev
 pio run -e esp32s2dev
+idf.py -C examples/espidf_basic set-target esp32s3
+idf.py -C examples/espidf_basic build
+idf.py -C examples/espidf_basic set-target esp32s2
+idf.py -C examples/espidf_basic build
 ```
 
 ## Project Structure
@@ -414,6 +463,7 @@ AGENTS.md               - Coding guidelines
 - `CHANGELOG.md` - full release history
 - `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
+- `docs/IDF_PORT_IMPLEMENTATION.md` - implemented ESP-IDF port notes
 - `docs/RV3032_Register_Reference.md` - register reference guide
 - `docs/RV-3032-C7_datasheet.pdf` - device datasheet
 - `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual

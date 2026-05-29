@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import runpy
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -22,7 +23,60 @@ REQUIRED_COMMON = [
     "HealthDiag.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "drv", "read", "verbose", "stress"]
+MANDATORY_COMMANDS = [
+    "help",
+    "?",
+    "version",
+    "ver",
+    "scan",
+    "read",
+    "cfg",
+    "settings",
+    "time",
+    "set",
+    "setbuild",
+    "unix",
+    "temp",
+    "alarm",
+    "alarm_set",
+    "alarm_match",
+    "alarm_int",
+    "alarm_clear",
+    "timer",
+    "clkout",
+    "clkout_freq",
+    "offset",
+    "evi",
+    "ts",
+    "ts_reset",
+    "status",
+    "statusf",
+    "status_clear",
+    "validity",
+    "ram",
+    "ram_write",
+    "reg",
+    "eeprom",
+    "backup",
+    "clear_porf",
+    "clear_vlf",
+    "clear_bsf",
+    "drv",
+    "probe",
+    "recover",
+    "verbose",
+    "stress",
+    "stress_mix",
+    "selftest",
+]
+IDF_REQUIRED_COMPONENTS = [
+    "RV3032-C7",
+    "esp_driver_i2c",
+    "esp_driver_gpio",
+    "esp_timer",
+    "freertos",
+    "vfs",
+]
 
 
 def fail(msg: str) -> None:
@@ -43,9 +97,13 @@ def ensure_missing(path: pathlib.Path, label: str) -> None:
 def main() -> int:
     common_dir = ROOT / "examples" / "common"
     bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+    idf_main = ROOT / "examples" / "espidf_basic" / "main" / "main.cpp"
+    idf_cmake = ROOT / "examples" / "espidf_basic" / "main" / "CMakeLists.txt"
 
     ensure_exists(common_dir, "common example directory")
     ensure_exists(bringup_main, "bringup CLI example")
+    ensure_exists(idf_main, "ESP-IDF bringup entry point")
+    ensure_exists(idf_cmake, "ESP-IDF bringup CMake file")
 
     ensure_missing(ROOT / "examples" / "00_smoke_boot", "deprecated example 00_smoke_boot")
     ensure_missing(
@@ -59,11 +117,27 @@ def main() -> int:
     text = bringup_main.read_text(encoding="utf-8", errors="replace")
 
     for cmd in MANDATORY_COMMANDS:
+        if cmd == "?":
+            if '"?"' not in text and " / ?" not in text:
+                fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
+            continue
         if re.search(rf"\b{re.escape(cmd)}\b", text) is None:
             fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
 
     if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
         fail("either 'cfg' or 'settings' command must be present")
+
+    idf_text = idf_main.read_text(encoding="utf-8", errors="replace")
+    if 'extern "C" void app_main(void)' not in idf_text:
+        fail("ESP-IDF entry point must define app_main()")
+
+    cmake_text = idf_cmake.read_text(encoding="utf-8", errors="replace")
+    for component in IDF_REQUIRED_COMPONENTS:
+        if re.search(rf"\b{re.escape(component)}\b", cmake_text) is None:
+            fail(f"ESP-IDF CMake file missing required component '{component}'")
+
+    idf_contract = runpy.run_path(str(ROOT / "tools" / "check_idf_example_contract.py"))
+    idf_contract["main"]()
 
     print("CLI contract PASSED")
     return 0

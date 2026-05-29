@@ -1,40 +1,48 @@
-# RV3032-C7 ESP-IDF Portability Status
+# ESP-IDF Port
 
-Last audited: 2026-03-01
+The core library is framework-neutral. Public headers and `src/` do not include Arduino or ESP-IDF framework headers, and all hardware access is supplied through `Config` callbacks.
 
-## Current Reality
-- Primary runtime remains PlatformIO + Arduino.
-- I2C is callback-based (`Config.i2cWrite`, `Config.i2cWriteRead`).
-- Optional timing hook is available (`Config.nowMs`, `Config.timeUser`).
-- Core logic uses `_nowMs()` wrapper for health and timeout timing.
-- Arduino timing is used only as fallback in one place:
-  - `RV3032::_nowMs()` -> `millis()` when `Config.nowMs == nullptr`
+The ESP-IDF example in `examples/espidf_basic` is a native IDF application:
 
-## ESP-IDF Adapter Requirements
-To run under pure ESP-IDF, provide:
-1. I2C write callback.
-2. I2C write-read callback.
-3. Optional `nowMs(user)` callback.
+- entry point is `app_main()`
+- I2C uses `driver/i2c_master.h`
+- timestamps use an injected `Config::nowMs` callback backed by `esp_timer_get_time()`
+- delays use `vTaskDelay()`
+- command input uses fixed C buffers and `fgets()`
+- the RV3032 device handle is kept for normal transfers instead of creating a
+  transient handle per transaction
 
-## Minimal Adapter Pattern
-```cpp
-static uint32_t idfNowMs(void*) {
-  return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-}
+The IDF example must not include Arduino sources or use Arduino compatibility facades. `tools/check_idf_example_contract.py` enforces the native-IDF boundary and command coverage.
 
-RV3032::Config cfg{};
-cfg.i2cWrite = myI2cWrite;
-cfg.i2cWriteRead = myI2cWriteRead;
-cfg.nowMs = idfNowMs;
+## Command Confirmation Policy
+
+Read-only commands execute directly. Mutating commands require a final
+`confirm` token. This includes RTC time setters, alarm changes, timer changes,
+CLKOUT changes, offset calibration, backup PMU changes, status flag clears,
+timestamp resets, user RAM writes, direct register writes, and EEPROM-backed
+configuration changes.
+
+Without `confirm`, the CLI prints:
+
+- what would change
+- whether the change is volatile or persistent
+- why confirmation is required
+- the exact confirmed command form
+
+Examples:
+
+```text
+set 2026 01 10 15 30 00
+set 2026 01 10 15 30 00 confirm
+
+backup usual
+backup usual confirm
 ```
 
-## Porting Notes
-- `tick(nowMs)` should be called regularly.
-- Timeout checks are implemented with wrap-safe unsigned arithmetic.
-- EEPROM queue behavior and offline/degraded transitions must remain unchanged in adapter code.
+Persistent commands can consume EEPROM endurance or change retained hardware
+state across power cycles. Volatile commands can still affect RTC time,
+interrupts, flags, timestamps, or scratch RAM until reset or a later write.
 
-## Verification Checklist
-- `python tools/check_core_timing_guard.py` passes.
-- Native tests pass (`pio test -e native`).
-- Example builds pass (`pio run -e esp32s3dev`, `pio run -e esp32s2dev`).
-- No direct Arduino timing calls are introduced outside wrapper fallback.
+ESP-IDF hardware validation remains pending on physical ESP32-S2/S3 targets
+with an RV3032-C7 attached. Treat the example as source-level and contract-level
+validated until that board validation is completed.

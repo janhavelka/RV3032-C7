@@ -5,7 +5,6 @@
 
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
-#include <Arduino.h>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -43,7 +42,7 @@ private:
 };
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
-/// Uses signed arithmetic to handle millis() wraparound (~49 days).
+/// Uses signed arithmetic to handle 32-bit millisecond wraparound.
 bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
@@ -420,7 +419,7 @@ uint32_t RV3032::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
-  return millis();
+  return 0U;
 }
 
 void RV3032::_resetRuntimeState() {
