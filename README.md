@@ -1,6 +1,6 @@
 # RV3032-C7
 
-Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module. The core driver is framework-neutral; the current examples and PlatformIO build targets use Arduino adapters.
+Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module. The core driver is framework-neutral; Arduino and ESP-IDF integrations live in examples or application-owned transport adapters.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
@@ -40,7 +40,9 @@ VSS   ->  GND
 VBAT  ->  CR2032 battery +
 ```
 
-## Quickstart
+## Quickstart (Arduino Diagnostic)
+
+This bring-up snippet uses the PlatformIO/Arduino example adapter. It is not part of the core library API and should not be copied into a pure ESP-IDF project.
 
 ```cpp
 #include <Wire.h>
@@ -103,6 +105,19 @@ Serial.println(RV3032::GIT_COMMIT);        // "<git>"
 ```
 
 **Update version:** Edit `library.json` only. `Version.h` is auto-generated on every build.
+
+## Native ESP-IDF Component
+
+The repository root can be consumed as an ESP-IDF component. The component builds only the framework-neutral core from `src/RV3032.cpp` and exposes `include/`; ESP-IDF bus handles, GPIO pins, mutexes, timeout policy, logging, and task scheduling stay in the application or example adapter.
+
+The basic native ESP-IDF bring-up example is in `examples/esp_idf/basic` and uses the ESP-IDF 5.4 `driver/i2c_master.h` API:
+
+```bash
+idf.py -C examples/esp_idf/basic set-target esp32s3 build
+idf.py -C examples/esp_idf/basic set-target esp32s2 build
+```
+
+Applications must provide `Config::i2cWrite`, `Config::i2cWriteRead`, `Config::i2cUser`, and, for meaningful health timestamps, `Config::nowMs`. Shared buses must be serialized by the application bus manager.
 
 ## API
 
@@ -413,7 +428,7 @@ EEPROM has finite write endurance. Use `enableEepromWrites = false` in applicati
 
 ### 01_basic_bringup_cli
 
-Interactive CLI demonstrating all RTC features:
+PlatformIO/Arduino diagnostic bring-up CLI demonstrating RTC features:
 - Time reading and setting
 - Alarm configuration
 - Timer operations
@@ -445,14 +460,31 @@ These helpers are example-only glue and are not part of the public library API.
 | `HealthDiag.h` | Verbose health diagnostics helper |
 | `TransportAdapter.h` | Transport alias helper |
 
+### esp_idf/basic
+
+Native ESP-IDF diagnostic bring-up example:
+- Creates the I2C master bus and RV3032 device in application code
+- Uses an application-owned mutex around the injected callbacks
+- Injects `esp_timer_get_time()` as the driver timebase
+- Calls `tick()` from task context and reads validity/status/time
+
+```bash
+idf.py -C examples/esp_idf/basic set-target esp32s3 build
+idf.py -C examples/esp_idf/basic set-target esp32s2 build
+```
+
 ## Running Tests
 
 ```bash
-pio test -e native
-python tools/check_cli_contract.py
 python tools/check_core_timing_guard.py
-pio run -e esp32s3dev
-pio run -e esp32s2dev
+python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
+python scripts/generate_version.py check
+python -m platformio test -e native
+python -m platformio run -e esp32s3dev
+python -m platformio run -e esp32s2dev
+idf.py -C examples/esp_idf/basic set-target esp32s3 build
+idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
 ## Project Structure
@@ -467,7 +499,10 @@ src/
   - RV3032.cpp          - Implementation
 examples/
   - 01_basic_bringup_cli/  - Interactive CLI example
+  - esp_idf/basic/         - Native ESP-IDF diagnostic bring-up example
   - common/                - Example-only helpers (shared CLI/log/transport glue)
+CMakeLists.txt          - ESP-IDF component registration for the core
+idf_component.yml       - ESP-IDF component metadata generated from library.json
 platformio.ini          - Build environments
 library.json            - PlatformIO metadata
 README.md               - This file
@@ -480,6 +515,8 @@ AGENTS.md               - Coding guidelines
 - `CHANGELOG.md` - full release history
 - `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
 - `docs/IDF_PORT.md` - ESP-IDF portability guidance
+- `docs/PRODUCTION_BUS_MANAGER.md` - production shared-bus ownership and scheduling guidance
+- `docs/RV3032_ESPIDF_CI_REPORT.md` - ESP-IDF component, example, and CI hardening report
 - `docs/RV3032_Register_Reference.md` - register reference guide
 - `docs/RV-3032-C7_datasheet.pdf` - device datasheet
 - `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual
@@ -498,6 +535,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 ## Production Readiness Notes
 
 - Core code is framework-neutral and uses injected I2C callbacks; Arduino `Wire` and ESP-IDF handles belong in examples/adapters only.
+- The native ESP-IDF example is diagnostic bring-up coverage, not hardware validation.
 - `Config::nowMs` is optional for initialization, but applications should inject a monotonic clock when using EEPROM persistence or health timestamps. If omitted, driver-owned timestamps report `0`.
 - `probe()` is diagnostic-only and preserves timeout, bus, data-NACK, and generic I2C errors. `DEVICE_NOT_FOUND` is reserved for definite address NACK. `recover()` preserves tracked transport errors.
 - Low-level direct register access rejects the user EEPROM data range `0xCB..0xEA`; use the offset-based user EEPROM APIs for that storage.

@@ -1,0 +1,21 @@
+version: "1.5.0"
+description: "Robust ESP32 driver for Micro Crystal RV-3032-C7 real-time clock module with I2C interface, battery backup, alarms, and temperature compensation."
+url: "https://github.com/janhavelka/RV3032-C7"
+repository: "https://github.com/janhavelka/RV3032-C7.git"
+license: "MIT"
+
+dependencies:
+  idf: ">=5.4"
+
+files:
+  use_gitignore: true
+  exclude:
+    - ".github/**"
+    - ".pio/**"
+    - "docs/**"
+    - "examples/**"
+    - "scripts/**"
+    - "test/**"
+    - "tools/**"
+    - "build_output.txt"
+    - "platformio.ini"

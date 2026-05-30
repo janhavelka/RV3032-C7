@@ -2,6 +2,12 @@
 
 Branch: `hardening/rv3032-industry-readiness`
 
+Historical note: this was the baseline audit before later hardening chunks.
+Current core-contract, time/flag, EEPROM/interrupt, and ESP-IDF status is tracked
+in the chunk reports added after this document, including
+`docs/RV3032_CORE_CONTRACTS_REPORT.md` and
+`docs/RV3032_ESPIDF_CI_REPORT.md`.
+
 ## Executive Summary
 
 The RV3032-C7 library has a useful managed synchronous architecture, injected I2C callbacks, health tracking, native tests, and good date/time validation coverage. It is not yet industry-grade for ESP32-S2/S3 Arduino and ESP-IDF consumers because the core still has an Arduino dependency, the repository does not contain a pure ESP-IDF example/build path, and several RTC-specific hardware semantics need tighter contracts.

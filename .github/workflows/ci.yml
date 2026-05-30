@@ -39,7 +39,7 @@ jobs:
           pip install platformio
 
       - name: Build ${{ matrix.environment }}
-        run: pio run -e ${{ matrix.environment }}
+        run: python -m platformio run -e ${{ matrix.environment }}
 
   native-tests:
     runs-on: ubuntu-latest
@@ -69,7 +69,7 @@ jobs:
         run: python tools/check_core_timing_guard.py
 
       - name: Run native tests
-        run: pio test -e native
+        run: python -m platformio test -e native
 
   validate-library:
     runs-on: ubuntu-latest
@@ -85,9 +85,38 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
+      - name: Check generated metadata
+        run: python scripts/generate_version.py check
+
+      - name: Enforce core timing guard
+        run: python tools/check_core_timing_guard.py
+
       - name: Enforce example CLI contract
         run: python tools/check_cli_contract.py
 
-      - name: Validate library package
-        run: pio pkg pack
+      - name: Enforce ESP-IDF example contract
+        run: python tools/check_idf_example_contract.py
 
+      - name: Validate library package
+        run: python -m platformio pkg pack
+
+  esp-idf-example:
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.4
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - esp32s3
+          - esp32s2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build native ESP-IDF example for ${{ matrix.target }}
+        shell: bash
+        run: |
+          source "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          idf.py -C examples/esp_idf/basic set-target ${{ matrix.target }}
+          idf.py -C examples/esp_idf/basic build

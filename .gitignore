@@ -3,6 +3,12 @@
 .vscode/
 .idea/
 
+# ESP-IDF
+**/build/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+
 # Build artifacts
 *.o
 *.a

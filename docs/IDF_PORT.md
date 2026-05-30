@@ -3,21 +3,40 @@
 Last audited: 2026-05-30
 
 ## Current Reality
-- Primary runtime remains PlatformIO + Arduino.
-- I2C is callback-based (`Config.i2cWrite`, `Config.i2cWriteRead`).
-- Optional timing hook is available (`Config.nowMs`, `Config.timeUser`).
-- Core logic uses `_nowMs()` only for driver-owned health timestamps.
-- There is no framework timing fallback in core code. When `Config.nowMs == nullptr`,
-  driver-owned timestamps report `0`.
-- Elapsed EEPROM work is driven by the `nowMs` argument passed to `tick(nowMs)`.
+
+- The core library is framework-neutral and lives in `include/` and `src/`.
+- The repository root now contains an ESP-IDF component registration for the core:
+  `CMakeLists.txt` builds `src/RV3032.cpp` and exposes `include/`.
+- `idf_component.yml` is generated from `library.json` by `scripts/generate_version.py`
+  and currently requires ESP-IDF `>=5.4`.
+- PlatformIO board builds remain Arduino-based for the existing diagnostic CLI.
+- The native ESP-IDF diagnostic example is `examples/esp_idf/basic`.
 
 ## ESP-IDF Adapter Requirements
-To run under pure ESP-IDF, provide:
-1. I2C write callback.
-2. I2C write-read callback.
-3. Optional `nowMs(user)` callback for health timestamps.
+
+A pure ESP-IDF application must provide:
+
+1. `Config::i2cWrite`
+2. `Config::i2cWriteRead`
+3. `Config::i2cUser`
+4. Optional `Config::nowMs` / `Config::timeUser` for health timestamps
+
+The adapter owns bus handles, GPIO routing, pull-up decisions, mutexes, timeout
+policy, recovery policy, logging, and task scheduling. The driver must not own or
+initialize those resources.
+
+## Basic Build Commands
+
+```bash
+idf.py -C examples/esp_idf/basic set-target esp32s3 build
+idf.py -C examples/esp_idf/basic set-target esp32s2 build
+```
+
+If `idf.py` is not on PATH, run these from an ESP-IDF shell or source the local
+ESP-IDF export script first.
 
 ## Minimal Adapter Pattern
+
 ```cpp
 static uint32_t idfNowMs(void*) {
   return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -26,17 +45,33 @@ static uint32_t idfNowMs(void*) {
 RV3032::Config cfg{};
 cfg.i2cWrite = myI2cWrite;
 cfg.i2cWriteRead = myI2cWriteRead;
+cfg.i2cUser = &myBusContext;
 cfg.nowMs = idfNowMs;
 ```
 
-## Porting Notes
-- `tick(nowMs)` should be called regularly.
-- Timeout checks are implemented with wrap-safe unsigned arithmetic.
-- EEPROM queue behavior and offline/degraded transitions must remain unchanged in adapter code.
-- The ESP-IDF adapter owns bus handles, pin configuration, locks, recovery, and timeout policy.
+## Production Notes
+
+- `tick(nowMs)` should be called regularly from task context.
+- Public driver APIs are not ISR-safe. Interrupt handlers should notify a task,
+  and that task should read and clear RV3032 flags.
+- Timeout checks in the core use wrap-safe unsigned arithmetic.
+- EEPROM queue behavior and READY/DEGRADED/OFFLINE transitions must remain
+  unchanged in adapter code.
+- Shared I2C buses must be serialized outside the driver. See
+  `docs/PRODUCTION_BUS_MANAGER.md`.
 
 ## Verification Checklist
-- `python tools/check_core_timing_guard.py` passes.
-- Native tests pass (`pio test -e native`).
-- Example builds pass (`pio run -e esp32s3dev`, `pio run -e esp32s2dev`).
-- No framework timing, scheduler, logging, bus, or RTOS calls are introduced in `include/` or `src/`.
+
+- `python tools/check_core_timing_guard.py`
+- `python tools/check_cli_contract.py`
+- `python tools/check_idf_example_contract.py`
+- `python scripts/generate_version.py check`
+- `python -m platformio test -e native`
+- `python -m platformio run -e esp32s3dev`
+- `python -m platformio run -e esp32s2dev`
+- `idf.py -C examples/esp_idf/basic set-target esp32s3 build`
+- `idf.py -C examples/esp_idf/basic set-target esp32s2 build`
+
+Do not record the native ESP-IDF example as hardware validation unless it has
+been built and run against real hardware with board, bus speed, power setup,
+commit, date, and observed results documented.

@@ -157,6 +157,11 @@ def _cpp_string_literal(value: str) -> str:
     return f'\\"{escaped}\\"'
 
 
+def _yaml_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _append_build_metadata_defines(namespace: str, project_root: Path) -> None:
     if ENV is None:
         return
@@ -267,6 +272,41 @@ static constexpr const char* VERSION_FULL = {prefix}_VERSION_FULL;
 '''
 
 
+def _render_idf_component_manifest(library_data: Dict[str, object], version: str) -> str:
+    description = str(library_data.get("description", "RV3032-C7 RTC component"))
+    license_name = str(library_data.get("license", "MIT"))
+    url = str(library_data.get("homepage", "https://github.com/janhavelka/RV3032-C7"))
+    repository = library_data.get("repository", {})
+    repository_url = ""
+    if isinstance(repository, dict):
+        repository_url = str(repository.get("url", ""))
+    if not repository_url:
+        repository_url = url
+
+    return f'''version: {_yaml_string(version)}
+description: {_yaml_string(description)}
+url: {_yaml_string(url)}
+repository: {_yaml_string(repository_url)}
+license: {_yaml_string(license_name)}
+
+dependencies:
+  idf: ">=5.4"
+
+files:
+  use_gitignore: true
+  exclude:
+    - ".github/**"
+    - ".pio/**"
+    - "docs/**"
+    - "examples/**"
+    - "scripts/**"
+    - "test/**"
+    - "tools/**"
+    - "build_output.txt"
+    - "platformio.ini"
+'''
+
+
 def _normalize_dependency_name(raw_name: str) -> str:
     return "".join(ch for ch in raw_name.upper() if ch.isalnum())
 
@@ -364,6 +404,7 @@ def _expected_outputs(project_root: Path) -> Dict[Path, str]:
 
     outputs = {
         namespace_dir / "Version.h": _render_version_header(namespace, version),
+        project_root / "idf_component.yml": _render_idf_component_manifest(library_data, version),
     }
 
     dependency_header = _render_dependency_versions_header(project_root, namespace)
