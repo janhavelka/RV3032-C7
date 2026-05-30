@@ -194,3 +194,83 @@ Release steps:
 - Enum values: `CAPS_CASE`
 - Locals/params: `camelCase`
 - Config fields: `camelCase`
+
+---
+
+## Chunked Hardening Workflow
+
+The `hardening/rv3032-industry-readiness` branch is a chunked hardening branch. Each prompt in the hardening series is a bounded chunk.
+
+For every chunk:
+
+1. Re-read this workflow section before changing files.
+2. Confirm the repository root, current branch, and working tree status.
+3. If the working tree is dirty before the chunk starts, stop and report the uncommitted files instead of overwriting user work.
+4. Stay on `hardening/rv3032-industry-readiness`, creating it only if it does not already exist.
+5. Do only the work requested for the current chunk.
+6. Use subagents when useful and integrate only factual findings into implementation decisions.
+7. Run the relevant available checks for the chunk and report exactly what passed, failed, or was not run.
+8. Update or create a concise chunk report under `docs/`.
+9. Commit the chunk with a clear message.
+10. Push or sync the branch when the remote is available. If push is not possible, report the concrete reason.
+11. Stop after the chunk report and wait for the next prompt.
+
+Do not silently redesign earlier chunks. If a later chunk depends on an earlier design choice, document the conflict, propose the smallest clean adjustment, commit that adjustment, and report what changed.
+
+---
+
+## Subagent Roles
+
+Use these review roles as appropriate for RV3032 hardening chunks. If named subagents are unavailable, perform the same reviews explicitly in separate sections.
+
+### `rv3032-datasheet-agent`
+
+- Compare code against `RV-3032-C7_datasheet.pdf` and `RV-3032-C7_App-Manual.pdf` when present.
+- Verify register addresses, bit positions, reset values, STOP/ESYN behavior, EEPROM command behavior, timer/alarm/event semantics, status flags, and backup behavior.
+- Do not infer bit meanings from source code alone.
+
+### `core-contracts-agent`
+
+- Keep core code framework-neutral.
+- Enforce injected I2C transport and injected timebase.
+- Audit error/status propagation, probe/recover semantics, health state, dirty-state behavior, copy/move safety, thread/ISR safety, and absence of hidden heap/logging/framework calls.
+
+### `rtc-semantics-agent`
+
+- Review RTC-specific behavior: coherent time read/write, STOP-bit synchronization, hundredths/seconds behavior, rollover, leap-year validity, POR/VLF/BSF/EEF/CLKF flags, alarm/timer/event interrupts, timestamp features, and backup switchover implications.
+
+### `eeprom-agent`
+
+- Audit and implement user EEPROM access through `EEADDR`, `EEDATA`, and `EECMD`.
+- Account for `EEBUSY`, `EEF`, timeouts, partial or pending writes, password/write protection, and validation documentation.
+
+### `espidf-ci-agent`
+
+- Add or verify native ESP-IDF component metadata and examples.
+- Ensure no Arduino leakage in ESP-IDF builds.
+- Add CI or documented build commands for ESP32-S2 and ESP32-S3.
+
+### `test-fault-agent`
+
+- Add native fake-transport tests for newly implemented contracts.
+- Cover partial failure, timeout, NACK, bus error, register bit writes, dirty state, and boundary cases.
+
+### `integration-review-agent`
+
+- Review the final diff for the current chunk.
+- Check that the chunk did not introduce bandaids, hidden coupling, framework leakage, untested public behavior, or false validation claims.
+
+---
+
+## Additional Hardening Principles
+
+- Core code must not include Arduino, Wire, ESP-IDF, FreeRTOS, logging-framework, or platform timing headers.
+- The core driver must not own the I2C bus.
+- I2C bus ownership, locking, bus recovery, and platform-specific timeout policy belong to the transport or application bus manager.
+- Fallible APIs return `Status`; they do not throw exceptions.
+- Avoid heap allocation in the core unless there is a strong, documented reason.
+- Public APIs are not ISR-safe unless explicitly documented and tested.
+- Driver instances are not internally thread-safe unless locking is explicitly added and tested; prefer external serialization.
+- Do not claim hardware validation unless real hardware was used.
+- Do not claim pure ESP-IDF readiness unless a native ESP-IDF example/component exists and builds.
+- Prefer clean, explicit RTC-specific semantics with migration notes over preserving a poor public API shape.
