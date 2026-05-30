@@ -238,6 +238,8 @@ Status RV3032::getSettings(SettingsSnapshot& out) const {
   out.consecutiveFailures = _consecutiveFailures;
   out.totalFailures = _totalFailures;
   out.totalSuccess = _totalSuccess;
+  out.clockCalendarUncertain = _clockCalendarUncertain;
+  out.clockCalendarLastStatus = _clockCalendarLastStatus;
   return Status::Ok();
 }
 
@@ -423,6 +425,13 @@ void RV3032::_resetRuntimeState() {
   _totalFailures = 0;
   _totalSuccess = 0;
   _allowOfflineI2c = false;
+  _clockCalendarUncertain = false;
+  _clockCalendarLastStatus = Status::Ok();
+}
+
+void RV3032::_markClockCalendarUncertain(const Status& st) {
+  _clockCalendarUncertain = true;
+  _clockCalendarLastStatus = st;
 }
 
 Status RV3032::_applyConfig() {
@@ -469,33 +478,13 @@ Status RV3032::readTime(DateTime& out) {
     return st;  // readRegs() uses tracked I2C, so health state is already updated
   }
 
-  const uint8_t secReg = static_cast<uint8_t>(buf[0] & 0x7F);
-  const uint8_t minReg = static_cast<uint8_t>(buf[1] & 0x7F);
-  const uint8_t hourReg = static_cast<uint8_t>(buf[2] & 0x3F);
-  const uint8_t wdayReg = static_cast<uint8_t>(buf[3] & 0x07);
-  const uint8_t dayReg = static_cast<uint8_t>(buf[4] & 0x3F);
-  const uint8_t monthReg = static_cast<uint8_t>(buf[5] & 0x1F);
-  const uint8_t yearReg = buf[6];
-
-  if (!isValidBcd(secReg) || !isValidBcd(minReg) || !isValidBcd(hourReg) ||
-      !isValidBcd(dayReg) || !isValidBcd(monthReg) || !isValidBcd(yearReg)) {
-    // I2C succeeded but data is corrupt - not an I2C failure, so no health update
-    return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid BCD");
-  }
-
-  out.second = bcdToBin(secReg);
-  out.minute = bcdToBin(minReg);
-  out.hour = bcdToBin(hourReg);
-  out.weekday = wdayReg;
-  out.day = bcdToBin(dayReg);
-  out.month = bcdToBin(monthReg);
-  out.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
-
-  if (!isValidDateTime(out)) {
-    // I2C succeeded but data is invalid - not an I2C failure, so no health update
+  DateTime decoded;
+  if (!decodeTimeRegisters(buf, decoded)) {
+    // I2C succeeded but data is corrupt - not an I2C failure, so no health update.
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid date/time");
   }
 
+  out = decoded;
   return Status::Ok();
 }
 
@@ -525,8 +514,38 @@ Status RV3032::setTime(const DateTime& time) {
     binToBcd(static_cast<uint8_t>(time.year % 100))
   };
 
-  // Health updated automatically by tracked wrapper
-  return writeRegs(cmd::REG_SECONDS, buf, sizeof(buf));
+  uint8_t control2 = 0;
+  Status st = readRegister(cmd::REG_CONTROL2, control2);
+  if (!st.ok()) {
+    return st;
+  }
+
+  const uint8_t stopSet = static_cast<uint8_t>(control2 | (1u << cmd::CTRL2_STOP_BIT));
+  const uint8_t stopReleased = static_cast<uint8_t>(control2 & ~(1u << cmd::CTRL2_STOP_BIT));
+
+  st = writeRegister(cmd::REG_CONTROL2, stopSet);
+  if (!st.ok()) {
+    _markClockCalendarUncertain(st);
+    (void)writeRegister(cmd::REG_CONTROL2, stopReleased);
+    return st;
+  }
+
+  st = writeRegs(cmd::REG_SECONDS, buf, sizeof(buf));
+  if (!st.ok()) {
+    _markClockCalendarUncertain(st);
+    (void)writeRegister(cmd::REG_CONTROL2, stopReleased);
+    return st;
+  }
+
+  st = writeRegister(cmd::REG_CONTROL2, stopReleased);
+  if (!st.ok()) {
+    _markClockCalendarUncertain(st);
+    return st;
+  }
+
+  _clockCalendarUncertain = false;
+  _clockCalendarLastStatus = Status::Ok();
+  return Status::Ok();
 }
 
 Status RV3032::readUnix(uint32_t& out) {
@@ -1183,6 +1202,12 @@ Status RV3032::readStatusFlags(StatusFlags& out) {
     return st;
   }
 
+  uint8_t tempLsb = 0;
+  st = readRegister(cmd::REG_TEMP_LSB, tempLsb);
+  if (!st.ok()) {
+    return st;
+  }
+
   out.tempHigh = (status & (1u << cmd::STATUS_THF_BIT)) != 0;
   out.tempLow = (status & (1u << cmd::STATUS_TLF_BIT)) != 0;
   out.update = (status & (1u << cmd::STATUS_UF_BIT)) != 0;
@@ -1191,6 +1216,10 @@ Status RV3032::readStatusFlags(StatusFlags& out) {
   out.event = (status & (1u << cmd::STATUS_EVF_BIT)) != 0;
   out.powerOnReset = (status & (1u << cmd::STATUS_PORF_BIT)) != 0;
   out.voltageLow = (status & (1u << cmd::STATUS_VLF_BIT)) != 0;
+  out.eepromError = (tempLsb & (1u << cmd::EEPROM_ERROR_BIT)) != 0;
+  out.eepromBusy = (tempLsb & (1u << cmd::EEPROM_BUSY_BIT)) != 0;
+  out.clockFlag = (tempLsb & (1u << cmd::TEMP_CLKF_BIT)) != 0;
+  out.backupSwitched = (tempLsb & (1u << cmd::TEMP_BSF_BIT)) != 0;
 
   return Status::Ok();
 }
@@ -1198,6 +1227,9 @@ Status RV3032::readStatusFlags(StatusFlags& out) {
 Status RV3032::clearStatus(uint8_t mask) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (mask == 0) {
+    return Status::Ok();
   }
 
   uint8_t status = 0;
@@ -1251,6 +1283,47 @@ bool RV3032::isValidDateTime(const DateTime& time) {
   if (time.weekday > 6) {
     return false;
   }
+  return true;
+}
+
+bool RV3032::decodeTimeRegisters(const uint8_t* buf, DateTime& out) {
+  if (!buf) {
+    return false;
+  }
+
+  const uint8_t secReg = buf[0];
+  const uint8_t minReg = buf[1];
+  const uint8_t hourReg = buf[2];
+  const uint8_t wdayReg = buf[3];
+  const uint8_t dayReg = buf[4];
+  const uint8_t monthReg = buf[5];
+  const uint8_t yearReg = buf[6];
+
+  if ((secReg & 0x80u) != 0 || (minReg & 0x80u) != 0 ||
+      (hourReg & 0xC0u) != 0 || (wdayReg & 0xF8u) != 0 ||
+      (dayReg & 0xC0u) != 0 || (monthReg & 0xE0u) != 0) {
+    return false;
+  }
+
+  if (!isValidBcd(secReg) || !isValidBcd(minReg) || !isValidBcd(hourReg) ||
+      !isValidBcd(dayReg) || !isValidBcd(monthReg) || !isValidBcd(yearReg)) {
+    return false;
+  }
+
+  DateTime decoded;
+  decoded.second = bcdToBin(secReg);
+  decoded.minute = bcdToBin(minReg);
+  decoded.hour = bcdToBin(hourReg);
+  decoded.weekday = wdayReg;
+  decoded.day = bcdToBin(dayReg);
+  decoded.month = bcdToBin(monthReg);
+  decoded.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
+
+  if (!isValidDateTime(decoded)) {
+    return false;
+  }
+
+  out = decoded;
   return true;
 }
 
@@ -1709,46 +1782,26 @@ Status RV3032::readValidity(ValidityFlags& out) {
   out.voltageLow = (status & (1u << cmd::STATUS_VLF_BIT)) != 0;
   out.powerOnReset = (status & (1u << cmd::STATUS_PORF_BIT)) != 0;
   out.backupSwitched = (tempLsb & (1u << cmd::TEMP_BSF_BIT)) != 0;
+  out.eepromError = (tempLsb & (1u << cmd::EEPROM_ERROR_BIT)) != 0;
+  out.eepromBusy = (tempLsb & (1u << cmd::EEPROM_BUSY_BIT)) != 0;
+  out.clockFlag = (tempLsb & (1u << cmd::TEMP_CLKF_BIT)) != 0;
   out.timeInvalid = out.powerOnReset || out.voltageLow;
 
   return Status::Ok();
 }
 
-Status RV3032::clearPowerOnResetFlag() {
+Status RV3032::clearFaultFlags(uint8_t mask) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
-  if (!st.ok()) {
-    return st;
-  }
-
-  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_PORF_BIT));
-
-  return writeRegister(cmd::REG_STATUS, status);
-}
-
-Status RV3032::clearVoltageLowFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
-  if (!st.ok()) {
-    return st;
-  }
-
-  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_VLF_BIT));
-
-  return writeRegister(cmd::REG_STATUS, status);
-}
-
-Status RV3032::clearBackupSwitchFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  static constexpr uint8_t kClearableFaultMask =
+      static_cast<uint8_t>((1u << cmd::EEPROM_ERROR_BIT) |
+                           (1u << cmd::TEMP_CLKF_BIT) |
+                           (1u << cmd::TEMP_BSF_BIT));
+  const uint8_t clearMask = static_cast<uint8_t>(mask & kClearableFaultMask);
+  if (clearMask == 0) {
+    return Status::Ok();
   }
 
   uint8_t tempLsb = 0;
@@ -1757,10 +1810,28 @@ Status RV3032::clearBackupSwitchFlag() {
     return st;
   }
 
-  // Clear BSF (bit 0 in REG_TEMP_LSB)
-  tempLsb = static_cast<uint8_t>(tempLsb & ~(1u << cmd::TEMP_BSF_BIT));
-
+  tempLsb = static_cast<uint8_t>(tempLsb & ~clearMask);
   return writeRegister(cmd::REG_TEMP_LSB, tempLsb);
+}
+
+Status RV3032::clearPowerOnResetFlag() {
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_PORF_BIT));
+}
+
+Status RV3032::clearVoltageLowFlag() {
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_VLF_BIT));
+}
+
+Status RV3032::clearBackupSwitchFlag() {
+  return clearFaultFlags(static_cast<uint8_t>(1u << cmd::TEMP_BSF_BIT));
+}
+
+Status RV3032::clearEepromErrorFlag() {
+  return clearFaultFlags(static_cast<uint8_t>(1u << cmd::EEPROM_ERROR_BIT));
+}
+
+Status RV3032::clearClockFlag() {
+  return clearFaultFlags(static_cast<uint8_t>(1u << cmd::TEMP_CLKF_BIT));
 }
 
 // ===== User RAM Operations =====

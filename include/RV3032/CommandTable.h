@@ -103,7 +103,7 @@ static constexpr uint8_t REG_TEMP_MSB = 0x0F;
 static constexpr uint8_t REG_CONTROL1 = 0x10;
 
 /// @brief Control 2 register (0x11, read/write-protectable)
-/// Bits: THFM, TLFM, UIE, TAFIE, TIE, AIE, OUT_A, OUT_B
+/// Bits: CLKIE, UIE, TIE, AIE, EIE, GP1, STOP; bit 7 reads as 0.
 /// @see Control2Bits for bit definitions
 static constexpr uint8_t REG_CONTROL2 = 0x11;
 
@@ -122,7 +122,7 @@ static constexpr uint8_t REG_TS_CONTROL = 0x13;
 static constexpr uint8_t REG_CLOCK_INT_MASK = 0x14;
 
 /// @brief EVI Control register (0x15, read/write-protectable)
-/// Bits: EVI_EB, EVI_DB1, EVI_DB0, EVI_EN, EVI_DEB, reserved
+/// Bits: CLKDE, EHL, ET[1:0], ESYN; bits 3:1 read as 0.
 static constexpr uint8_t REG_EVI_CONTROL = 0x15;
 
 /// @brief TLow Threshold register (0x16, read/write-protectable)
@@ -345,15 +345,18 @@ static constexpr uint8_t CTRL1_TD_MASK = 0x03;        ///< Timer Divisor (2 bits
 static constexpr uint8_t CTRL1_TD_SHIFT = 0;
 
 // Control 2 register bits (REG_CONTROL2, 0x11)
-static constexpr uint8_t CTRL2_THFM_BIT = 7;          ///< Temperature High Flag Mask
-static constexpr uint8_t CTRL2_TLFM_BIT = 6;          ///< Temperature Low Flag Mask
+static constexpr uint8_t CTRL2_THFM_BIT = 7;          ///< Deprecated; bit 7 is not implemented
+static constexpr uint8_t CTRL2_CLKIE_BIT = 6;         ///< Interrupt Controlled Clock Output Enable
 static constexpr uint8_t CTRL2_UIE_BIT = 5;           ///< Update Interrupt Enable
 static constexpr uint8_t CTRL2_TIE_BIT = 4;           ///< Timer Interrupt Enable
 static constexpr uint8_t CTRL2_TAFIE_BIT = CTRL2_TIE_BIT;  ///< Backward-compatible timer alias
 static constexpr uint8_t CTRL2_AIE_BIT = 3;           ///< Alarm Interrupt Enable
 static constexpr uint8_t CTRL2_EIE_BIT = 2;           ///< External Event Interrupt Enable
-static constexpr uint8_t CTRL2_OUT_A_BIT = 1;         ///< Output A
-static constexpr uint8_t CTRL2_OUT_B_BIT = 0;         ///< Output B
+static constexpr uint8_t CTRL2_GP1_BIT = 1;           ///< General-purpose control bit
+static constexpr uint8_t CTRL2_STOP_BIT = 0;          ///< STOP time synchronization bit
+static constexpr uint8_t CTRL2_TLFM_BIT = CTRL2_CLKIE_BIT;  ///< Deprecated compatibility alias
+static constexpr uint8_t CTRL2_OUT_A_BIT = CTRL2_GP1_BIT;   ///< Deprecated compatibility alias
+static constexpr uint8_t CTRL2_OUT_B_BIT = CTRL2_STOP_BIT;  ///< Deprecated compatibility alias
 
 // Timestamp Control register bits (REG_TS_CONTROL, 0x13)
 static constexpr uint8_t TS_TLOW_OVERWRITE_BIT = 0;   ///< TLow timestamp overwrite enable
@@ -365,10 +368,12 @@ static constexpr uint8_t TS_THIGH_RESET_BIT = 4;       ///< Reset THigh timestam
 static constexpr uint8_t TS_EVI_RESET_BIT = 5;         ///< Reset EVI timestamp
 
 // EVI Control register bits (REG_EVI_CONTROL, 0x15)
+static constexpr uint8_t EVI_CLKDE_BIT = 7;           ///< CLKOUT off delay after I2C STOP enable
 static constexpr uint8_t EVI_EB_BIT = 6;              ///< EVI Edge Bit (0=fall, 1=rise)
 static constexpr uint8_t EVI_DB_MASK = 0x30;          ///< EVI Debounce mask (2 bits)
 static constexpr uint8_t EVI_DB_SHIFT = 4;
-static constexpr uint8_t EVI_EN_BIT = 3;              ///< EVI Enable
+static constexpr uint8_t EVI_ESYN_BIT = 0;            ///< External-event synchronization bit
+static constexpr uint8_t EVI_EN_BIT = 3;              ///< Deprecated; bit 3 is read-only on RV3032-C7
 
 // EEPROM PMU register bits (REG_EEPROM_PMU, 0xC0)
 static constexpr uint8_t PMU_CLKOUT_DISABLE = 0x40;   ///< CLKOUT disable bit

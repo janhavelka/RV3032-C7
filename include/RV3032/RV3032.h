@@ -123,7 +123,10 @@ struct Timestamp {
 
 /**
  * @struct StatusFlags
- * @brief Decoded status register flags
+ * @brief Decoded STATUS and fault flags.
+ *
+ * Combines STATUS (0x0D) flags and Temperature LSBs/fault bits (0x0E).
+ * Reading these flags does not clear them.
  */
 struct StatusFlags {
   bool tempHigh = false;     ///< THF: Temperature high flag
@@ -134,16 +137,26 @@ struct StatusFlags {
   bool event = false;        ///< EVF: External event flag
   bool powerOnReset = false; ///< PORF: Power-on reset flag
   bool voltageLow = false;   ///< VLF: Voltage low flag
+  bool eepromError = false;  ///< EEF: EEPROM write access failed
+  bool eepromBusy = false;   ///< EEbusy: EEPROM operation or POR refresh active
+  bool clockFlag = false;    ///< CLKF: Interrupt-controlled clock flag
+  bool backupSwitched = false; ///< BSF: Backup switchover flag
 };
 
 /**
  * @struct ValidityFlags
- * @brief Power and validity-related flags
+ * @brief Power, time-validity, and fault-related flags.
+ *
+ * PORF or VLF means clock/calendar and configuration state must be
+ * reinitialized or verified from a trusted external source before clearing.
  */
 struct ValidityFlags {
   bool powerOnReset = false;   ///< PORF: Power-on reset flag
   bool voltageLow = false;     ///< VLF: Voltage low flag
   bool backupSwitched = false; ///< BSF: Backup switchover flag
+  bool eepromError = false;    ///< EEF: EEPROM write access failed
+  bool eepromBusy = false;     ///< EEbusy: EEPROM operation or POR refresh active
+  bool clockFlag = false;      ///< CLKF: Interrupt-controlled clock flag
   bool timeInvalid = false;    ///< True when PORF or VLF indicates invalid time
 };
 
@@ -232,6 +245,8 @@ struct SettingsSnapshot {
   uint8_t consecutiveFailures = 0;             ///< Consecutive I2C failures
   uint32_t totalFailures = 0;                  ///< Lifetime failure count
   uint32_t totalSuccess = 0;                   ///< Lifetime success count
+  bool clockCalendarUncertain = false;         ///< True after partial/failed clock-calendar set
+  Status clockCalendarLastStatus = Status::Ok(); ///< Cause of uncertain clock-calendar state
 };
 
 /**
@@ -453,6 +468,12 @@ class RV3032 {
 
   /**
    * @brief Read current time and date from RTC
+   *
+   * Reads seconds through year (0x01..0x07) in one burst. The RV3032 blocks
+   * the clock/calendar counters during short RTC register transactions, so the
+   * returned fields are coherent when the transport completes within the
+   * device I2C timeout. This call does not read or validate the 100th Seconds
+   * register and does not clear PORF/VLF/BSF/EEF or interrupt flags.
    * 
    * @param[out] out Structure to receive current date/time
    * @return OK on success, INVALID_DATETIME on invalid BCD, error on I2C failure
@@ -461,6 +482,12 @@ class RV3032 {
 
   /**
    * @brief Set RTC time and date
+   *
+   * Uses the RV3032 STOP synchronization sequence: read Control 2, set STOP,
+   * write seconds through year in one burst, then release STOP while preserving
+   * unrelated Control 2 bits. Writing Seconds and setting STOP both clear the
+   * 100th Seconds/prescaler state according to the manual. Fault flags are not
+   * cleared.
    * 
    * @param time Date/time structure with values to set
    * @return Status::Ok() on success, error on validation or I2C failure
@@ -700,6 +727,8 @@ class RV3032 {
    * 
    * @param[out] out Structure to receive EVI configuration
    * @return Status::Ok() on success, error otherwise
+   * @note ESYN external-event synchronization is not enabled implicitly by
+   *       ordinary setTime(). A high-level ESYN arm/cancel API is deferred.
    */
   Status getEviConfig(EviConfig& out);
 
@@ -735,26 +764,40 @@ class RV3032 {
    * 
    * @param mask Bit mask of flags to clear (1=clear, 0=leave unchanged)
    * @return Status::Ok() on success, error otherwise
-   * @note Writing STATUS clears THF/TLF regardless of mask (datasheet behavior).
+   * @note If mask is 0, no register write is performed. Writing STATUS with any
+   *       nonzero mask clears THF/TLF regardless of mask (datasheet behavior).
    */
   Status clearStatus(uint8_t mask);
 
   /**
-   * @brief Read decoded status register flags
+   * @brief Read decoded status and fault flags
    * 
    * @param[out] out Decoded status flags
    * @return Status::Ok() on success, error otherwise
+   * @note Reads STATUS (0x0D) and Temperature LSBs/fault flags (0x0E). Reading
+   *       flags does not clear them.
    */
   Status readStatusFlags(StatusFlags& out);
 
   /**
-   * @brief Read validity-related flags (PORF, VLF, BSF)
+   * @brief Read validity-related flags (PORF, VLF, BSF, EEF, EEbusy, CLKF)
    * 
    * @param[out] out Validity flags
    * @return Status::Ok() on success, error otherwise
-   * @note timeInvalid is true when PORF or VLF indicates invalid time.
+   * @note timeInvalid is true when PORF or VLF indicates invalid time. PORF or
+   *       VLF means the time/configuration must be reinitialized or verified
+   *       from a trusted external source before clearing the flags.
    */
   Status readValidity(ValidityFlags& out);
+
+  /**
+   * @brief Clear fault flags in Temperature LSBs register (0x0E).
+   *
+   * @param mask Bit mask of 0x0E flags to clear. Only EEF, CLKF, and BSF are clearable.
+   * @return Status::Ok() on success, error otherwise
+   * @note If mask has no clearable bits, no register write is performed.
+   */
+  Status clearFaultFlags(uint8_t mask);
 
   /**
    * @brief Clear power-on reset flag (PORF)
@@ -780,6 +823,20 @@ class RV3032 {
    * @note Must be cleared while VDD is present (per datasheet).
    */
   Status clearBackupSwitchFlag();
+
+  /**
+   * @brief Clear EEPROM write-access failure flag (EEF)
+   *
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status clearEepromErrorFlag();
+
+  /**
+   * @brief Clear interrupt-controlled clock flag (CLKF)
+   *
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status clearClockFlag();
 
   // ===== User RAM Operations =====
 
@@ -983,6 +1040,8 @@ class RV3032 {
   uint32_t _totalFailures = 0;         ///< Total failures since begin()
   uint32_t _totalSuccess = 0;          ///< Total successes since begin()
   bool _allowOfflineI2c = false;
+  bool _clockCalendarUncertain = false;
+  Status _clockCalendarLastStatus = Status::Ok();
   
   // Raw I2C transport (no health tracking) - for diagnostics only
   Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
@@ -1014,12 +1073,14 @@ class RV3032 {
   void _reassertOfflineLatch();
   uint32_t _nowMs() const;
   void _resetRuntimeState();
+  void _markClockCalendarUncertain(const Status& st);
   
   // Configuration application helper
   Status _applyConfig();
 
   // Conversion helpers
   static bool isValidBcd(uint8_t v);
+  static bool decodeTimeRegisters(const uint8_t* buf, DateTime& out);
   static uint8_t bcdToBin(uint8_t v);
   static uint8_t binToBcd(uint8_t v);
   static bool isLeapYear(uint16_t year);

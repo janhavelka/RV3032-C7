@@ -140,8 +140,8 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 
 | Method | Description |
 |--------|-------------|
-| `Status readTime(DateTime& out)` | Read current time and date |
-| `Status setTime(const DateTime& time)` | Set RTC time and date |
+| `Status readTime(DateTime& out)` | Read current time/date with one coherent seconds-through-year burst |
+| `Status setTime(const DateTime& time)` | Set RTC time/date using the STOP-controlled synchronization sequence |
 | `Status readUnix(uint32_t& out)` | Read time as Unix timestamp |
 | `Status setUnix(uint32_t ts)` | Set time from Unix timestamp |
 
@@ -195,9 +195,12 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status setEviDebounce(EviDebounce debounce)` | Set debounce filter |
 | `Status setEviOverwrite(bool enable)` | Allow overwriting timestamps |
 | `Status getEviConfig(EviConfig& out)` | Read EVI configuration |
+| `Status readTimestamp(TimestampSource source, Timestamp& out)` | Read decoded hardware timestamp block |
+| `Status resetTimestamp(TimestampSource source)` | Reset a hardware timestamp block |
 
-The current public API configures EVI behavior, but it does not expose the latched
-event timestamp registers yet.
+ESYN external-event synchronization is not enabled implicitly by ordinary `setTime()`.
+A dedicated high-level ESYN arm/cancel API remains deferred; direct register access to
+`REG_EVI_CONTROL` is diagnostic-only.
 
 ### Status & Low-Level
 
@@ -207,10 +210,13 @@ event timestamp registers yet.
 | `Status setPrimaryBatteryBackupDefaults()` | Apply primary-cell backup defaults: level switching, trickle charger off |
 | `Status getBackupSwitchMode(BackupSwitchMode& mode)` | Read backup switchover mode from PMU |
 | `Status readStatus(uint8_t& status)` | Read status register |
-| `Status clearStatus(uint8_t mask)` | Clear status flags |
-| `Status readStatusFlags(StatusFlags& out)` | Read decoded status flags |
-| `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF validity flags |
+| `Status clearStatus(uint8_t mask)` | Clear STATUS flags explicitly by mask |
+| `Status readStatusFlags(StatusFlags& out)` | Read decoded STATUS and 0x0E fault flags |
+| `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF/EEF/EEbusy/CLKF validity flags |
+| `Status clearFaultFlags(uint8_t mask)` | Clear EEF/CLKF/BSF fault flags explicitly by mask |
 | `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
+| `Status clearEepromErrorFlag()` | Clear EEPROM write-access failure flag (EEF) |
+| `Status clearClockFlag()` | Clear interrupt-controlled clock flag (CLKF) |
 | `Status clearPowerOnResetFlag()` | Clear the PORF validity flag after handling a reset event |
 | `Status clearVoltageLowFlag()` | Clear the VLF validity flag after voltage monitoring |
 | `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
@@ -322,6 +328,16 @@ if (!st.ok()) {
 
 **Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout. `Config::nowMs` is optional; if omitted, driver-owned timestamps are `0`, and elapsed EEPROM work is driven by the `now_ms` argument passed to `tick()`.
 
+**Clock/Calendar Coherence:** `readTime()` reads registers `0x01..0x07` in a single burst and validates reserved bits, BCD encoding, decoded ranges, dates, and leap years. The RV3032 blocks clock/calendar counters during RTC register transactions shorter than the device's 950ms I2C timeout, so the returned seconds-through-year fields are coherent when the transport completes normally. `readTime()` does not read `100th Seconds` and does not clear fault flags.
+
+**STOP-Controlled Time Set:** `setTime()` reads Control 2, sets STOP, writes seconds through year in one burst, then releases STOP while preserving unrelated Control 2 bits. Setting STOP and writing Seconds reset the 100th-seconds/prescaler state per the RV3032 manual. If a partial failure occurs after hardware may have changed, `SettingsSnapshot::clockCalendarUncertain` is set with the failure status and is cleared only by a later successful STOP-controlled `setTime()`.
+
+**ESYN:** ESYN is EVI Control `0x15` bit 0 and is not used as an implicit side effect of ordinary `setTime()`. External-event synchronization arm/cancel semantics remain deferred to a dedicated API.
+
+**Fault Flags:** Reading flags never clears them. `StatusFlags` exposes THF, TLF, UF, TF, AF, EVF, PORF, VLF, EEF, EEbusy, CLKF, and BSF. `ValidityFlags::timeInvalid` is true when PORF or VLF is set; PORF/VLF mean the time/configuration must be reinitialized or verified from a trusted external source before clearing. `clearStatus(0)` and `clearFaultFlags(0)` perform no register write. Any nonzero STATUS write clears THF/TLF on the RV3032 regardless of mask.
+
+**RTC Fault Recovery:** After PORF/VLF/BSF/EEF, recover the bus if needed, call `probe()`, read validity/fault flags, reinitialize configuration and set time from a trusted source when PORF or VLF is set, verify operation, then explicitly clear only the handled flags.
+
 **Resource Ownership:** I2C transport passed via `Config`. No hardcoded pins or resources.
 
 **Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
@@ -334,7 +350,7 @@ if (!st.ok()) {
 
 **Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` are diagnostic-only. They validate documented RV3032 address windows, reject wraparound and invalid buffers, reject the user EEPROM data range `0xCB..0xEA`, and do not count local validation failures against driver health. Direct writes to password, EEADDR, EEDATA, EECMD, protected control, alarm, timer, or clock/calendar registers can alter hardware state and should not be used as production configuration APIs.
 
-**Known Deferrals:** Full dirty-state diagnostics for clock/calendar multi-byte writes, Control register read-modify-write, timer configuration, alarm configuration, and explicit user EEPROM command APIs are deferred to later hardening chunks. Current EEPROM persistence diagnostics cover the existing asynchronous configuration write path through `isEepromBusy()`, `getEepromStatus()`, `eepromWriteCount()`, `eepromWriteFailures()`, and `eepromQueueDepth()`.
+**Known Deferrals:** Full dirty-state diagnostics for Control register read-modify-write outside `setTime()`, timer configuration, alarm configuration, explicit user EEPROM command APIs, and high-level ESYN arm/cancel APIs are deferred to later hardening chunks. Current EEPROM persistence diagnostics cover the existing asynchronous configuration write path through `isEepromBusy()`, `getEepromStatus()`, `eepromWriteCount()`, `eepromWriteFailures()`, and `eepromQueueDepth()`.
 
 **EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
 - `setClkoutEnabled()` / `setClkoutFrequency()`

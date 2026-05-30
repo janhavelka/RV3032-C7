@@ -318,7 +318,7 @@ static void print_help() {
   cli::printHelpItem("read", "Alias of time");
   cli::printHelpItem("cfg / settings", "Alias of drv");
   cli::printHelpItem("time", "Read current time");
-  cli::printHelpItem("set [YYYY MM DD HH MM SS]", "Set time (no args = show)");
+  cli::printHelpItem("set [YYYY MM DD HH MM SS]", "STOP-controlled time set (no args = show)");
   cli::printHelpItem("setbuild", "Set time to build timestamp");
   cli::printHelpItem("unix [ts]", "Read or set Unix timestamp");
   cli::printHelpItem("temp", "Read temperature");
@@ -345,9 +345,9 @@ static void print_help() {
 
   cli::printHelpSection("Status And Registers");
   cli::printHelpItem("status", "Read status register");
-  cli::printHelpItem("statusf", "Read decoded status flags");
+  cli::printHelpItem("statusf", "Read decoded status and fault flags");
   cli::printHelpItem("status_clear [mask]", "Clear status flags by mask (default 0xFF)");
-  cli::printHelpItem("validity", "Read PORF/VLF/BSF validity flags");
+  cli::printHelpItem("validity", "Read PORF/VLF/BSF/EEF/CLKF validity flags");
   cli::printHelpItem("ram [offset len]", "Dump user RAM (default all 16 bytes)");
   cli::printHelpItem("ram_write <offset> <byte...>", "Write user RAM bytes");
   cli::printHelpItem("reg <addr>", "Read register byte");
@@ -356,7 +356,9 @@ static void print_help() {
   cli::printHelpItem("backup [usual|off|level|direct]", "Show or set battery backup PMU");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
   cli::printHelpItem("clear_vlf", "Clear voltage low flag");
-  cli::printHelpItem("clear_bsf", "Clear backup switchover flag");
+  cli::printHelpItem("clear_bsf", "Clear backup switchover flag after verification");
+  cli::printHelpItem("clear_eef", "Clear EEPROM write failure flag after handling");
+  cli::printHelpItem("clear_clkf", "Clear clock-output interrupt flag");
 
   cli::printHelpSection("Diagnostics");
   cli::printHelpItem("drv", "Show driver state and health");
@@ -904,6 +906,11 @@ static void cmd_statusf() {
                 flags.event ? 1 : 0,
                 flags.powerOnReset ? 1 : 0,
                 flags.voltageLow ? 1 : 0);
+  Serial.printf("  eef=%d eebusy=%d clkf=%d bsf=%d\n",
+                flags.eepromError ? 1 : 0,
+                flags.eepromBusy ? 1 : 0,
+                flags.clockFlag ? 1 : 0,
+                flags.backupSwitched ? 1 : 0);
 }
 
 static void cmd_status_clear(const String& args) {
@@ -1079,7 +1086,13 @@ static void cmd_validity() {
   Serial.printf("PORF: %s\n", flags.powerOnReset ? "set" : "clear");
   Serial.printf("VLF:  %s\n", flags.voltageLow ? "set" : "clear");
   Serial.printf("BSF:  %s\n", flags.backupSwitched ? "set" : "clear");
+  Serial.printf("EEF:  %s\n", flags.eepromError ? "set" : "clear");
+  Serial.printf("EEbusy: %s\n", flags.eepromBusy ? "busy" : "idle");
+  Serial.printf("CLKF: %s\n", flags.clockFlag ? "set" : "clear");
   Serial.printf("Time: %s\n", flags.timeInvalid ? "invalid" : "valid");
+  if (flags.timeInvalid) {
+    Serial.println(F("PORF/VLF require reinitialization or trusted external verification before clearing."));
+  }
 }
 
 /**
@@ -1205,13 +1218,15 @@ static void cmd_backup(const String& args) {
     Serial.printf("Trickle charger bits: 0x%X (%s)\n",
                   static_cast<unsigned>(pmu & RV3032::cmd::PMU_TRICKLE_MASK),
                   trickleEnabled ? "enabled/configured" : "off");
-    Serial.printf("Flags: PORF=%s VLF=%s BSF=%s time=%s\n",
+    Serial.printf("Flags: PORF=%s VLF=%s BSF=%s EEF=%s CLKF=%s time=%s\n",
                   flags.powerOnReset ? "set" : "clear",
                   flags.voltageLow ? "set" : "clear",
                   flags.backupSwitched ? "set" : "clear",
+                  flags.eepromError ? "set" : "clear",
+                  flags.clockFlag ? "set" : "clear",
                   flags.timeInvalid ? "invalid" : "valid");
     Serial.println(F("Time is held by the RTC counter while VBACKUP is present; it is not stored in EEPROM."));
-    Serial.println(F("Usual primary-cell setup: backup usual, set time, then clear_porf/clear_vlf/clear_bsf after verification."));
+    Serial.println(F("Usual primary-cell setup: backup usual, set time, externally verify, then clear_porf/clear_vlf/clear_bsf."));
     return;
   }
 
@@ -1251,7 +1266,7 @@ static void cmd_clear_bsf() {
   if (!st.ok()) {
     LOGE("clearBackupSwitchFlag() failed: %s", st.msg);
   } else {
-    LOGI("Backup switchover flag cleared");
+    LOGI("Backup switchover flag cleared after verification");
   }
 }
 
@@ -1263,7 +1278,7 @@ static void cmd_clear_porf() {
   if (!st.ok()) {
     LOGE("clearPowerOnResetFlag() failed: %s", st.msg);
   } else {
-    LOGI("Power-on reset flag cleared");
+    LOGI("Power-on reset flag cleared; only do this after reinitialization or trusted verification");
   }
 }
 
@@ -1276,7 +1291,25 @@ static void cmd_clear_vlf() {
   if (!st.ok()) {
     LOGE("clearVoltageLowFlag() failed: %s", st.msg);
   } else {
-    LOGI("Voltage low flag cleared");
+    LOGI("Voltage low flag cleared; only do this after reinitialization or trusted verification");
+  }
+}
+
+static void cmd_clear_eef() {
+  RV3032::Status st = g_rtc.clearEepromErrorFlag();
+  if (!st.ok()) {
+    LOGE("clearEepromErrorFlag() failed: %s", st.msg);
+  } else {
+    LOGI("EEPROM write failure flag cleared after handling");
+  }
+}
+
+static void cmd_clear_clkf() {
+  RV3032::Status st = g_rtc.clearClockFlag();
+  if (!st.ok()) {
+    LOGE("clearClockFlag() failed: %s", st.msg);
+  } else {
+    LOGI("Clock-output interrupt flag cleared");
   }
 }
 
@@ -1950,6 +1983,10 @@ static void process_command(const String& line) {
     cmd_clear_vlf();
   } else if (cmd == "clear_bsf") {
     cmd_clear_bsf();
+  } else if (cmd == "clear_eef") {
+    cmd_clear_eef();
+  } else if (cmd == "clear_clkf") {
+    cmd_clear_clkf();
   } else if (cmd == "drv") {
     cmd_drv();
   } else if (cmd == "probe") {
