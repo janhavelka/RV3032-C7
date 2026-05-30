@@ -81,4 +81,3 @@ user EEPROM data range `0xCB..0xEA`.
   configuration, alarm configuration, and EEPROM command failures.
 - ESP-IDF native component/example/CI coverage.
 - Hardware validation matrix and release-readiness report.
-

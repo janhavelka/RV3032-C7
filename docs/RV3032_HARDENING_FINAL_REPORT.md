@@ -2,6 +2,10 @@
 
 Branch: `hardening/rv3032-industry-readiness`
 
+Historical note: this report captured an earlier hardening checkpoint before
+the later EEPROM/interrupt and ESP-IDF chunks. The current final readiness
+verdict is tracked in `docs/RV3032_INDUSTRY_HARDENING_FINAL_REPORT.md`.
+
 ## Summary
 
 This pass moved RV3032-C7 closer to industry-grade Arduino/ESP32 use and removed a core framework dependency. It is still not merge-complete for pure ESP-IDF production claims because this repository has no native ESP-IDF example/component build path.

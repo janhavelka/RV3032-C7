@@ -1,8 +1,12 @@
 # RV3032-C7 Industry-Grade Implementation Matrix
 
-Branch: `hardening/rv3032-industry-readiness`  
-Prompt: 01 - Deep baseline audit and implementation matrix  
+Branch: `hardening/rv3032-industry-readiness`
+Prompt: 01 - Deep baseline audit and implementation matrix
 Date: 2026-05-30
+
+Historical note: this matrix is the Prompt 01 baseline and planning artifact.
+Current final readiness status is tracked in
+`docs/RV3032_INDUSTRY_HARDENING_FINAL_REPORT.md`.
 
 ## Executive Summary
 

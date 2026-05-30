@@ -2,7 +2,7 @@
  * @file main.cpp
  * @brief Interactive CLI example for RV3032-C7 RTC
  *
- * Demonstrates complete RTC functionality:
+ * Diagnostic bring-up coverage:
  * - Time reading and setting
  * - Alarm configuration
  * - Timer operations

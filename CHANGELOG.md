@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native ESP-IDF component metadata and a diagnostic ESP-IDF 5.4 example using application-owned I2C bus handles, locking, timeout policy, and injected RV3032 transport callbacks.
+- User EEPROM byte/block APIs using offset-based access to the RV3032 user EEPROM range.
+- Decoded validity/fault flag helpers for PORF, VLF, BSF, EEF, EEbusy, and CLKF, plus explicit clear helpers for handled flags.
+- Alarm, timer, event interrupt routing helpers and timestamp read/reset helpers.
+- Native fake-transport tests for coherent time reads, STOP-controlled time setting, probe error mapping, EEPROM command sequencing, interrupt bits, direct register bounds, and partial-state diagnostics.
+- Hardware validation matrix and production bus-manager integration guidance.
+
+### Changed
+- Core library files under `include/` and `src/` are framework-neutral and no longer depend on Arduino, Wire, ESP-IDF, FreeRTOS, logging, or platform timing APIs.
+- `Config::nowMs` is the only driver-owned timestamp source; when omitted, driver-owned timestamps report `0`.
+- `setTime()` uses a STOP-controlled clock/calendar update sequence and records clock/calendar uncertainty after partial hardware failures.
+- `setTimer()` writes timer value/frequency while disabled and enables the timer last.
+- `probe()` maps only definite address NACK to `DEVICE_NOT_FOUND` and preserves data NACK, timeout, bus, and generic I2C errors.
+- Low-level direct register access is documented as diagnostic-only and rejects the user EEPROM range.
+
+### Migration Notes
+- `RV3032` copy and move construction/assignment are deleted. Applications must keep a stable driver instance and pass references or pointers instead of copying/moving it.
+- Applications that relied on implicit Arduino `millis()` health timestamps must now provide `Config::nowMs` or accept `0` for driver-owned timestamps.
+- Applications that handled all probe failures as `DEVICE_NOT_FOUND` should inspect the more precise `Status::code` values now returned by `probe()` and `recover()`.
+- Direct register EEPROM access to `0xCB..0xEA` is rejected; use the offset-based user EEPROM APIs.
+- Shared-bus and multi-task applications must serialize access outside the driver; public driver APIs are task-context APIs, not ISR-safe APIs.
+
+### Release Notes
+- The current branch still reports package version `1.5.0`. Before cutting a release, choose a SemVer bump deliberately. Because copy/move deletion can break code that copied driver objects, a major release is the conservative SemVer choice unless maintainers classify such copying as unsupported misuse.
+
 ## [1.5.0] - 2026-05-14
 
 ### Added

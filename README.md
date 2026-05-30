@@ -117,6 +117,8 @@ idf.py -C examples/esp_idf/basic set-target esp32s3 build
 idf.py -C examples/esp_idf/basic set-target esp32s2 build
 ```
 
+The `idf.py` commands require an ESP-IDF shell or a PATH with ESP-IDF exported.
+
 Applications must provide `Config::i2cWrite`, `Config::i2cWriteRead`, `Config::i2cUser`, and, for meaningful health timestamps, `Config::nowMs`. Shared buses must be serialized by the application bus manager.
 
 ## API
@@ -540,7 +542,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 - `probe()` is diagnostic-only and preserves timeout, bus, data-NACK, and generic I2C errors. `DEVICE_NOT_FOUND` is reserved for definite address NACK. `recover()` preserves tracked transport errors.
 - Low-level direct register access rejects the user EEPROM data range `0xCB..0xEA`; use the offset-based user EEPROM APIs for that storage.
 - Driver instances are not thread-safe and public APIs are not ISR-safe. Shared-bus users must serialize access externally.
-- No hardware validation was run as part of this hardening report; see `docs/RV3032_HARDENING_FINAL_REPORT.md` for exact checks.
+- No hardware validation was run as part of this hardening report; see `docs/RV3032_INDUSTRY_HARDENING_FINAL_REPORT.md` and `docs/RV3032_HARDWARE_VALIDATION_MATRIX.md` for exact checks and required bench coverage.
 
 ## License
 

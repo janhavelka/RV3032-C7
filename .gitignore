@@ -8,6 +8,7 @@
 **/managed_components/
 **/sdkconfig
 **/sdkconfig.old
+**/dependencies.lock
 
 # Build artifacts
 *.o
@@ -17,6 +18,7 @@
 *.map
 
 # Python (for scripts/)
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -42,6 +44,8 @@ wifi_credentials.h
 *.tmp
 *.bak
 *.log
+*.tar.gz
+build_output.txt
 
 # Auto-generated files
 include/RV3032/Version.h
