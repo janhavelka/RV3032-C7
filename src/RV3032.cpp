@@ -15,6 +15,7 @@ namespace RV3032 {
 // Implementation-only constants (not part of public API)
 namespace {
 constexpr uint32_t kEepromPreCmdTimeoutMs = 50;
+constexpr uint8_t kEepromSyncMaxPolls = 128;
 constexpr uint8_t kMaxBackupSwitchMode = static_cast<uint8_t>(BackupSwitchMode::Direct);
 constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
@@ -22,6 +23,14 @@ constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
 constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
 constexpr uint8_t kUserRamSize =
     static_cast<uint8_t>(cmd::REG_USER_RAM_END - cmd::REG_USER_RAM_START + 1U);
+constexpr uint8_t kEviControlWritableMask =
+    static_cast<uint8_t>((1u << cmd::EVI_CLKDE_BIT) |
+                         (1u << cmd::EVI_EB_BIT) |
+                         cmd::EVI_DB_MASK |
+                         (1u << cmd::EVI_ESYN_BIT));
+constexpr const char* kEepromRecoveryNone = "";
+constexpr const char* kEepromRecoveryReadback =
+    "Read back or rewrite affected user EEPROM bytes after bus/power recovery";
 
 class ScopedOfflineI2cAllowance {
 public:
@@ -232,6 +241,14 @@ Status RV3032::getSettings(SettingsSnapshot& out) const {
   out.eepromWriteCount = _eepromWriteCount;
   out.eepromWriteFailures = _eepromWriteFailures;
   out.eepromQueueDepth = _eeprom.queueCount;
+  out.eepromCommandLastStatus = _eepromCommandLastStatus;
+  out.eepromBusyTimeout = _eepromBusyTimeout;
+  out.eepromErrorObserved = _eepromErrorObserved;
+  out.eepromWritePendingDirty = _eepromWritePendingDirty;
+  out.eepromDirtyAddress = _eepromDirtyAddress;
+  out.eepromDirtyValue = _eepromDirtyValue;
+  out.eepromRecoveryRecommendation =
+      _eepromWritePendingDirty ? kEepromRecoveryReadback : kEepromRecoveryNone;
   out.lastOkMs = _lastOkMs;
   out.lastErrorMs = _lastErrorMs;
   out.lastError = _lastError;
@@ -240,6 +257,74 @@ Status RV3032::getSettings(SettingsSnapshot& out) const {
   out.totalSuccess = _totalSuccess;
   out.clockCalendarUncertain = _clockCalendarUncertain;
   out.clockCalendarLastStatus = _clockCalendarLastStatus;
+  return Status::Ok();
+}
+
+// ===== User EEPROM Operations =====
+
+Status RV3032::readUserEepromByte(uint8_t offset, uint8_t& out) {
+  return readUserEeprom(offset, &out, 1);
+}
+
+Status RV3032::writeUserEepromByte(uint8_t offset, uint8_t value) {
+  return writeUserEeprom(offset, &value, 1);
+}
+
+Status RV3032::readUserEeprom(uint8_t offset, uint8_t* dst, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (dst == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid user EEPROM read buffer");
+  }
+  if (offset >= cmd::USER_EEPROM_SIZE ||
+      len > static_cast<size_t>(cmd::USER_EEPROM_SIZE - offset)) {
+    return Status::Error(Err::INVALID_PARAM, "User EEPROM read out of range");
+  }
+  if (isEepromBusy()) {
+    return Status::Error(Err::BUSY, "EEPROM state machine is active");
+  }
+
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t physical =
+        static_cast<uint8_t>(cmd::USER_EEPROM_START + offset + static_cast<uint8_t>(i));
+    Status st = readUserEepromByteAt(physical, dst[i]);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+  return Status::Ok();
+}
+
+Status RV3032::writeUserEeprom(uint8_t offset, const uint8_t* src, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (src == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid user EEPROM write buffer");
+  }
+  if (offset >= cmd::USER_EEPROM_SIZE ||
+      len > static_cast<size_t>(cmd::USER_EEPROM_SIZE - offset)) {
+    return Status::Error(Err::INVALID_PARAM, "User EEPROM write out of range");
+  }
+  if (isEepromBusy()) {
+    return Status::Error(Err::BUSY, "EEPROM state machine is active");
+  }
+
+  bool wroteAny = false;
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t physical =
+        static_cast<uint8_t>(cmd::USER_EEPROM_START + offset + static_cast<uint8_t>(i));
+    Status st = writeUserEepromByteAt(physical, src[i]);
+    if (!st.ok()) {
+      if (wroteAny && !_eepromWritePendingDirty) {
+        _recordEepromDirty(st, physical, src[i], st.code == Err::TIMEOUT,
+                           st.code == Err::EEPROM_WRITE_FAILED);
+      }
+      return st;
+    }
+    wroteAny = true;
+  }
   return Status::Ok();
 }
 
@@ -427,6 +512,12 @@ void RV3032::_resetRuntimeState() {
   _allowOfflineI2c = false;
   _clockCalendarUncertain = false;
   _clockCalendarLastStatus = Status::Ok();
+  _eepromCommandLastStatus = Status::Ok();
+  _eepromBusyTimeout = false;
+  _eepromErrorObserved = false;
+  _eepromWritePendingDirty = false;
+  _eepromDirtyAddress = 0;
+  _eepromDirtyValue = 0;
 }
 
 void RV3032::_markClockCalendarUncertain(const Status& st) {
@@ -699,6 +790,18 @@ Status RV3032::clearAlarmFlag() {
   return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_AF_BIT));
 }
 
+Status RV3032::clearTimerFlag() {
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_TF_BIT));
+}
+
+Status RV3032::clearUpdateFlag() {
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_UF_BIT));
+}
+
+Status RV3032::clearEventFlag() {
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_EVF_BIT));
+}
+
 Status RV3032::enableAlarmInterrupt(bool enable) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
@@ -731,6 +834,37 @@ Status RV3032::getAlarmInterruptEnabled(bool& enabled) {
   return Status::Ok();
 }
 
+Status RV3032::enableTimerInterrupt(bool enable) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t control2 = 0;
+  Status st = readRegister(cmd::REG_CONTROL2, control2);
+  if (!st.ok()) {
+    return st;
+  }
+
+  uint8_t newControl2 = enable ? static_cast<uint8_t>(control2 | (1u << cmd::CTRL2_TIE_BIT))
+                               : static_cast<uint8_t>(control2 & ~(1u << cmd::CTRL2_TIE_BIT));
+  return writeRegister(cmd::REG_CONTROL2, newControl2);
+}
+
+Status RV3032::getTimerInterruptEnabled(bool& enabled) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t control2 = 0;
+  Status st = readRegister(cmd::REG_CONTROL2, control2);
+  if (!st.ok()) {
+    return st;
+  }
+
+  enabled = ((control2 & (1u << cmd::CTRL2_TIE_BIT)) != 0);
+  return Status::Ok();
+}
+
 // ===== Timer Operations =====
 
 Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
@@ -739,6 +873,9 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   }
   if (ticks > 0x0FFF) {
     return Status::Error(Err::INVALID_PARAM, "Timer ticks out of range");
+  }
+  if (enable && ticks == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Timer value 0 cannot start");
   }
   const uint8_t freqRaw = static_cast<uint8_t>(freq);
   if (freqRaw > kMaxTimerFrequency) {
@@ -751,31 +888,30 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
     return st;
   }
 
-  const uint8_t control1Disabled =
-      static_cast<uint8_t>((control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT))) |
+  uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
+  uint8_t high = static_cast<uint8_t>((ticks >> 8) & 0x0Fu);
+
+  const uint8_t control1Disabled = static_cast<uint8_t>(control1 & ~(1u << cmd::CTRL1_TE_BIT));
+  const uint8_t control1Configured =
+      static_cast<uint8_t>((control1Disabled & ~cmd::CTRL1_TD_MASK) |
                            (freqRaw & cmd::CTRL1_TD_MASK));
   const uint8_t control1Final =
-      enable ? static_cast<uint8_t>(control1Disabled | (1u << cmd::CTRL1_TE_BIT))
-             : control1Disabled;
+      enable ? static_cast<uint8_t>(control1Configured | (1u << cmd::CTRL1_TE_BIT))
+             : control1Configured;
 
-  uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
-  uint8_t currentHigh = 0;
-  st = readRegister(cmd::REG_TIMER_HIGH, currentHigh);
-  if (!st.ok()) {
-    return st;
-  }
-  uint8_t high = static_cast<uint8_t>((currentHigh & 0xF0u) | ((ticks >> 8) & 0x0Fu));
-
-  st = writeRegister(cmd::REG_CONTROL1, control1Disabled);
-  if (!st.ok()) {
-    return st;
+  (void)control1Disabled;
+  if (control1Configured != control1) {
+    st = writeRegister(cmd::REG_CONTROL1, control1Configured);
+    if (!st.ok()) {
+      return st;
+    }
   }
 
   st = writeRegister(cmd::REG_TIMER_LOW, low);
   if (!st.ok()) return st;
   st = writeRegister(cmd::REG_TIMER_HIGH, high);
   if (!st.ok()) return st;
-  if (control1Final != control1Disabled) {
+  if (control1Final != control1Configured) {
     return writeRegister(cmd::REG_CONTROL1, control1Final);
   }
   return Status::Ok();
@@ -1044,6 +1180,7 @@ Status RV3032::setEviEdge(bool rising) {
     return st;
   }
 
+  control = static_cast<uint8_t>(control & kEviControlWritableMask);
   uint8_t newControl = rising ? static_cast<uint8_t>(control | (1u << cmd::EVI_EB_BIT))
                               : static_cast<uint8_t>(control & ~(1u << cmd::EVI_EB_BIT));
 
@@ -1065,6 +1202,7 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
     return st;
   }
 
+  control = static_cast<uint8_t>(control & kEviControlWritableMask);
   uint8_t newControl = static_cast<uint8_t>(control & ~cmd::EVI_DB_MASK);
   newControl = static_cast<uint8_t>(newControl | ((debounceRaw << cmd::EVI_DB_SHIFT) & cmd::EVI_DB_MASK));
 
@@ -1086,6 +1224,37 @@ Status RV3032::setEviOverwrite(bool enable) {
                               : static_cast<uint8_t>(control & ~(1u << cmd::TS_OVERWRITE_BIT));
 
   return writeRegister(cmd::REG_TS_CONTROL, newControl);
+}
+
+Status RV3032::enableEventInterrupt(bool enable) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t control2 = 0;
+  Status st = readRegister(cmd::REG_CONTROL2, control2);
+  if (!st.ok()) {
+    return st;
+  }
+
+  uint8_t newControl2 = enable ? static_cast<uint8_t>(control2 | (1u << cmd::CTRL2_EIE_BIT))
+                               : static_cast<uint8_t>(control2 & ~(1u << cmd::CTRL2_EIE_BIT));
+  return writeRegister(cmd::REG_CONTROL2, newControl2);
+}
+
+Status RV3032::getEventInterruptEnabled(bool& enabled) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+
+  uint8_t control2 = 0;
+  Status st = readRegister(cmd::REG_CONTROL2, control2);
+  if (!st.ok()) {
+    return st;
+  }
+
+  enabled = ((control2 & (1u << cmd::CTRL2_EIE_BIT)) != 0);
+  return Status::Ok();
 }
 
 Status RV3032::getEviConfig(EviConfig& out) {
@@ -1232,14 +1401,8 @@ Status RV3032::clearStatus(uint8_t mask) {
     return Status::Ok();
   }
 
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
-  if (!st.ok()) {
-    return st;
-  }
-
-  status = static_cast<uint8_t>(status & ~mask);
-  return writeRegister(cmd::REG_STATUS, status);
+  const uint8_t writeValue = static_cast<uint8_t>(~mask);
+  return writeRegister(cmd::REG_STATUS, writeValue);
 }
 
 // ===== Low-Level Operations =====
@@ -1543,7 +1706,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       }
       break;
     case EepromState::WriteCmd:
-      st = writeRegister(cmd::REG_EE_COMMAND, cmd::EEPROM_CMD_UPDATE);
+      st = writeRegister(cmd::REG_EE_COMMAND, cmd::EEPROM_CMD_WRITE_BYTE);
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1576,8 +1739,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
     case EepromState::RestoreControl1: {
       Status finalStatus = _eepromLastStatus;
       if (_eeprom.control1Valid) {
-        uint8_t restore = static_cast<uint8_t>(_eeprom.control1 & ~(1u << cmd::CTRL1_EERD_BIT));
-        st = writeRegister(cmd::REG_CONTROL1, restore);
+        st = writeRegister(cmd::REG_CONTROL1, _eeprom.control1);
         if (!st.ok() && finalStatus.ok()) {
           finalStatus = st;
         }
@@ -1650,6 +1812,184 @@ Status RV3032::readEepromFlags(bool& busy, bool& failed) {
   busy = ((tempLsb & (1u << cmd::EEPROM_BUSY_BIT)) != 0);
   failed = ((tempLsb & (1u << cmd::EEPROM_ERROR_BIT)) != 0);
   return Status::Ok();
+}
+
+void RV3032::_recordEepromCommandStatus(const Status& st) {
+  _eepromCommandLastStatus = st;
+  if (st.ok()) {
+    _eepromBusyTimeout = false;
+    _eepromErrorObserved = false;
+  }
+}
+
+void RV3032::_recordEepromDirty(const Status& st, uint8_t physicalAddress, uint8_t value,
+                                bool busyTimeout, bool eefObserved) {
+  _eepromCommandLastStatus = st;
+  _eepromBusyTimeout = _eepromBusyTimeout || busyTimeout;
+  _eepromErrorObserved = _eepromErrorObserved || eefObserved;
+  _eepromWritePendingDirty = true;
+  _eepromDirtyAddress = physicalAddress;
+  _eepromDirtyValue = value;
+}
+
+Status RV3032::restoreEepromControl1(uint8_t originalControl1, const Status& primaryStatus,
+                                     bool dirtyOnFailure, uint8_t dirtyAddress,
+                                     uint8_t dirtyValue) {
+  Status restore = writeRegister(cmd::REG_CONTROL1, originalControl1);
+  if (!restore.ok()) {
+    if (dirtyOnFailure) {
+      _recordEepromDirty(restore, dirtyAddress, dirtyValue, false, false);
+    } else {
+      _recordEepromCommandStatus(restore);
+    }
+    return primaryStatus.ok() ? restore : primaryStatus;
+  }
+  _recordEepromCommandStatus(primaryStatus);
+  return primaryStatus;
+}
+
+Status RV3032::waitEepromReadySync(uint32_t timeoutMs, bool failOnEef, bool& eefObserved) {
+  const uint32_t startMs = _nowMs();
+  const uint32_t deadlineMs = startMs + timeoutMs;
+  bool sawProgressTime = false;
+
+  for (uint8_t poll = 0; poll < kEepromSyncMaxPolls; ++poll) {
+    bool busy = false;
+    bool failed = false;
+    Status st = readEepromFlags(busy, failed);
+    if (!st.ok()) {
+      return st;
+    }
+    if (failed) {
+      eefObserved = true;
+      if (failOnEef) {
+        return Status::Error(Err::EEPROM_WRITE_FAILED, "EEPROM write failed");
+      }
+    }
+    if (!busy) {
+      return Status::Ok();
+    }
+
+    const uint32_t nowMs = _nowMs();
+    if (nowMs != startMs) {
+      sawProgressTime = true;
+    }
+    if ((sawProgressTime && hasDeadlinePassed(nowMs, deadlineMs)) ||
+        (!sawProgressTime && poll == static_cast<uint8_t>(kEepromSyncMaxPolls - 1U))) {
+      return Status::Error(Err::TIMEOUT, "EEPROM busy timeout");
+    }
+  }
+  return Status::Error(Err::TIMEOUT, "EEPROM busy timeout");
+}
+
+Status RV3032::readUserEepromByteAt(uint8_t physicalAddress, uint8_t& out) {
+  uint8_t control1 = 0;
+  Status st = readRegister(cmd::REG_CONTROL1, control1);
+  if (!st.ok()) {
+    _recordEepromCommandStatus(st);
+    return st;
+  }
+
+  const uint8_t eerdControl1 = static_cast<uint8_t>(control1 | (1u << cmd::CTRL1_EERD_BIT));
+  st = writeRegister(cmd::REG_CONTROL1, eerdControl1);
+  if (!st.ok()) {
+    _recordEepromCommandStatus(st);
+    return st;
+  }
+
+  bool eefObserved = false;
+  st = waitEepromReadySync(kEepromPreCmdTimeoutMs, false, eefObserved);
+  if (!st.ok()) {
+    return restoreEepromControl1(control1, st, false, physicalAddress, 0);
+  }
+
+  st = writeRegister(cmd::REG_EE_ADDRESS, physicalAddress);
+  if (!st.ok()) {
+    return restoreEepromControl1(control1, st, false, physicalAddress, 0);
+  }
+
+  st = writeRegister(cmd::REG_EE_COMMAND, cmd::EEPROM_CMD_READ_BYTE);
+  if (!st.ok()) {
+    return restoreEepromControl1(control1, st, false, physicalAddress, 0);
+  }
+
+  const uint32_t commandTimeout =
+      (_config.eepromTimeoutMs == 0) ? kEepromPreCmdTimeoutMs : _config.eepromTimeoutMs;
+  st = waitEepromReadySync(commandTimeout, false, eefObserved);
+  if (!st.ok()) {
+    return restoreEepromControl1(control1, st, false, physicalAddress, 0);
+  }
+
+  uint8_t value = 0;
+  st = readRegister(cmd::REG_EE_DATA, value);
+  if (st.ok()) {
+    out = value;
+  }
+  Status finalStatus = restoreEepromControl1(control1, st, false, physicalAddress, 0);
+  if (finalStatus.ok() && eefObserved) {
+    _eepromErrorObserved = true;
+  }
+  return finalStatus;
+}
+
+Status RV3032::writeUserEepromByteAt(uint8_t physicalAddress, uint8_t value) {
+  uint8_t control1 = 0;
+  Status st = readRegister(cmd::REG_CONTROL1, control1);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, false, false);
+    return st;
+  }
+
+  const uint8_t eerdControl1 = static_cast<uint8_t>(control1 | (1u << cmd::CTRL1_EERD_BIT));
+  st = writeRegister(cmd::REG_CONTROL1, eerdControl1);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, false, false);
+    return st;
+  }
+
+  bool eefObserved = false;
+  st = waitEepromReadySync(kEepromPreCmdTimeoutMs, true, eefObserved);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, st.code == Err::TIMEOUT, eefObserved);
+    return restoreEepromControl1(control1, st, true, physicalAddress, value);
+  }
+
+  st = writeRegister(cmd::REG_EE_ADDRESS, physicalAddress);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, false, eefObserved);
+    return restoreEepromControl1(control1, st, true, physicalAddress, value);
+  }
+
+  st = writeRegister(cmd::REG_EE_DATA, value);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, false, eefObserved);
+    return restoreEepromControl1(control1, st, true, physicalAddress, value);
+  }
+
+  st = writeRegister(cmd::REG_EE_COMMAND, cmd::EEPROM_CMD_WRITE_BYTE);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, false, eefObserved);
+    return restoreEepromControl1(control1, st, true, physicalAddress, value);
+  }
+
+  const uint32_t commandTimeout =
+      (_config.eepromTimeoutMs == 0) ? kEepromPreCmdTimeoutMs : _config.eepromTimeoutMs;
+  st = waitEepromReadySync(commandTimeout, true, eefObserved);
+  if (!st.ok()) {
+    _recordEepromDirty(st, physicalAddress, value, st.code == Err::TIMEOUT, eefObserved);
+    return restoreEepromControl1(control1, st, true, physicalAddress, value);
+  }
+
+  Status finalStatus = restoreEepromControl1(control1, Status::Ok(), true, physicalAddress, value);
+  if (finalStatus.ok()) {
+    _eepromCommandLastStatus = Status::Ok();
+    _eepromBusyTimeout = false;
+    _eepromErrorObserved = false;
+    _eepromWritePendingDirty = false;
+    _eepromDirtyAddress = 0;
+    _eepromDirtyValue = 0;
+  }
+  return finalStatus;
 }
 
 // ===== Conversion Helper Functions =====
@@ -1804,14 +2144,8 @@ Status RV3032::clearFaultFlags(uint8_t mask) {
     return Status::Ok();
   }
 
-  uint8_t tempLsb = 0;
-  Status st = readRegister(cmd::REG_TEMP_LSB, tempLsb);
-  if (!st.ok()) {
-    return st;
-  }
-
-  tempLsb = static_cast<uint8_t>(tempLsb & ~clearMask);
-  return writeRegister(cmd::REG_TEMP_LSB, tempLsb);
+  const uint8_t writeValue = static_cast<uint8_t>(~clearMask);
+  return writeRegister(cmd::REG_TEMP_LSB, writeValue);
 }
 
 Status RV3032::clearPowerOnResetFlag() {

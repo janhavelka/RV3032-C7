@@ -98,7 +98,7 @@ static constexpr uint8_t REG_TEMP_MSB = 0x0F;
 // ========== Control Registers (0x10–0x12) ==========
 
 /// @brief Control 1 register (0x10, read/write-protectable)
-/// Bits: TRPT, EERD, TE, TD1, TD0
+/// Bits: TRPT, GP0, USEL, TE, EERD, TD1, TD0
 /// @see Control1Bits for bit definitions
 static constexpr uint8_t REG_CONTROL1 = 0x10;
 
@@ -108,7 +108,7 @@ static constexpr uint8_t REG_CONTROL1 = 0x10;
 static constexpr uint8_t REG_CONTROL2 = 0x11;
 
 /// @brief Control 3 register (0x12, read/write-protectable)
-/// Reserved or for future use; typically read as 0x00
+/// Bits: BSIE, THE, TLE, THIE, TLIE; bits 7:5 read as 0.
 static constexpr uint8_t REG_CONTROL3 = 0x12;
 
 // ========== Timestamp Control (0x13–0x15) ==========
@@ -325,6 +325,10 @@ static constexpr uint8_t USER_EEPROM_START = 0xCB;
 /// Last byte of non-volatile user storage
 static constexpr uint8_t USER_EEPROM_END = 0xEA;
 
+/// @brief User EEPROM size in bytes
+static constexpr uint8_t USER_EEPROM_SIZE =
+    static_cast<uint8_t>(USER_EEPROM_END - USER_EEPROM_START + 1U);
+
 // ========== Register Bit Masks & Control Values ==========
 
 // Status register bits (REG_STATUS, 0x0D)
@@ -339,8 +343,10 @@ static constexpr uint8_t STATUS_THF_BIT = 7;          ///< Temperature High Flag
 
 // Control 1 register bits (REG_CONTROL1, 0x10)
 static constexpr uint8_t CTRL1_TRPT_BIT = 7;          ///< Timer Repeat
-static constexpr uint8_t CTRL1_EERD_BIT = 2;          ///< EEPROM Refresh/Read
+static constexpr uint8_t CTRL1_GP0_BIT = 5;           ///< General-purpose control bit
+static constexpr uint8_t CTRL1_USEL_BIT = 4;          ///< Update interrupt unit select
 static constexpr uint8_t CTRL1_TE_BIT = 3;            ///< Timer Enable
+static constexpr uint8_t CTRL1_EERD_BIT = 2;          ///< EEPROM Refresh/Read disable
 static constexpr uint8_t CTRL1_TD_MASK = 0x03;        ///< Timer Divisor (2 bits)
 static constexpr uint8_t CTRL1_TD_SHIFT = 0;
 
@@ -358,6 +364,13 @@ static constexpr uint8_t CTRL2_TLFM_BIT = CTRL2_CLKIE_BIT;  ///< Deprecated comp
 static constexpr uint8_t CTRL2_OUT_A_BIT = CTRL2_GP1_BIT;   ///< Deprecated compatibility alias
 static constexpr uint8_t CTRL2_OUT_B_BIT = CTRL2_STOP_BIT;  ///< Deprecated compatibility alias
 
+// Control 3 register bits (REG_CONTROL3, 0x12)
+static constexpr uint8_t CTRL3_BSIE_BIT = 4;          ///< Backup switchover interrupt enable
+static constexpr uint8_t CTRL3_THE_BIT = 3;           ///< Temperature high detect/timestamp enable
+static constexpr uint8_t CTRL3_TLE_BIT = 2;           ///< Temperature low detect/timestamp enable
+static constexpr uint8_t CTRL3_THIE_BIT = 1;          ///< Temperature high interrupt enable
+static constexpr uint8_t CTRL3_TLIE_BIT = 0;          ///< Temperature low interrupt enable
+
 // Timestamp Control register bits (REG_TS_CONTROL, 0x13)
 static constexpr uint8_t TS_TLOW_OVERWRITE_BIT = 0;   ///< TLow timestamp overwrite enable
 static constexpr uint8_t TS_THIGH_OVERWRITE_BIT = 1;  ///< THigh timestamp overwrite enable
@@ -366,6 +379,16 @@ static constexpr uint8_t TS_OVERWRITE_BIT = TS_EVI_OVERWRITE_BIT;  ///< Backward
 static constexpr uint8_t TS_TLOW_RESET_BIT = 3;        ///< Reset TLow timestamp
 static constexpr uint8_t TS_THIGH_RESET_BIT = 4;       ///< Reset THigh timestamp
 static constexpr uint8_t TS_EVI_RESET_BIT = 5;         ///< Reset EVI timestamp
+
+// Clock Interrupt Mask register bits (REG_CLOCK_INT_MASK, 0x14)
+static constexpr uint8_t CLOCK_INT_CTLIE_BIT = 0;      ///< CLKOUT on TLow interrupt
+static constexpr uint8_t CLOCK_INT_CTHIE_BIT = 1;      ///< CLKOUT on THigh interrupt
+static constexpr uint8_t CLOCK_INT_CUIE_BIT = 2;       ///< CLKOUT on update interrupt
+static constexpr uint8_t CLOCK_INT_CTIE_BIT = 3;       ///< CLKOUT on timer interrupt
+static constexpr uint8_t CLOCK_INT_CAIE_BIT = 4;       ///< CLKOUT on alarm interrupt
+static constexpr uint8_t CLOCK_INT_CEIE_BIT = 5;       ///< CLKOUT on EVI interrupt
+static constexpr uint8_t CLOCK_INT_INTDE_BIT = 6;      ///< Interrupt delay after CLKOUT-on
+static constexpr uint8_t CLOCK_INT_CLKD_BIT = 7;       ///< CLKOUT switch-off delay select
 
 // EVI Control register bits (REG_EVI_CONTROL, 0x15)
 static constexpr uint8_t EVI_CLKDE_BIT = 7;           ///< CLKOUT off delay after I2C STOP enable
@@ -387,8 +410,12 @@ static constexpr uint8_t CLKOUT_FREQ_MASK = 0x60;     ///< CLKOUT frequency sele
 static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit shift
 
 // EEPROM Command values
-static constexpr uint8_t EEPROM_CMD_UPDATE = 0x21;    ///< EEPROM update/write command
-static constexpr uint8_t EEPROM_CMD_READ = 0x22;      ///< EEPROM read command
+static constexpr uint8_t EEPROM_CMD_UPDATE_ALL = 0x11;    ///< Update config RAM mirror to EEPROM
+static constexpr uint8_t EEPROM_CMD_REFRESH_ALL = 0x12;   ///< Refresh config EEPROM to RAM mirror
+static constexpr uint8_t EEPROM_CMD_WRITE_BYTE = 0x21;    ///< Write one EEPROM byte
+static constexpr uint8_t EEPROM_CMD_READ_BYTE = 0x22;     ///< Read one EEPROM byte
+static constexpr uint8_t EEPROM_CMD_UPDATE = EEPROM_CMD_WRITE_BYTE;  ///< Compatibility alias
+static constexpr uint8_t EEPROM_CMD_READ = EEPROM_CMD_READ_BYTE;     ///< Compatibility alias
 static constexpr uint8_t EEPROM_BUSY_BIT = 2;         ///< EEPROM operation busy flag (in REG_TEMP_LSB)
 static constexpr uint8_t EEPROM_ERROR_BIT = 3;        ///< EEPROM operation error flag (in REG_TEMP_LSB)
 static constexpr uint8_t TEMP_CLKF_BIT = 1;           ///< Clock flag (in REG_TEMP_LSB)

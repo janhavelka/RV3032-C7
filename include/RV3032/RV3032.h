@@ -239,6 +239,13 @@ struct SettingsSnapshot {
   uint32_t eepromWriteCount = 0;               ///< Successful EEPROM writes since begin()
   uint32_t eepromWriteFailures = 0;            ///< Failed EEPROM writes since begin()
   uint8_t eepromQueueDepth = 0;                ///< Pending EEPROM queue depth
+  Status eepromCommandLastStatus = Status::Ok(); ///< Last synchronous user EEPROM command status
+  bool eepromBusyTimeout = false;              ///< EEPROM command path observed an EEbusy timeout
+  bool eepromErrorObserved = false;            ///< EEPROM command path observed EEF
+  bool eepromWritePendingDirty = false;        ///< User EEPROM write may be partial or unverified
+  uint8_t eepromDirtyAddress = 0;              ///< Physical EEPROM address for dirty diagnostic
+  uint8_t eepromDirtyValue = 0;                ///< Value associated with dirty diagnostic
+  const char* eepromRecoveryRecommendation = ""; ///< Static recovery guidance when dirty/faulted
   uint32_t lastOkMs = 0;                       ///< Timestamp of last successful operation
   uint32_t lastErrorMs = 0;                    ///< Timestamp of last failed operation
   Status lastError = Status::Ok();             ///< Most recent operation failure
@@ -464,6 +471,63 @@ class RV3032 {
    */
   uint8_t eepromQueueDepth() const { return _eeprom.queueCount; }
 
+  // ===== User EEPROM Operations =====
+
+  /**
+   * @brief Read one byte from the 32-byte user EEPROM area.
+   *
+   * Uses offset 0..31, mapped internally to physical EEPROM addresses
+   * 0xCB..0xEA through EEADDR/EEDATA/EECMD. Direct register access to that
+   * range remains rejected.
+   *
+   * @param offset User EEPROM offset (0..31)
+   * @param[out] out Destination byte
+   * @return OK on success, BUSY if the async EEPROM state machine is active,
+   *         TIMEOUT if EEbusy does not clear, or transport/status error.
+   * @note Reads do not clear EEF and do not fail only because EEF was already
+   *       set; use readValidity()/clearEepromErrorFlag() to handle EEF.
+   */
+  Status readUserEepromByte(uint8_t offset, uint8_t& out);
+
+  /**
+   * @brief Write one byte to the 32-byte user EEPROM area.
+   *
+   * Uses the RV3032 one-byte EEPROM command sequence and waits for EEbusy to
+   * clear with bounded polling. EEF is treated as EEPROM_WRITE_FAILED and is
+   * not cleared implicitly.
+   *
+   * @param offset User EEPROM offset (0..31)
+   * @param value Value to write
+   * @return OK on success, BUSY if the async EEPROM state machine is active,
+   *         EEPROM_WRITE_FAILED on EEF, TIMEOUT if EEbusy does not clear, or
+   *         transport/status error.
+   */
+  Status writeUserEepromByte(uint8_t offset, uint8_t value);
+
+  /**
+   * @brief Read a block from user EEPROM.
+   *
+   * @param offset User EEPROM offset (0..31)
+   * @param[out] dst Destination buffer
+   * @param len Number of bytes to read
+   * @return OK on success or error. Zero length and null buffers are rejected.
+   */
+  Status readUserEeprom(uint8_t offset, uint8_t* dst, size_t len);
+
+  /**
+   * @brief Write a block to user EEPROM.
+   *
+   * Writes are issued as one-byte EEPROM commands. If a later byte in a block
+   * fails after earlier bytes completed, the EEPROM dirty diagnostic is set so
+   * the application can read back or rewrite the affected data explicitly.
+   *
+   * @param offset User EEPROM offset (0..31)
+   * @param src Source buffer
+   * @param len Number of bytes to write
+   * @return OK on success or first error encountered.
+   */
+  Status writeUserEeprom(uint8_t offset, const uint8_t* src, size_t len);
+
   // ===== Time/Date Operations =====
 
   /**
@@ -561,6 +625,27 @@ class RV3032 {
   Status clearAlarmFlag();
 
   /**
+   * @brief Clear periodic countdown timer flag (TF).
+   *
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status clearTimerFlag();
+
+  /**
+   * @brief Clear periodic update flag (UF).
+   *
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status clearUpdateFlag();
+
+  /**
+   * @brief Clear external event flag (EVF).
+   *
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status clearEventFlag();
+
+  /**
    * @brief Enable or disable alarm interrupt output
    * 
    * @param enable true to enable INT pin output, false to disable
@@ -576,23 +661,44 @@ class RV3032 {
    */
   Status getAlarmInterruptEnabled(bool& enabled);
 
+  /**
+   * @brief Enable or disable timer interrupt output
+   *
+   * @param enable true to route TF to INT through TIE, false to disable
+   * @return Status::Ok() on success, error otherwise
+   * @note Does not clear TF. Clear flags explicitly after servicing.
+   */
+  Status enableTimerInterrupt(bool enable);
+
+  /**
+   * @brief Check if timer interrupt is enabled
+   *
+   * @param[out] enabled true if timer interrupt enabled
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status getTimerInterruptEnabled(bool& enabled);
+
   // ===== Timer Operations =====
 
   /**
    * @brief Configure periodic countdown timer
    * 
-   * @param ticks Number of timer ticks before triggering (0-4095)
+   * @param ticks Number of timer ticks before triggering (0-4095; zero cannot start)
    * @param freq Timer clock frequency
    * @param enable Start timer immediately if true
-   * @return Status::Ok() on success, INVALID_PARAM if ticks > 4095 or freq invalid, error otherwise
-   * @note Timer period = ticks / freq. Example: 60 ticks at Hz1 = 60 seconds
+   * @return Status::Ok() on success, INVALID_PARAM if ticks > 4095, ticks is
+   *         zero while enabling, or freq invalid; error otherwise
+   * @note Timer period = ticks / freq. Example: 60 ticks at Hz1 = 60 seconds.
+   *       The driver disables TE before writing value/frequency fields and
+   *       enables TE last when requested. TIE interrupt routing is controlled
+   *       separately by enableTimerInterrupt().
    */
   Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable);
 
   /**
    * @brief Read current timer configuration and value
    * 
-   * @param[out] ticks Current/remaining tick count
+   * @param[out] ticks Programmed timer value reported by the timer registers
    * @param[out] freq Timer frequency setting
    * @param[out] enabled Timer enable status
    * @return Status::Ok() on success, error otherwise
@@ -723,6 +829,23 @@ class RV3032 {
   Status setEviOverwrite(bool enable);
 
   /**
+   * @brief Enable or disable external event interrupt output
+   *
+   * @param enable true to route EVF to INT through EIE, false to disable
+   * @return Status::Ok() on success, error otherwise
+   * @note Does not clear EVF. EVI is disabled while the RTC is in VBACKUP.
+   */
+  Status enableEventInterrupt(bool enable);
+
+  /**
+   * @brief Check if external event interrupt is enabled
+   *
+   * @param[out] enabled true if EIE is set
+   * @return Status::Ok() on success, error otherwise
+   */
+  Status getEventInterruptEnabled(bool& enabled);
+
+  /**
    * @brief Read complete EVI configuration
    * 
    * @param[out] out Structure to receive EVI configuration
@@ -764,8 +887,9 @@ class RV3032 {
    * 
    * @param mask Bit mask of flags to clear (1=clear, 0=leave unchanged)
    * @return Status::Ok() on success, error otherwise
-   * @note If mask is 0, no register write is performed. Writing STATUS with any
-   *       nonzero mask clears THF/TLF regardless of mask (datasheet behavior).
+   * @note If mask is 0, no register write is performed. Nonzero masks write 0
+   *       for requested flags and 1 for non-target flags. Writing STATUS with
+   *       any nonzero mask clears THF/TLF regardless of mask (datasheet behavior).
    */
   Status clearStatus(uint8_t mask);
 
@@ -796,6 +920,8 @@ class RV3032 {
    * @param mask Bit mask of 0x0E flags to clear. Only EEF, CLKF, and BSF are clearable.
    * @return Status::Ok() on success, error otherwise
    * @note If mask has no clearable bits, no register write is performed.
+   *       Clear writes use 0 only for requested clearable flags and 1 for
+   *       non-target bits.
    */
   Status clearFaultFlags(uint8_t mask);
 
@@ -870,8 +996,8 @@ class RV3032 {
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
    *       password/control, user RAM, or configuration EEPROM mirror range.
-   *       The user EEPROM data range 0xCB..0xEA is rejected and must use a
-   *       dedicated EEPROM command API when available.
+   *       The user EEPROM data range 0xCB..0xEA is rejected and must use the
+   *       offset-based user EEPROM APIs.
    * @warning Diagnostic-only. Direct register access can disrupt RTC operation,
    *          expose password registers, or trigger EEPROM command side effects
    *          if command registers are written.
@@ -886,8 +1012,8 @@ class RV3032 {
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
    *       password/control, user RAM, or configuration EEPROM mirror range.
-   *       The user EEPROM data range 0xCB..0xEA is rejected and must use a
-   *       dedicated EEPROM command API when available.
+   *       The user EEPROM data range 0xCB..0xEA is rejected and must use the
+   *       offset-based user EEPROM APIs.
    * @warning Diagnostic-only and dangerous. Writes to password, EEADDR, EEDATA,
    *          EECMD, or protected control registers can alter access state,
    *          start EEPROM commands, or leave hardware state ambiguous.
@@ -1042,6 +1168,12 @@ class RV3032 {
   bool _allowOfflineI2c = false;
   bool _clockCalendarUncertain = false;
   Status _clockCalendarLastStatus = Status::Ok();
+  Status _eepromCommandLastStatus = Status::Ok();
+  bool _eepromBusyTimeout = false;
+  bool _eepromErrorObserved = false;
+  bool _eepromWritePendingDirty = false;
+  uint8_t _eepromDirtyAddress = 0;
+  uint8_t _eepromDirtyValue = 0;
   
   // Raw I2C transport (no health tracking) - for diagnostics only
   Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
@@ -1065,6 +1197,15 @@ class RV3032 {
   Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
   Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
   Status readEepromFlags(bool& busy, bool& failed);
+  Status waitEepromReadySync(uint32_t timeoutMs, bool failOnEef, bool& eefObserved);
+  Status readUserEepromByteAt(uint8_t physicalAddress, uint8_t& out);
+  Status writeUserEepromByteAt(uint8_t physicalAddress, uint8_t value);
+  Status restoreEepromControl1(uint8_t originalControl1, const Status& primaryStatus,
+                               bool dirtyOnFailure, uint8_t dirtyAddress,
+                               uint8_t dirtyValue);
+  void _recordEepromCommandStatus(const Status& st);
+  void _recordEepromDirty(const Status& st, uint8_t physicalAddress, uint8_t value,
+                          bool busyTimeout, bool eefObserved);
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
 

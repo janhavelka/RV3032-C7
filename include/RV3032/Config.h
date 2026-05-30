@@ -81,7 +81,7 @@ struct Config {
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
   ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
   ///       until tick() completes the EEPROM update.
-  ///       EEPROM has ~100k write endurance - use sparingly in production.
+  ///       EEPROM has finite write endurance - use sparingly in production.
   bool enableEepromWrites = true;
 
   /// @brief EEPROM write timeout in milliseconds (default: 100ms)

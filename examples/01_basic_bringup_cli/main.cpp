@@ -142,50 +142,6 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
 }
 
 /**
- * @brief Read a byte from user EEPROM (0xCB-0xEA) via EE_ADDRESS/EE_DATA.
- */
-static RV3032::Status read_user_eeprom_byte(uint8_t addr, uint8_t& value) {
-  if (addr < RV3032::cmd::USER_EEPROM_START || addr > RV3032::cmd::USER_EEPROM_END) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "EEPROM address out of range");
-  }
-  if (g_rtc.isEepromBusy()) {
-    return RV3032::Status::Error(RV3032::Err::BUSY, "EEPROM update in progress");
-  }
-
-  uint8_t control1 = 0;
-  RV3032::Status st = g_rtc.readRegister(RV3032::cmd::REG_CONTROL1, control1);
-  if (!st.ok()) {
-    return st;
-  }
-
-  const uint8_t eerdMask = static_cast<uint8_t>(1u << RV3032::cmd::CTRL1_EERD_BIT);
-  const uint8_t newControl1 = static_cast<uint8_t>(control1 | eerdMask);
-  if (newControl1 != control1) {
-    st = g_rtc.writeRegister(RV3032::cmd::REG_CONTROL1, newControl1);
-    if (!st.ok()) {
-      return st;
-    }
-  }
-
-  st = g_rtc.writeRegister(RV3032::cmd::REG_EE_ADDRESS, addr);
-  if (st.ok()) {
-    st = g_rtc.writeRegister(RV3032::cmd::REG_EE_COMMAND, RV3032::cmd::EEPROM_CMD_READ);
-  }
-  if (st.ok()) {
-    st = g_rtc.readRegister(RV3032::cmd::REG_EE_DATA, value);
-  }
-
-  if (newControl1 != control1) {
-    RV3032::Status restore = g_rtc.writeRegister(RV3032::cmd::REG_CONTROL1, control1);
-    if (!restore.ok() && st.ok()) {
-      st = restore;
-    }
-  }
-
-  return st;
-}
-
-/**
  * @brief Non-blocking line reader from Serial.
  */
 static String read_line() {
@@ -352,7 +308,7 @@ static void print_help() {
   cli::printHelpItem("ram_write <offset> <byte...>", "Write user RAM bytes");
   cli::printHelpItem("reg <addr>", "Read register byte");
   cli::printHelpItem("reg <addr> <val>", "Write register byte");
-  cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
+  cli::printHelpItem("eeprom", "EEPROM stats and public-API user EEPROM dump");
   cli::printHelpItem("backup [usual|off|level|direct]", "Show or set battery backup PMU");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
   cli::printHelpItem("clear_vlf", "Clear voltage low flag");
@@ -1113,6 +1069,22 @@ static void cmd_eeprom() {
                 static_cast<unsigned long>(g_rtc.eepromWriteCount()),
                 static_cast<unsigned long>(g_rtc.eepromWriteFailures()));
   Serial.printf("Queue depth: %u\n", g_rtc.eepromQueueDepth());
+  RV3032::SettingsSnapshot snap = g_rtc.getSettings();
+  Serial.printf("User command status: %s\n",
+                snap.eepromCommandLastStatus.ok() ? "OK" :
+                (snap.eepromCommandLastStatus.msg ? snap.eepromCommandLastStatus.msg : "error"));
+  Serial.printf("User dirty: %s", snap.eepromWritePendingDirty ? "true" : "false");
+  if (snap.eepromWritePendingDirty) {
+    Serial.printf(" (addr=0x%02X value=0x%02X)",
+                  snap.eepromDirtyAddress,
+                  snap.eepromDirtyValue);
+  }
+  Serial.println();
+  if (snap.eepromBusyTimeout || snap.eepromErrorObserved) {
+    Serial.printf("User faults: timeout=%s EEF=%s\n",
+                  snap.eepromBusyTimeout ? "true" : "false",
+                  snap.eepromErrorObserved ? "true" : "false");
+  }
 
   struct EepromReg {
     uint8_t reg;
@@ -1145,20 +1117,19 @@ static void cmd_eeprom() {
 
   Serial.println(F("User EEPROM (0xCB..0xEA):"));
   static constexpr uint8_t kStart = RV3032::cmd::USER_EEPROM_START;
-  static constexpr uint8_t kEnd = RV3032::cmd::USER_EEPROM_END;
-  static constexpr uint8_t kSize = static_cast<uint8_t>(kEnd - kStart + 1);
-  uint8_t nonFF = 0;
+  static constexpr uint8_t kSize = RV3032::cmd::USER_EEPROM_SIZE;
+  uint8_t nonZero = 0;
 
   for (uint8_t i = 0; i < kSize; ++i) {
     const uint8_t addr = static_cast<uint8_t>(kStart + i);
     uint8_t value = 0;
-    RV3032::Status st = read_user_eeprom_byte(addr, value);
+    RV3032::Status st = g_rtc.readUserEepromByte(i, value);
     if (!st.ok()) {
       LOGE("User EEPROM read failed at 0x%02X: %s", addr, st.msg);
       return;
     }
-    if (value != 0xFF) {
-      nonFF++;
+    if (value != 0x00) {
+      nonZero++;
     }
     if ((i % 8) == 0) {
       Serial.printf("  0x%02X: ", addr);
@@ -1169,7 +1140,7 @@ static void cmd_eeprom() {
     }
   }
 
-  Serial.printf("Non-0xFF bytes: %u/%u (heuristic)\n", nonFF, kSize);
+  Serial.printf("Non-zero bytes: %u/%u\n", nonZero, kSize);
 }
 
 /**
