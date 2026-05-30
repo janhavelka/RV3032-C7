@@ -42,7 +42,7 @@ private:
 };
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
-/// Uses signed arithmetic to handle millis() wraparound (~49 days).
+/// Uses signed arithmetic to handle 32-bit millisecond counter wraparound.
 bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
@@ -275,7 +275,6 @@ Status RV3032::recover() {
     uint8_t statusReg = 0;
     Status st = readRegister(cmd::REG_STATUS, statusReg);
     (void)statusReg;
-    st = mapPresenceError(st);
     if (!st.ok()) {
       return st;
     }

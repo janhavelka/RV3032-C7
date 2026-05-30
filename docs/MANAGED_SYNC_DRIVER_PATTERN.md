@@ -173,7 +173,7 @@ Status _readRegisterRaw(uint8_t reg, uint8_t& value) {
 }
 ```
 
-**Used by**: `probe()`, `_applyConfig()` for diagnostic reads
+**Used by**: diagnostic-only paths such as `probe()`
 
 ---
 
@@ -186,7 +186,7 @@ Status _updateHealth(const Status& st) {
   bool isSuccess = st.ok() || st.code == Err::IN_PROGRESS;
   
   if (isSuccess) {
-    _lastOkMs = millis();
+    _lastOkMs = _nowMs();
     _consecutiveFailures = 0;
     _totalSuccess++;
     if (_driverState == DriverState::DEGRADED || 
@@ -195,7 +195,7 @@ Status _updateHealth(const Status& st) {
     }
   } else {
     _lastError = st;
-    _lastErrorMs = millis();
+    _lastErrorMs = _nowMs();
     _consecutiveFailures++;
     _totalFailures++;
     if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
@@ -319,7 +319,7 @@ Status probe() {
   uint8_t dummy = 0;
   Status st = _readRegisterRaw(REG_STATUS, dummy);
   
-  if (!st.ok() && (st.code == Err::I2C_ERROR || st.code == Err::TIMEOUT)) {
+  if (st.code == Err::I2C_NACK_ADDR) {
     return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding");
   }
   
@@ -329,10 +329,12 @@ Status probe() {
 ```
 
 **Key Properties**:
-- Can be called in ANY state (even UNINIT)
+- Can be called after callbacks are configured by `begin()`
 - Does NOT modify `_driverState`
 - Does NOT update health counters
 - Uses `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
+- Only a definite address NACK is mapped to `DEVICE_NOT_FOUND`; timeout,
+  data-NACK, bus, and generic I2C errors are preserved.
 
 ---
 
@@ -384,8 +386,9 @@ Status recover() {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
   
-  // Probe uses raw path (no health tracking)
-  Status st = probe();
+  // Recovery probe uses tracked path so failures affect health.
+  uint8_t status = 0;
+  Status st = readRegister(REG_STATUS, status);
   if (!st.ok()) return st;
   
   // Reapply config uses tracked path (health updated automatically)
@@ -452,7 +455,6 @@ void end() {
 ### Functions Using Raw Wrappers
 
 - `probe()` -> `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
-- `_applyConfig()` reads -> `_readRegisterRaw()` -> `_i2cWriteReadRaw()`
 
 ---
 

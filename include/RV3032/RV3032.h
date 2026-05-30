@@ -14,7 +14,13 @@
  * - Temperature sensor for crystal compensation
  * 
  * @par Thread Safety
- * Not thread-safe. External synchronization required for multi-threaded access.
+ * Not thread-safe. External synchronization is required when shared by multiple
+ * tasks, and public APIs are not ISR-safe unless explicitly documented otherwise.
+ *
+ * @par Framework Neutrality
+ * The core driver owns no bus resources and does not call platform timing,
+ * logging, or scheduler APIs. Applications inject I2C and optional timebase
+ * callbacks through Config.
  * 
  * @par Usage Example
  * @code
@@ -30,7 +36,7 @@
  *   
  *   RV3032::Status st = rtc.begin(cfg);
  *   if (!st.ok()) {
- *     Serial.printf("RTC init failed: %s\n", st.msg);
+ *     appReportError(st);
  *     return;
  *   }
  *   
@@ -46,10 +52,8 @@
  *   
  *   RV3032::DateTime dt;
  *   if (rtc.readTime(dt).ok()) {
- *     Serial.printf("%04d-%02d-%02d %02d:%02d:%02d\n",
- *                   dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+ *     appHandleTime(dt);
  *   }
- *   delay(1000);
  * }
  * @endcode
  */
@@ -238,14 +242,20 @@ struct SettingsSnapshot {
  * the begin/tick/end lifecycle pattern.
  * 
  * @par Threading Model
- * Single-threaded by default. No FreeRTOS tasks created.
+ * Single-threaded by default. The driver creates no tasks or threads, is not
+ * internally synchronized, and public APIs are not ISR-safe unless explicitly
+ * documented otherwise.
  * 
  * @par Timing
  * tick() completes in bounded time (<1ms typical). When EEPROM persistence is enabled,
  * tick() advances a non-blocking EEPROM state machine (one I2C op per call).
+ * If Config::nowMs is null, driver-owned timestamps report 0; elapsed work is
+ * driven by the now_ms value passed to tick().
  * 
  * @par Resource Ownership
- * I2C transport passed via Config. No hardcoded pins or resources.
+ * I2C transport is passed via Config. The application or transport adapter owns
+ * pins, bus initialization/deinitialization, locking, recovery, and timeout
+ * policy. Transport callbacks must not recursively call into the same driver.
  * 
  * @par Memory
  * All allocation in begin(). Zero allocation in tick() and normal operations.
@@ -326,7 +336,8 @@ class RV3032 {
    * Only succeeds if device is responsive.
    * Uses same _applyConfig() helper as begin() for consistency.
    * 
-   * @return OK if recovered and state is now READY, error otherwise
+   * @return OK if recovered and state is now READY, otherwise the tracked
+   *         transport/configuration error without presence remapping
    */
   Status recover();
 
@@ -801,8 +812,12 @@ class RV3032 {
    * @param[out] value Register value read
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
-   *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
-   * @warning Direct register access can disrupt RTC operation if misused
+   *       password/control, user RAM, or configuration EEPROM mirror range.
+   *       The user EEPROM data range 0xCB..0xEA is rejected and must use a
+   *       dedicated EEPROM command API when available.
+   * @warning Diagnostic-only. Direct register access can disrupt RTC operation,
+   *          expose password registers, or trigger EEPROM command side effects
+   *          if command registers are written.
    */
   Status readRegister(uint8_t reg, uint8_t& value);
 
@@ -813,8 +828,12 @@ class RV3032 {
    * @param value Value to write
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
-   *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
-   * @warning Direct register access can disrupt RTC operation if misused
+   *       password/control, user RAM, or configuration EEPROM mirror range.
+   *       The user EEPROM data range 0xCB..0xEA is rejected and must use a
+   *       dedicated EEPROM command API when available.
+   * @warning Diagnostic-only and dangerous. Writes to password, EEADDR, EEDATA,
+   *          EECMD, or protected control registers can alter access state,
+   *          start EEPROM commands, or leave hardware state ambiguous.
    */
   Status writeRegister(uint8_t reg, uint8_t value);
 
@@ -826,8 +845,10 @@ class RV3032 {
    * @param len Number of bytes to read
    * @return Status::Ok() on success, error otherwise
    * @note Rejects zero length, oversized reads, wraparound, and blocks that
-   *       cross undocumented address gaps.
-   * @warning Direct block access can disrupt RTC operation if misused.
+   *       cross undocumented address gaps or the user EEPROM data range
+   *       0xCB..0xEA.
+   * @warning Diagnostic-only. Direct block access can disrupt RTC operation
+   *          if misused.
    */
   Status readRegisters(uint8_t reg, uint8_t* buf, size_t len);
 
@@ -839,8 +860,10 @@ class RV3032 {
    * @param len Number of bytes to write
    * @return Status::Ok() on success, error otherwise
    * @note Rejects zero length, writes larger than the fixed stack buffer,
-   *       wraparound, and blocks that cross undocumented address gaps.
-   * @warning Direct block access can disrupt RTC operation if misused.
+   *       wraparound, and blocks that cross undocumented address gaps or the
+   *       user EEPROM data range 0xCB..0xEA.
+   * @warning Diagnostic-only and dangerous. Block writes can alter password,
+   *          command, protected control, alarm, timer, or clock/calendar state.
    */
   Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len);
 

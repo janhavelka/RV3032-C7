@@ -1,6 +1,6 @@
 # RV3032-C7
 
-Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module using **Arduino framework** with **PlatformIO**.
+Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module. The core driver is framework-neutral; the current examples and PlatformIO build targets use Arduino adapters.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
@@ -237,14 +237,14 @@ event timestamp registers yet.
 
 ## Configuration
 
-Configuration is injected via `Config` struct. The library **never hardcodes pins**.
+Configuration is injected via `Config` struct. The library **never hardcodes pins** and never owns the I2C bus.
 
 ```cpp
 namespace RV3032 {
   struct Config {
     I2cWriteFn i2cWrite = nullptr;               // I2C write callback (required)
     I2cWriteReadFn i2cWriteRead = nullptr;       // I2C write-read callback (required)
-    void* i2cUser = nullptr;                     // User context (e.g., TwoWire*)
+    void* i2cUser = nullptr;                     // Transport-owned context
     NowMsFn nowMs = nullptr;                     // Optional monotonic clock callback
     void* timeUser = nullptr;                    // User context for timing callback
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
@@ -259,6 +259,8 @@ namespace RV3032 {
 
 **Configuration rules:**
 - `i2cWrite` and `i2cWriteRead` must be provided before `begin()`
+- The application or transport adapter owns pins, bus initialization/deinitialization, locks, timeout policy, and bus recovery.
+- Transport callbacks must not recursively call into the same `RV3032` instance.
 - `i2cAddress`: Fixed at `0x51` on RV3032-C7 hardware
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - Invalid `backupMode` enum values are rejected by `begin()` before any I2C access.
@@ -312,9 +314,13 @@ if (!st.ok()) {
 
 ## Behavioral Contracts
 
-**Threading Model:** Single-threaded by default. No FreeRTOS tasks created. The driver is not internally synchronized and should not be called from ISRs.
+**Framework-Neutral Core:** Files under `include/` and `src/` do not include or call Arduino, ESP-IDF, FreeRTOS, logging, scheduler, or platform timing APIs. Framework-specific code belongs in examples or application transport adapters.
 
-**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout.
+**Injected Transport:** I2C access is supplied by `Config::i2cWrite` and `Config::i2cWriteRead`. The driver does not own pins, bus handles, bus init/deinit, locks, recovery, or platform timeout configuration; it only passes `i2cTimeoutMs` to the injected callbacks.
+
+**Threading Model:** Single-threaded by default. The driver is not internally synchronized and public APIs are not ISR-safe unless an API explicitly says otherwise. Applications must serialize shared driver or shared-bus access externally.
+
+**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout. `Config::nowMs` is optional; if omitted, driver-owned timestamps are `0`, and elapsed EEPROM work is driven by the `now_ms` argument passed to `tick()`.
 
 **Resource Ownership:** I2C transport passed via `Config`. No hardcoded pins or resources.
 
@@ -322,9 +328,13 @@ if (!st.ok()) {
 
 **Error Handling:** All errors returned as `Status`. No silent failures.
 
+**Probe / Recovery Errors:** `probe()` is diagnostic-only and does not update health. It maps a definite address NACK to `DEVICE_NOT_FOUND`, while preserving data NACK, timeout, bus, and generic I2C errors. `recover()` uses tracked I2C and returns the tracked transport/configuration error so `lastError()` and the returned status agree.
+
 **Health / Recovery:** `OFFLINE` is latched. Normal public I2C operations and EEPROM `tick()` work do not touch the bus while OFFLINE; call `recover()` after application-level bus recovery to return to `READY`.
 
-**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` validate documented RV3032 address windows, reject wraparound and invalid buffers, and do not count local validation failures against driver health.
+**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` are diagnostic-only. They validate documented RV3032 address windows, reject wraparound and invalid buffers, reject the user EEPROM data range `0xCB..0xEA`, and do not count local validation failures against driver health. Direct writes to password, EEADDR, EEDATA, EECMD, protected control, alarm, timer, or clock/calendar registers can alter hardware state and should not be used as production configuration APIs.
+
+**Known Deferrals:** Full dirty-state diagnostics for clock/calendar multi-byte writes, Control register read-modify-write, timer configuration, alarm configuration, and explicit user EEPROM command APIs are deferred to later hardening chunks. Current EEPROM persistence diagnostics cover the existing asynchronous configuration write path through `isEepromBusy()`, `getEepromStatus()`, `eepromWriteCount()`, `eepromWriteFailures()`, and `eepromQueueDepth()`.
 
 **EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
 - `setClkoutEnabled()` / `setClkoutFrequency()`
@@ -431,10 +441,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ## Production Readiness Notes
 
-- Core code is intended to remain framework-neutral and uses injected I2C callbacks; Arduino `Wire` and ESP-IDF handles belong in examples/adapters only.
-- `Config::nowMs` is optional for initialization, but applications should inject a monotonic clock when using EEPROM persistence or health timestamps. The core no longer falls back to Arduino `millis()`.
-- `probe()` is diagnostic-only and preserves timeout, bus, data-NACK, and generic I2C errors. `DEVICE_NOT_FOUND` is reserved for definite address NACK.
-- Low-level direct register access rejects the user-EEPROM command window; user EEPROM requires the documented EEADDR/EEDATA/EECMD command flow.
+- Core code is framework-neutral and uses injected I2C callbacks; Arduino `Wire` and ESP-IDF handles belong in examples/adapters only.
+- `Config::nowMs` is optional for initialization, but applications should inject a monotonic clock when using EEPROM persistence or health timestamps. If omitted, driver-owned timestamps report `0`.
+- `probe()` is diagnostic-only and preserves timeout, bus, data-NACK, and generic I2C errors. `DEVICE_NOT_FOUND` is reserved for definite address NACK. `recover()` preserves tracked transport errors.
+- Low-level direct register access rejects the user EEPROM data range `0xCB..0xEA`; user EEPROM requires the documented EEADDR/EEDATA/EECMD command flow, which remains deferred to a dedicated API.
 - Driver instances are not thread-safe and public APIs are not ISR-safe. Shared-bus users must serialize access externally.
 - No hardware validation was run as part of this hardening report; see `docs/RV3032_HARDENING_FINAL_REPORT.md` for exact checks.
 

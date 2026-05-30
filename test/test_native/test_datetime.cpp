@@ -391,6 +391,78 @@ void test_probe_address_nack_maps_to_device_not_found() {
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
 }
 
+void test_probe_preserves_non_address_transport_errors_without_health_updates() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  struct Case {
+    RV3032::Err code;
+    int32_t detail;
+  };
+  const Case cases[] = {
+      {RV3032::Err::I2C_NACK_DATA, -21},
+      {RV3032::Err::I2C_TIMEOUT, -22},
+      {RV3032::Err::I2C_BUS, -23},
+      {RV3032::Err::I2C_ERROR, -24},
+  };
+
+  for (size_t i = 0; i < (sizeof(cases) / sizeof(cases[0])); ++i) {
+    bus.nextReadStatus = RV3032::Status::Error(cases[i].code, "forced probe", cases[i].detail);
+    st = rtc.probe();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cases[i].code),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(cases[i].detail, st.detail);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
+                            static_cast<uint8_t>(rtc.state()));
+    TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+    TEST_ASSERT_EQUAL_UINT32(0u, rtc.totalFailures());
+  }
+}
+
+void test_recover_preserves_transport_errors_and_updates_health_once() {
+  struct Case {
+    RV3032::Err code;
+    int32_t detail;
+  };
+  const Case cases[] = {
+      {RV3032::Err::I2C_NACK_ADDR, -31},
+      {RV3032::Err::I2C_NACK_DATA, -32},
+      {RV3032::Err::I2C_TIMEOUT, -33},
+      {RV3032::Err::I2C_BUS, -34},
+      {RV3032::Err::I2C_ERROR, -35},
+  };
+
+  for (size_t i = 0; i < (sizeof(cases) / sizeof(cases[0])); ++i) {
+    FakeI2cBus bus;
+    resetBus(bus);
+
+    RV3032::RV3032 rtc;
+    RV3032::Status st = rtc.begin(makeConfig(bus));
+    TEST_ASSERT_TRUE(st.ok());
+    TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+
+    bus.nextReadStatus = RV3032::Status::Error(cases[i].code, "forced recover",
+                                               cases[i].detail);
+    st = rtc.recover();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cases[i].code),
+                            static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(cases[i].detail, st.detail);
+    TEST_ASSERT_EQUAL_UINT8(1, rtc.consecutiveFailures());
+    TEST_ASSERT_EQUAL_UINT32(1u, rtc.totalFailures());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::DEGRADED),
+                            static_cast<uint8_t>(rtc.state()));
+
+    const RV3032::Status last = rtc.lastError();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(cases[i].code),
+                            static_cast<uint8_t>(last.code));
+    TEST_ASSERT_EQUAL_INT32(cases[i].detail, last.detail);
+  }
+}
+
 void test_recover_failure_updates_health_once() {
   FakeI2cBus bus;
   resetBus(bus);
@@ -401,14 +473,17 @@ void test_recover_failure_updates_health_once() {
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
 
   bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
-                                             "forced recover nack", -8);
+                                              "forced recover nack", -8);
   st = rtc.recover();
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_ADDR),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_INT32(-8, st.detail);
   TEST_ASSERT_EQUAL_UINT8(1, rtc.consecutiveFailures());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::DEGRADED),
                           static_cast<uint8_t>(rtc.state()));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_ADDR),
+                          static_cast<uint8_t>(rtc.lastError().code));
+  TEST_ASSERT_EQUAL_INT32(-8, rtc.lastError().detail);
 }
 
 void test_offline_latches_public_read_without_i2c() {
@@ -422,9 +497,9 @@ void test_offline_latches_public_read_without_i2c() {
   TEST_ASSERT_TRUE(st.ok());
 
   bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
-                                             "forced offline", -10);
+                                              "forced offline", -10);
   st = rtc.recover();
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_ADDR),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::OFFLINE),
                           static_cast<uint8_t>(rtc.state()));
@@ -876,6 +951,26 @@ void test_public_block_register_access_rejects_invalid_ranges_without_i2c() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
                           static_cast<uint8_t>(st.code));
 
+  st = rtc.writeRegisters(RV3032::cmd::USER_EEPROM_START, &one, 1);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.readRegister(RV3032::cmd::USER_EEPROM_START, one);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.writeRegister(RV3032::cmd::USER_EEPROM_START, one);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.readRegisters(RV3032::cmd::REG_EEPROM_PW_ENABLE, two, sizeof(two));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
+  st = rtc.writeRegisters(RV3032::cmd::REG_EEPROM_PW_ENABLE, two, sizeof(two));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
   TEST_ASSERT_EQUAL_UINT32(readsAfterBegin, bus.readCalls);
   TEST_ASSERT_EQUAL_UINT32(writesAfterBegin, bus.writeCalls);
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
@@ -901,6 +996,8 @@ int main(int, char**) {
   RUN_TEST(test_runtime_i2c_after_begin_updates_health);
   RUN_TEST(test_probe_failure_does_not_update_health);
   RUN_TEST(test_probe_address_nack_maps_to_device_not_found);
+  RUN_TEST(test_probe_preserves_non_address_transport_errors_without_health_updates);
+  RUN_TEST(test_recover_preserves_transport_errors_and_updates_health_once);
   RUN_TEST(test_recover_failure_updates_health_once);
   RUN_TEST(test_offline_latches_public_read_without_i2c);
   RUN_TEST(test_failed_recover_from_offline_keeps_latch_after_intermediate_success);

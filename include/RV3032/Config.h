@@ -52,7 +52,7 @@ struct Config {
   /// @brief I2C write-read callback (required).
   I2cWriteReadFn i2cWriteRead = nullptr;
 
-  /// @brief User context passed to I2C callbacks (e.g., TwoWire*).
+  /// @brief User context passed to I2C callbacks (transport-owned context).
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
