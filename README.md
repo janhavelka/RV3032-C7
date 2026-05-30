@@ -429,6 +429,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 - No heap allocation in steady state
 - Doxygen documentation for public API
 
+## Production Readiness Notes
+
+- Core code is intended to remain framework-neutral and uses injected I2C callbacks; Arduino `Wire` and ESP-IDF handles belong in examples/adapters only.
+- `Config::nowMs` is optional for initialization, but applications should inject a monotonic clock when using EEPROM persistence or health timestamps. The core no longer falls back to Arduino `millis()`.
+- `probe()` is diagnostic-only and preserves timeout, bus, data-NACK, and generic I2C errors. `DEVICE_NOT_FOUND` is reserved for definite address NACK.
+- Low-level direct register access rejects the user-EEPROM command window; user EEPROM requires the documented EEADDR/EEDATA/EECMD command flow.
+- Driver instances are not thread-safe and public APIs are not ISR-safe. Shared-bus users must serialize access externally.
+- No hardware validation was run as part of this hardening report; see `docs/RV3032_HARDENING_FINAL_REPORT.md` for exact checks.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.

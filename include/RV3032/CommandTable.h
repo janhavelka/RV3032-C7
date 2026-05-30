@@ -348,9 +348,10 @@ static constexpr uint8_t CTRL1_TD_SHIFT = 0;
 static constexpr uint8_t CTRL2_THFM_BIT = 7;          ///< Temperature High Flag Mask
 static constexpr uint8_t CTRL2_TLFM_BIT = 6;          ///< Temperature Low Flag Mask
 static constexpr uint8_t CTRL2_UIE_BIT = 5;           ///< Update Interrupt Enable
-static constexpr uint8_t CTRL2_TAFIE_BIT = 4;         ///< Timer Alarm Flag Interrupt Enable
-static constexpr uint8_t CTRL2_TIE_BIT = 3;           ///< Timer Interrupt Enable
-static constexpr uint8_t CTRL2_AIE_BIT = 2;           ///< Alarm Interrupt Enable
+static constexpr uint8_t CTRL2_TIE_BIT = 4;           ///< Timer Interrupt Enable
+static constexpr uint8_t CTRL2_TAFIE_BIT = CTRL2_TIE_BIT;  ///< Backward-compatible timer alias
+static constexpr uint8_t CTRL2_AIE_BIT = 3;           ///< Alarm Interrupt Enable
+static constexpr uint8_t CTRL2_EIE_BIT = 2;           ///< External Event Interrupt Enable
 static constexpr uint8_t CTRL2_OUT_A_BIT = 1;         ///< Output A
 static constexpr uint8_t CTRL2_OUT_B_BIT = 0;         ///< Output B
 

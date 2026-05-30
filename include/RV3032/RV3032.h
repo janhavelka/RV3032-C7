@@ -255,6 +255,13 @@ struct SettingsSnapshot {
  */
 class RV3032 {
  public:
+  RV3032() = default;
+  ~RV3032() = default;
+  RV3032(const RV3032&) = delete;
+  RV3032& operator=(const RV3032&) = delete;
+  RV3032(RV3032&&) = delete;
+  RV3032& operator=(RV3032&&) = delete;
+
   /**
    * @brief Initialize RTC with configuration
    * 
@@ -307,7 +314,8 @@ class RV3032 {
    * Does NOT update health tracking or driver state.
    * Can be called anytime after begin().
    * 
-   * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
+   * @return OK if device present, DEVICE_NOT_FOUND for definite address NACK,
+   *         otherwise the original transport error.
    */
   Status probe();
 

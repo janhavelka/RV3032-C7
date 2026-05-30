@@ -5,7 +5,6 @@
 
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
-#include <Arduino.h>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -48,22 +47,8 @@ bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
 
-bool isI2cFailure(const Status& st) {
-  switch (st.code) {
-    case Err::I2C_ERROR:
-    case Err::TIMEOUT:
-    case Err::I2C_NACK_ADDR:
-    case Err::I2C_NACK_DATA:
-    case Err::I2C_TIMEOUT:
-    case Err::I2C_BUS:
-      return true;
-    default:
-      return false;
-  }
-}
-
 Status mapPresenceError(const Status& st) {
-  if (!st.ok() && isI2cFailure(st)) {
+  if (st.code == Err::I2C_NACK_ADDR) {
     return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
   }
   return st;
@@ -88,7 +73,7 @@ bool isKnownRegisterAddress(uint8_t reg) {
   if (reg >= cmd::REG_PASSWORD0 && reg <= cmd::REG_USER_RAM_END) {
     return true;
   }
-  if (reg >= cmd::REG_EEPROM_PMU && reg <= cmd::USER_EEPROM_END) {
+  if (reg >= cmd::REG_EEPROM_PMU && reg <= cmd::REG_EEPROM_PW_ENABLE) {
     return true;
   }
   return false;
@@ -420,7 +405,7 @@ uint32_t RV3032::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
-  return millis();
+  return 0;
 }
 
 void RV3032::_resetRuntimeState() {
@@ -748,11 +733,12 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
     return st;
   }
 
-  control1 = static_cast<uint8_t>(control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT)));
-  control1 = static_cast<uint8_t>(control1 | (freqRaw & cmd::CTRL1_TD_MASK));
-  if (enable) {
-    control1 = static_cast<uint8_t>(control1 | (1u << cmd::CTRL1_TE_BIT));
-  }
+  const uint8_t control1Disabled =
+      static_cast<uint8_t>((control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT))) |
+                           (freqRaw & cmd::CTRL1_TD_MASK));
+  const uint8_t control1Final =
+      enable ? static_cast<uint8_t>(control1Disabled | (1u << cmd::CTRL1_TE_BIT))
+             : control1Disabled;
 
   uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
   uint8_t currentHigh = 0;
@@ -762,14 +748,19 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   }
   uint8_t high = static_cast<uint8_t>((currentHigh & 0xF0u) | ((ticks >> 8) & 0x0Fu));
 
-  st = writeRegister(cmd::REG_CONTROL1, control1);
+  st = writeRegister(cmd::REG_CONTROL1, control1Disabled);
   if (!st.ok()) {
     return st;
   }
 
   st = writeRegister(cmd::REG_TIMER_LOW, low);
   if (!st.ok()) return st;
-  return writeRegister(cmd::REG_TIMER_HIGH, high);
+  st = writeRegister(cmd::REG_TIMER_HIGH, high);
+  if (!st.ok()) return st;
+  if (control1Final != control1Disabled) {
+    return writeRegister(cmd::REG_CONTROL1, control1Final);
+  }
+  return Status::Ok();
 }
 
 Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {

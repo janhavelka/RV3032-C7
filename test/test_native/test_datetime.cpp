@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <cstring>
 #include <math.h>
+#include <type_traits>
 #include <unity.h>
 
 #include "RV3032/CommandTable.h"
@@ -123,6 +124,28 @@ void test_status_helpers() {
   RV3032::Status inProgress{RV3032::Err::IN_PROGRESS, 0, "queued"};
   TEST_ASSERT_TRUE(inProgress.inProgress());
   TEST_ASSERT_TRUE(static_cast<bool>(RV3032::Status::Ok()));
+}
+
+void test_driver_is_not_copyable_or_movable() {
+  static_assert(!std::is_copy_constructible<RV3032::RV3032>::value,
+                "RV3032 must not be copy constructible");
+  static_assert(!std::is_copy_assignable<RV3032::RV3032>::value,
+                "RV3032 must not be copy assignable");
+  static_assert(!std::is_move_constructible<RV3032::RV3032>::value,
+                "RV3032 must not be move constructible");
+  static_assert(!std::is_move_assignable<RV3032::RV3032>::value,
+                "RV3032 must not be move assignable");
+  TEST_ASSERT_TRUE(true);
+}
+
+void test_control2_interrupt_bits_match_register_reference() {
+  static_assert(RV3032::cmd::CTRL2_AIE_BIT == 3,
+                "Control2 AIE bit must match the RV3032-C7 register reference");
+  static_assert(RV3032::cmd::CTRL2_TIE_BIT == 4,
+                "Control2 TIE bit must match the RV3032-C7 register reference");
+  static_assert(RV3032::cmd::CTRL2_EIE_BIT == 2,
+                "Control2 EIE bit must match the RV3032-C7 register reference");
+  TEST_ASSERT_TRUE(true);
 }
 
 void test_compute_weekday() {
@@ -343,11 +366,28 @@ void test_probe_failure_does_not_update_health() {
   bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT,
                                               "forced probe timeout", -7);
   st = rtc.probe();
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_TIMEOUT),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_INT32(-7, st.detail);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
                           static_cast<uint8_t>(rtc.state()));
+  TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+}
+
+void test_probe_address_nack_maps_to_device_not_found() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
+                                             "forced probe address nack", -17);
+  st = rtc.probe();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-17, st.detail);
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
 }
 
@@ -466,6 +506,29 @@ void test_set_timer_preserves_reserved_high_bits() {
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL_HEX8(0x56, bus.regs[RV3032::cmd::REG_TIMER_LOW]);
   TEST_ASSERT_EQUAL_HEX8(0xA4, bus.regs[RV3032::cmd::REG_TIMER_HIGH]);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>((1u << RV3032::cmd::CTRL1_TE_BIT) |
+                                              static_cast<uint8_t>(RV3032::TimerFrequency::Hz1)),
+                         bus.regs[RV3032::cmd::REG_CONTROL1]);
+}
+
+void test_alarm_interrupt_uses_documented_control2_aie_bit() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.regs[RV3032::cmd::REG_CONTROL2] = 0;
+  st = rtc.enableAlarmInterrupt(true);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(1u << RV3032::cmd::CTRL2_AIE_BIT),
+                         bus.regs[RV3032::cmd::REG_CONTROL2]);
+
+  bool enabled = false;
+  st = rtc.getAlarmInterruptEnabled(enabled);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(enabled);
 }
 
 void test_invalid_runtime_params_are_rejected() {
@@ -809,6 +872,10 @@ void test_public_block_register_access_rejects_invalid_ranges_without_i2c() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
                           static_cast<uint8_t>(st.code));
 
+  st = rtc.readRegisters(RV3032::cmd::USER_EEPROM_START, &one, 1);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+
   TEST_ASSERT_EQUAL_UINT32(readsAfterBegin, bus.readCalls);
   TEST_ASSERT_EQUAL_UINT32(writesAfterBegin, bus.writeCalls);
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
@@ -820,6 +887,8 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_bcd_roundtrip);
   RUN_TEST(test_status_helpers);
+  RUN_TEST(test_driver_is_not_copyable_or_movable);
+  RUN_TEST(test_control2_interrupt_bits_match_register_reference);
   RUN_TEST(test_compute_weekday);
   RUN_TEST(test_unix_roundtrip_epoch_2000);
   RUN_TEST(test_unix_leap_day);
@@ -831,11 +900,13 @@ int main(int, char**) {
   RUN_TEST(test_get_settings_snapshot);
   RUN_TEST(test_runtime_i2c_after_begin_updates_health);
   RUN_TEST(test_probe_failure_does_not_update_health);
+  RUN_TEST(test_probe_address_nack_maps_to_device_not_found);
   RUN_TEST(test_recover_failure_updates_health_once);
   RUN_TEST(test_offline_latches_public_read_without_i2c);
   RUN_TEST(test_failed_recover_from_offline_keeps_latch_after_intermediate_success);
   RUN_TEST(test_transport_validation_status_does_not_update_health);
   RUN_TEST(test_set_timer_preserves_reserved_high_bits);
+  RUN_TEST(test_alarm_interrupt_uses_documented_control2_aie_bit);
   RUN_TEST(test_invalid_runtime_params_are_rejected);
   RUN_TEST(test_backup_mode_helpers_update_pmu_bits);
   RUN_TEST(test_get_alarm_config_rejects_invalid_bcd);

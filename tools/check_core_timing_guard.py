@@ -22,8 +22,8 @@ BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
-ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {"src/RV3032.cpp": {"millis": 1}}
-ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {"src/RV3032.cpp": 1}
+ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {}
+ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {}
 
 
 def strip_non_code(text: str) -> str:
@@ -117,4 +117,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

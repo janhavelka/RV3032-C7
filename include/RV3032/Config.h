@@ -56,7 +56,8 @@ struct Config {
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
-  /// @note If null, the library falls back to Arduino millis().
+  /// @note If null, driver-owned timestamps report 0. Applications that use
+  ///       EEPROM persistence or diagnostics should provide a monotonic clock.
   NowMsFn nowMs = nullptr;
 
   /// @brief User context passed to timing callbacks.
