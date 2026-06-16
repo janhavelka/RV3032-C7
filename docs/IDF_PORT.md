@@ -6,9 +6,9 @@ Last audited: 2026-03-01
 - Primary runtime remains PlatformIO + Arduino.
 - I2C is callback-based (`Config.i2cWrite`, `Config.i2cWriteRead`).
 - Optional timing hook is available (`Config.nowMs`, `Config.timeUser`).
-- Core logic uses `_nowMs()` wrapper for health and timeout timing.
-- Arduino timing is used only as fallback in one place:
-  - `RV3032::_nowMs()` -> `millis()` when `Config.nowMs == nullptr`
+- Core logic uses `_nowMs()` wrapper for health timestamps.
+- If no timing hook is supplied:
+  - `RV3032::_nowMs()` -> `0` when `Config.nowMs == nullptr`
 
 ## ESP-IDF Adapter Requirements
 To run under pure ESP-IDF, provide:

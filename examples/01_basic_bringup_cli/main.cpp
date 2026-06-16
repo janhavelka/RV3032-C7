@@ -29,6 +29,10 @@
 static RV3032::RV3032 g_rtc;
 static bool g_verbose = false;  // Verbose mode - disabled by default for production examples
 
+static uint32_t rtc_now_ms(void*) {
+  return millis();
+}
+
 /**
  * @brief Convert DriverState enum to string.
  */
@@ -1991,6 +1995,8 @@ void setup() {
   cfg.i2cWrite = transport::wireWrite;
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
+  cfg.nowMs = rtc_now_ms;
+  cfg.enableEepromWrites = false;
 
   RV3032::Status st = g_rtc.begin(cfg);
   if (!st.ok()) {

@@ -49,6 +49,10 @@ VBAT  ->  CR2032 battery +
 
 RV3032::RV3032 rtc;
 
+static uint32_t rtcNowMs(void*) {
+  return millis();
+}
+
 void setup() {
   Serial.begin(115200);
   board::initI2c();  // Initialize I2C (example defaults)
@@ -58,7 +62,9 @@ void setup() {
   cfg.i2cWrite = transport::wireWrite;
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
+  cfg.nowMs = rtcNowMs;
   cfg.backupMode = RV3032::BackupSwitchMode::Level;
+  cfg.enableEepromWrites = false;
 
   // Initialize RTC
   RV3032::Status st = rtc.begin(cfg);
@@ -124,6 +130,18 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
 | `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
 | `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
+| `Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& used)` | Advance EEPROM persistence with explicit instruction accounting |
+
+### Budgeted Job Operations
+
+| Method | Description |
+|--------|-------------|
+| `bool isJobBusy() const` | Check if a non-EEPROM budgeted job is active |
+| `Status getJobStatus() const` | Get current or last non-EEPROM job status |
+| `Status startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable)` | Stage timer configuration for `pollJob()` |
+| `Status startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t setMask)` | Stage a simple masked register read-modify-write |
+| `Status startWriteUserRamJob(uint8_t offset, const uint8_t* buf, size_t len)` | Stage a user RAM write, chunking writes over 15 bytes |
+| `Status pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& used)` | Advance the active non-EEPROM job by up to `maxInstructions` I2C instructions |
 
 ### Health / Recovery
 
@@ -195,9 +213,8 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `Status setEviDebounce(EviDebounce debounce)` | Set debounce filter |
 | `Status setEviOverwrite(bool enable)` | Allow overwriting timestamps |
 | `Status getEviConfig(EviConfig& out)` | Read EVI configuration |
-
-The current public API configures EVI behavior, but it does not expose the latched
-event timestamp registers yet.
+| `Status readTimestamp(TimestampSource source, Timestamp& out)` | Read and decode a hardware timestamp block |
+| `Status resetTimestamp(TimestampSource source)` | Reset one hardware timestamp block |
 
 ### Status & Low-Level
 
@@ -250,7 +267,7 @@ namespace RV3032 {
     uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
     uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
     BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
-    bool enableEepromWrites = true;              // Persistent config (EEPROM)
+    bool enableEepromWrites = false;             // Persistent config opt-in (EEPROM)
     uint32_t eepromTimeoutMs = 100;              // EEPROM write timeout
     uint8_t offlineThreshold = 5;                // Failures before OFFLINE
   };
@@ -263,9 +280,9 @@ namespace RV3032 {
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - Invalid `backupMode` enum values are rejected by `begin()` before any I2C access.
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
-- `enableEepromWrites`: When `false`, config changes are RAM-only (faster, saves EEPROM wear). When `true` (default), changes persist across power loss and complete asynchronously.
+- `enableEepromWrites`: Defaults to `false`. When `false`, config changes are RAM-only (faster, saves EEPROM wear). Set `true` only when config changes must persist across power loss; persistence completes asynchronously.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
-- `nowMs` / `timeUser`: Optional injected timebase used for health timestamps and non-blocking EEPROM deadlines
+- `nowMs` / `timeUser`: Optional injected timebase used for health timestamps. If omitted, health timestamps stay at 0; EEPROM deadlines use the `tick(now_ms)` argument.
 - `offlineThreshold`: Consecutive tracked I2C failures required before transitioning to `OFFLINE`
 
 ## Error Handling
@@ -314,7 +331,7 @@ if (!st.ok()) {
 
 **Threading Model:** Single-threaded by default. No FreeRTOS tasks created. The driver is not internally synchronized and should not be called from ISRs.
 
-**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). Other API calls perform synchronous I2C transactions bounded by the transport timeout.
+**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). `pollEeprom()` exposes the same EEPROM state machine with explicit instruction accounting and still caps EEPROM work at one I2C operation per call. `pollJob()` is the budgeted path for non-EEPROM multi-transfer jobs. Other API calls perform synchronous I2C transactions bounded by the transport timeout. The core does not call Arduino `millis()` implicitly; inject `Config::nowMs` when health timestamps are needed.
 
 **Resource Ownership:** I2C transport passed via `Config`. No hardcoded pins or resources.
 
@@ -331,11 +348,11 @@ if (!st.ok()) {
 - `setOffsetPpm()`
 - Backup mode changes in `begin()`, `setBackupSwitchMode()`, and `setPrimaryBatteryBackupDefaults()`
 
-EEPROM persistence is asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
+EEPROM persistence is opt-in and asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
 
 **Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI command `backup usual` applies those PMU settings, then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
 
-EEPROM has ~100k write endurance. Use `enableEepromWrites = false` in applications with frequent config changes. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
+EEPROM has ~100k write endurance. Keep `enableEepromWrites = false` for normal runtime control paths. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
 ## Supported Targets
 

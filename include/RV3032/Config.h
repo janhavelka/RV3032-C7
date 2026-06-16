@@ -56,7 +56,7 @@ struct Config {
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
-  /// @note If null, the library falls back to Arduino millis().
+  /// @note If null, health timestamps remain 0. EEPROM deadlines are driven by tick(nowMs).
   NowMsFn nowMs = nullptr;
 
   /// @brief User context passed to timing callbacks.
@@ -75,13 +75,13 @@ struct Config {
   /// @note Applied during begin(). Off=no backup, Level=threshold, Direct=immediate
   BackupSwitchMode backupMode = BackupSwitchMode::Level;
 
-  /// @brief Enable automatic EEPROM write for persistent config changes (default: true)
+  /// @brief Enable automatic EEPROM write for persistent config changes (default: false)
   /// @note When true, config changes (clock output, offset) persist across power loss.
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
   ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
   ///       until tick() completes the EEPROM update.
   ///       EEPROM has ~100k write endurance - use sparingly in production.
-  bool enableEepromWrites = true;
+  bool enableEepromWrites = false;
 
   /// @brief EEPROM write timeout in milliseconds (default: 100ms)
   /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.

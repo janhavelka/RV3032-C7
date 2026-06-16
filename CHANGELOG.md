@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `Config::enableEepromWrites` now defaults to `false`; EEPROM persistence is explicit opt-in for configuration changes.
+- Core health timestamping no longer falls back to Arduino `millis()` when `Config::nowMs` is unset.
+
+### Added
+- TunnelMonitor fit report with public API classification and setup-only EEPROM/control surface.
+
 ## [1.5.0] - 2026-05-14
 
 ### Added

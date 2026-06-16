@@ -5,7 +5,6 @@
 
 #include "RV3032/RV3032.h"
 #include "RV3032/CommandTable.h"
-#include <Arduino.h>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -43,7 +42,7 @@ private:
 };
 
 /// @brief Check if deadline has passed, with wraparound-safe comparison.
-/// Uses signed arithmetic to handle millis() wraparound (~49 days).
+/// Uses signed arithmetic to handle 32-bit millisecond wraparound (~49 days).
 bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
@@ -212,7 +211,8 @@ void RV3032::tick(uint32_t now_ms) {
   if (_driverState == DriverState::OFFLINE) {
     return;
   }
-  processEeprom(now_ms);
+  uint8_t instructionsUsed = 0;
+  (void)pollEeprom(now_ms, 1, instructionsUsed);
 }
 
 void RV3032::end() {
@@ -228,6 +228,237 @@ Status RV3032::getEepromStatus() const {
     return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
   }
   return _eepromLastStatus;
+}
+
+Status RV3032::pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed) {
+  instructionsUsed = 0;
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
+  return processEeprom(now_ms, maxInstructions, instructionsUsed);
+}
+
+bool RV3032::isJobBusy() const {
+  return _job.state != JobState::Idle;
+}
+
+Status RV3032::getJobStatus() const {
+  if (isJobBusy()) {
+    return Status::Error(Err::IN_PROGRESS, "Job in progress");
+  }
+  return _job.lastStatus;
+}
+
+Status RV3032::startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
+  if (isJobBusy()) {
+    return Status::Error(Err::BUSY, "Job already in progress");
+  }
+  if (ticks > 0x0FFF) {
+    return Status::Error(Err::INVALID_PARAM, "Timer ticks out of range");
+  }
+  const uint8_t freqRaw = static_cast<uint8_t>(freq);
+  if (freqRaw > kMaxTimerFrequency) {
+    return Status::Error(Err::INVALID_PARAM, "Timer frequency out of range");
+  }
+
+  _job = JobOp{};
+  _job.timerTicks = ticks;
+  _job.timerFreq = freq;
+  _job.timerEnable = enable;
+  _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
+  _job.state = JobState::SetTimerReadControl1;
+  return _job.lastStatus;
+}
+
+Status RV3032::startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t setMask) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
+  if (isJobBusy()) {
+    return Status::Error(Err::BUSY, "Job already in progress");
+  }
+  if (!isKnownRegisterAddress(reg)) {
+    return Status::Error(Err::INVALID_PARAM, "Register address out of range");
+  }
+
+  _job = JobOp{};
+  _job.registerUpdateReg = reg;
+  _job.registerUpdateClearMask = clearMask;
+  _job.registerUpdateSetMask = setMask;
+  _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
+  _job.state = JobState::RegisterUpdateRead;
+  return _job.lastStatus;
+}
+
+Status RV3032::startWriteUserRamJob(uint8_t offset, const uint8_t* buf, size_t len) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
+  if (isJobBusy()) {
+    return Status::Error(Err::BUSY, "Job already in progress");
+  }
+  if (buf == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid user RAM write buffer");
+  }
+  if (offset >= kUserRamSize || len > static_cast<size_t>(kUserRamSize - offset) ||
+      len > kJobUserRamBufferSize) {
+    return Status::Error(Err::INVALID_PARAM, "User RAM write out of range");
+  }
+
+  _job = JobOp{};
+  _job.userRamOffset = offset;
+  _job.userRamLen = static_cast<uint8_t>(len);
+  std::memcpy(_job.userRamBuf, buf, len);
+  _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
+  _job.state = JobState::WriteUserRamChunk;
+  return _job.lastStatus;
+}
+
+Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed) {
+  (void)now_ms;
+  instructionsUsed = 0;
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return _offlineStatus();
+  }
+  if (!isJobBusy()) {
+    return _job.lastStatus;
+  }
+  if (maxInstructions == 0) {
+    return Status::Error(Err::IN_PROGRESS, "Job in progress");
+  }
+
+  auto finishJob = [&](const Status& finalStatus) -> Status {
+    _job.lastStatus = finalStatus;
+    _job.state = JobState::Idle;
+    return finalStatus;
+  };
+
+  while (isJobBusy() && instructionsUsed < maxInstructions) {
+    Status st = Status::Ok();
+    switch (_job.state) {
+      case JobState::SetTimerReadControl1: {
+        st = readRegister(cmd::REG_CONTROL1, _job.timerControl1);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        const uint8_t freqRaw = static_cast<uint8_t>(_job.timerFreq);
+        const uint8_t timerEnableMask = static_cast<uint8_t>(1u << cmd::CTRL1_TE_BIT);
+        _job.timerControl1 = static_cast<uint8_t>(
+            _job.timerControl1 & ~(cmd::CTRL1_TD_MASK | timerEnableMask));
+        _job.timerControl1 = static_cast<uint8_t>(_job.timerControl1 | (freqRaw & cmd::CTRL1_TD_MASK));
+        _job.timerFinalControl1 = _job.timerControl1;
+        if (_job.timerEnable) {
+          _job.timerFinalControl1 = static_cast<uint8_t>(_job.timerFinalControl1 | timerEnableMask);
+        }
+        _job.state = JobState::SetTimerReadTimerHigh;
+        break;
+      }
+      case JobState::SetTimerReadTimerHigh:
+        st = readRegister(cmd::REG_TIMER_HIGH, _job.timerHigh);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        _job.timerHigh = static_cast<uint8_t>(
+            (_job.timerHigh & 0xF0u) | ((_job.timerTicks >> 8) & 0x0Fu));
+        _job.state = JobState::SetTimerWriteControl1;
+        break;
+      case JobState::SetTimerWriteControl1:
+        st = writeRegister(cmd::REG_CONTROL1, _job.timerControl1);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        _job.state = JobState::SetTimerWriteLow;
+        break;
+      case JobState::SetTimerWriteLow:
+        st = writeRegister(cmd::REG_TIMER_LOW, static_cast<uint8_t>(_job.timerTicks & 0xFFu));
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        _job.state = JobState::SetTimerWriteHigh;
+        break;
+      case JobState::SetTimerWriteHigh:
+        st = writeRegister(cmd::REG_TIMER_HIGH, _job.timerHigh);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        if (_job.timerFinalControl1 != _job.timerControl1) {
+          _job.state = JobState::SetTimerWriteFinalControl1;
+          break;
+        }
+        return finishJob(Status::Ok());
+      case JobState::SetTimerWriteFinalControl1:
+        st = writeRegister(cmd::REG_CONTROL1, _job.timerFinalControl1);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        return finishJob(Status::Ok());
+      case JobState::RegisterUpdateRead:
+        st = readRegister(_job.registerUpdateReg, _job.registerUpdateValue);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        _job.registerUpdateValue = static_cast<uint8_t>(
+            (_job.registerUpdateValue & ~_job.registerUpdateClearMask) |
+            _job.registerUpdateSetMask);
+        _job.state = JobState::RegisterUpdateWrite;
+        break;
+      case JobState::RegisterUpdateWrite:
+        st = writeRegister(_job.registerUpdateReg, _job.registerUpdateValue);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        return finishJob(Status::Ok());
+      case JobState::WriteUserRamChunk: {
+        const uint8_t remaining = static_cast<uint8_t>(_job.userRamLen - _job.userRamWritten);
+        const uint8_t chunk = (remaining > 15U) ? 15U : remaining;
+        st = writeRegs(static_cast<uint8_t>(cmd::REG_USER_RAM_START +
+                                            _job.userRamOffset +
+                                            _job.userRamWritten),
+                       &_job.userRamBuf[_job.userRamWritten],
+                       chunk);
+        ++instructionsUsed;
+        if (!st.ok()) {
+          return finishJob(st);
+        }
+        _job.userRamWritten = static_cast<uint8_t>(_job.userRamWritten + chunk);
+        if (_job.userRamWritten >= _job.userRamLen) {
+          return finishJob(Status::Ok());
+        }
+        break;
+      }
+      case JobState::Idle:
+      default:
+        return finishJob(Status::Ok());
+    }
+  }
+
+  return isJobBusy() ? Status::Error(Err::IN_PROGRESS, "Job in progress") : _job.lastStatus;
 }
 
 Status RV3032::getSettings(SettingsSnapshot& out) const {
@@ -420,7 +651,7 @@ uint32_t RV3032::_nowMs() const {
   if (_config.nowMs != nullptr) {
     return _config.nowMs(_config.timeUser);
   }
-  return millis();
+  return 0;
 }
 
 void RV3032::_resetRuntimeState() {
@@ -429,6 +660,7 @@ void RV3032::_resetRuntimeState() {
   _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
+  _job = JobOp{};
   _eepromLastStatus = Status::Ok();
   _eepromWriteCount = 0;
   _eepromWriteFailures = 0;
@@ -748,11 +980,13 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
     return st;
   }
 
-  control1 = static_cast<uint8_t>(control1 & ~(cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT)));
-  control1 = static_cast<uint8_t>(control1 | (freqRaw & cmd::CTRL1_TD_MASK));
-  if (enable) {
-    control1 = static_cast<uint8_t>(control1 | (1u << cmd::CTRL1_TE_BIT));
-  }
+  const uint8_t timerEnableMask = static_cast<uint8_t>(1u << cmd::CTRL1_TE_BIT);
+  const uint8_t disabledControl1 = static_cast<uint8_t>(
+      (control1 & ~(cmd::CTRL1_TD_MASK | timerEnableMask)) |
+      (freqRaw & cmd::CTRL1_TD_MASK));
+  const uint8_t finalControl1 = enable
+      ? static_cast<uint8_t>(disabledControl1 | timerEnableMask)
+      : disabledControl1;
 
   uint8_t low = static_cast<uint8_t>(ticks & 0xFF);
   uint8_t currentHigh = 0;
@@ -762,14 +996,20 @@ Status RV3032::setTimer(uint16_t ticks, TimerFrequency freq, bool enable) {
   }
   uint8_t high = static_cast<uint8_t>((currentHigh & 0xF0u) | ((ticks >> 8) & 0x0Fu));
 
-  st = writeRegister(cmd::REG_CONTROL1, control1);
+  st = writeRegister(cmd::REG_CONTROL1, disabledControl1);
   if (!st.ok()) {
     return st;
   }
 
   st = writeRegister(cmd::REG_TIMER_LOW, low);
   if (!st.ok()) return st;
-  return writeRegister(cmd::REG_TIMER_HIGH, high);
+  st = writeRegister(cmd::REG_TIMER_HIGH, high);
+  if (!st.ok()) return st;
+
+  if (finalControl1 != disabledControl1) {
+    return writeRegister(cmd::REG_CONTROL1, finalControl1);
+  }
+  return Status::Ok();
 }
 
 Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {
@@ -1369,6 +1609,12 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
     return Status::Ok();
   }
 
+  if (_config.enableEepromWrites &&
+      (_eeprom.state != EepromState::Idle || _eeprom.queueCount > 0) &&
+      _eeprom.queueCount >= kEepromQueueSize) {
+    return Status::Error(Err::QUEUE_FULL, "EEPROM queue full");
+  }
+
   // Write to RAM register first
   st = writeRegister(reg, value);
   if (!st.ok()) {
@@ -1383,13 +1629,19 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
   return queueEepromUpdate(reg, value, _nowMs());
 }
 
-void RV3032::processEeprom(uint32_t now_ms) {
+Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed) {
+  instructionsUsed = 0;
   if (!_config.enableEepromWrites) {
     _eeprom.state = EepromState::Idle;
     _eeprom.queueHead = 0;
     _eeprom.queueTail = 0;
     _eeprom.queueCount = 0;
-    return;
+    return _eepromLastStatus;
+  }
+
+  if (maxInstructions == 0) {
+    return isEepromBusy() ? Status::Error(Err::IN_PROGRESS, "EEPROM update in progress")
+                          : _eepromLastStatus;
   }
 
   if (_eeprom.state == EepromState::Idle) {
@@ -1397,8 +1649,9 @@ void RV3032::processEeprom(uint32_t now_ms) {
     uint8_t nextValue = 0;
     if (eepromQueuePop(nextReg, nextValue)) {
       startEepromUpdate(nextReg, nextValue, now_ms);
+      return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
     }
-    return;
+    return _eepromLastStatus;
   }
 
   auto finishEepromOperation = [&](const Status& finalStatus) {
@@ -1428,6 +1681,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
   switch (_eeprom.state) {
     case EepromState::ReadControl1:
       st = readRegister(cmd::REG_CONTROL1, _eeprom.control1);
+      ++instructionsUsed;
       if (!st.ok()) {
         finishEepromOperation(st);
         break;
@@ -1437,6 +1691,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::EnableEerd:
       st = writeRegister(cmd::REG_CONTROL1, static_cast<uint8_t>(_eeprom.control1 | (1u << cmd::CTRL1_EERD_BIT)));
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1446,6 +1701,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::WriteAddr:
       st = writeRegister(cmd::REG_EE_ADDRESS, _eeprom.reg);
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1455,6 +1711,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::WriteData:
       st = writeRegister(cmd::REG_EE_DATA, _eeprom.value);
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1465,6 +1722,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::WaitReadyPreCmd:
       st = readEepromFlags(busy, failed);
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1481,6 +1739,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::WriteCmd:
       st = writeRegister(cmd::REG_EE_COMMAND, cmd::EEPROM_CMD_UPDATE);
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1491,6 +1750,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       break;
     case EepromState::WaitReadyPostCmd:
       st = readEepromFlags(busy, failed);
+      ++instructionsUsed;
       if (!st.ok()) {
         _eepromLastStatus = st;
         _eeprom.state = EepromState::RestoreControl1;
@@ -1515,6 +1775,7 @@ void RV3032::processEeprom(uint32_t now_ms) {
       if (_eeprom.control1Valid) {
         uint8_t restore = static_cast<uint8_t>(_eeprom.control1 & ~(1u << cmd::CTRL1_EERD_BIT));
         st = writeRegister(cmd::REG_CONTROL1, restore);
+        ++instructionsUsed;
         if (!st.ok() && finalStatus.ok()) {
           finalStatus = st;
         }
@@ -1527,6 +1788,9 @@ void RV3032::processEeprom(uint32_t now_ms) {
       _eeprom.state = EepromState::Idle;
       break;
   }
+
+  return isEepromBusy() ? Status::Error(Err::IN_PROGRESS, "EEPROM update in progress")
+                        : _eepromLastStatus;
 }
 
 Status RV3032::queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms) {

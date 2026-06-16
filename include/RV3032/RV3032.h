@@ -27,6 +27,8 @@
  *   cfg.i2cWrite = myI2cWrite;
  *   cfg.i2cWriteRead = myI2cWriteRead;
  *   cfg.i2cUser = myI2cContext;
+ *   cfg.nowMs = myNowMs;
+ *   cfg.enableEepromWrites = false;
  *   
  *   RV3032::Status st = rtc.begin(cfg);
  *   if (!st.ok()) {
@@ -429,6 +431,86 @@ class RV3032 {
    * @return Number of queued EEPROM writes
    */
   uint8_t eepromQueueDepth() const { return _eeprom.queueCount; }
+
+  /**
+   * @brief Advance EEPROM persistence with an explicit instruction budget.
+   *
+   * @param now_ms Current monotonic time in milliseconds
+   * @param maxInstructions Maximum backend I2C instructions to execute
+   * @param[out] instructionsUsed Number of I2C instructions attempted
+   * @return OK when idle or the active update completed, IN_PROGRESS when work remains,
+   *         or an error from the EEPROM state machine.
+   * @note EEPROM persistence executes at most one I2C instruction per call even when
+   *       maxInstructions is greater than one. tick(now_ms) delegates to this method
+   *       with a budget of one instruction.
+   */
+  Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
+
+  // ===== Budgeted Job Operations =====
+
+  /**
+   * @brief Check whether a budgeted non-EEPROM job is active.
+   *
+   * @return true if pollJob() must be called to complete a job.
+   */
+  bool isJobBusy() const;
+
+  /**
+   * @brief Get the current or last non-EEPROM job status.
+   *
+   * @return IN_PROGRESS while a job is active, otherwise the last terminal job status.
+   */
+  Status getJobStatus() const;
+
+  /**
+   * @brief Start a budgeted periodic countdown timer configuration job.
+   *
+   * @param ticks Number of timer ticks before triggering (0-4095)
+   * @param freq Timer clock frequency
+   * @param enable Start timer immediately if true
+   * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
+   *         INVALID_PARAM for invalid values, or NOT_INITIALIZED before begin().
+   * @note The job preserves reserved timer high-register bits and advances through
+   *       pollJob(). One register read or write is one instruction.
+   */
+  Status startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable);
+
+  /**
+   * @brief Start a budgeted masked register update job.
+   *
+   * @param reg Register address to read and update
+   * @param clearMask Bits to clear in the read value
+   * @param setMask Bits to set after clearMask is applied
+   * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
+   *         INVALID_PARAM for an unknown register, or NOT_INITIALIZED before begin().
+   * @note Computes `(current & ~clearMask) | setMask`, then writes the result through
+   *       pollJob(). This is the staged form for simple control-register RMW work.
+   * @warning Direct register access can disrupt RTC operation if misused.
+   */
+  Status startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t setMask);
+
+  /**
+   * @brief Start a budgeted volatile user RAM write job.
+   *
+   * @param offset Offset inside user RAM (0-15)
+   * @param buf Source buffer copied into the driver's fixed job buffer
+   * @param len Number of bytes to write
+   * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
+   *         INVALID_PARAM for invalid ranges, or NOT_INITIALIZED before begin().
+   * @note Writes larger than the single-transfer limit are chunked by pollJob().
+   */
+  Status startWriteUserRamJob(uint8_t offset, const uint8_t* buf, size_t len);
+
+  /**
+   * @brief Advance the active non-EEPROM job with an instruction budget.
+   *
+   * @param now_ms Current monotonic time in milliseconds (reserved for deadline-based jobs)
+   * @param maxInstructions Maximum backend I2C instructions to execute
+   * @param[out] instructionsUsed Number of I2C instructions attempted
+   * @return OK when no job remains, IN_PROGRESS when the budget was exhausted before
+   *         completion, or the first job error.
+   */
+  Status pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
 
   // ===== Time/Date Operations =====
 
@@ -912,12 +994,26 @@ class RV3032 {
     RestoreControl1
   };
 
+  enum class JobState : uint8_t {
+    Idle,
+    SetTimerReadControl1,
+    SetTimerReadTimerHigh,
+    SetTimerWriteControl1,
+    SetTimerWriteLow,
+    SetTimerWriteHigh,
+    SetTimerWriteFinalControl1,
+    RegisterUpdateRead,
+    RegisterUpdateWrite,
+    WriteUserRamChunk
+  };
+
   struct EepromWrite {
     uint8_t reg = 0;
     uint8_t value = 0;
   };
 
   static constexpr size_t kEepromQueueSize = 8;  // Fixed-size queue (no heap allocation)
+  static constexpr size_t kJobUserRamBufferSize = 16;
 
   struct EepromOp {
     EepromState state = EepromState::Idle;
@@ -935,10 +1031,30 @@ class RV3032 {
     uint8_t queueCount = 0; // Number of items in queue
   };
 
+  struct JobOp {
+    JobState state = JobState::Idle;
+    Status lastStatus = Status::Ok();
+    uint16_t timerTicks = 0;
+    TimerFrequency timerFreq = TimerFrequency::Hz4096;
+    bool timerEnable = false;
+    uint8_t timerControl1 = 0;
+    uint8_t timerFinalControl1 = 0;
+    uint8_t timerHigh = 0;
+    uint8_t registerUpdateReg = 0;
+    uint8_t registerUpdateClearMask = 0;
+    uint8_t registerUpdateSetMask = 0;
+    uint8_t registerUpdateValue = 0;
+    uint8_t userRamOffset = 0;
+    uint8_t userRamLen = 0;
+    uint8_t userRamWritten = 0;
+    uint8_t userRamBuf[kJobUserRamBufferSize] = {0};
+  };
+
   Config _config;
   bool _initialized = false;
   bool _beginInProgress = false;
   EepromOp _eeprom;
+  JobOp _job;
   Status _eepromLastStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
   uint32_t _eepromWriteFailures = 0;
@@ -971,7 +1087,7 @@ class RV3032 {
 
   // EEPROM operations
   Status writeEepromRegister(uint8_t reg, uint8_t value);
-  void processEeprom(uint32_t now_ms);
+  Status processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
   Status queueEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
   Status startEepromUpdate(uint8_t reg, uint8_t value, uint32_t now_ms);
   Status readEepromFlags(bool& busy, bool& failed);
