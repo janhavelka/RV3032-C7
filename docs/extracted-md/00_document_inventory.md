@@ -1,11 +1,13 @@
 # Document Inventory
 
-These are curated engineering notes for the RV-3032-C7 RTC module. They are derived from the PDFs under `docs/` and the raw text extraction in `docs/pdf-extracted-md`; raw page dumps are intentionally not repeated in `docs/extracted-md`.
+These are curated engineering notes for the RV-3032-C7 RTC module. They are
+derived from the vendor PDFs under `docs/reference-pdfs/`. Raw page dumps are
+intentionally not repeated in `docs/extracted-md`.
 
-| Source PDF | Raw extract | Pages used | Notes |
-|---|---|---:|---|
-| `docs/RV-3032-C7_datasheet.pdf` | `docs/pdf-extracted-md/RV-3032-C7_datasheet.md` | 1-2 | Short-form datasheet: features, block diagram, pin list, headline electrical data. |
-| `docs/RV-3032-C7_App-Manual.pdf` | `docs/pdf-extracted-md/RV-3032-C7_App-Manual.md` | 1-154 | Primary source for registers, I2C protocol, interrupts, backup, EEPROM, timing, and application notes. |
+| Source PDF | Pages used | Notes |
+|---|---:|---|
+| `docs/reference-pdfs/RV-3032-C7_datasheet.pdf` | 1-2 | Short-form datasheet: features, block diagram, pin list, headline electrical data. |
+| `docs/reference-pdfs/RV-3032-C7_App-Manual.pdf` | 1-154 | Primary source for registers, I2C protocol, interrupts, backup, EEPROM, timing, and application notes. |
 
 Compact note set:
 

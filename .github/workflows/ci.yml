@@ -65,6 +65,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio
 
+      - name: Check generated version header
+        run: python scripts/generate_version.py check
+
       - name: Enforce core timing guard
         run: python tools/check_core_timing_guard.py
 
@@ -88,6 +91,11 @@ jobs:
       - name: Enforce example CLI contract
         run: python tools/check_cli_contract.py
 
-      - name: Validate library package
-        run: pio pkg pack
+      - name: Check docs contract
+        run: python tools/check_docs_contract.py source
 
+      - name: Validate library package
+        run: |
+          mkdir -p dist
+          pio pkg pack -o dist/RV3032-C7.tar.gz .
+          python tools/check_docs_contract.py package dist/RV3032-C7.tar.gz

@@ -43,5 +43,19 @@
   "build": {
     "includeDir": "include",
     "srcDir": "src"
+  },
+  "export": {
+    "exclude": [
+      ".github/**",
+      ".pio/**",
+      ".vscode/**",
+      "build_output.txt",
+      "docs/reference-pdfs/**",
+      "docs/**/*.pdf",
+      "test/**",
+      "*.tar.gz",
+      "*.tgz",
+      "*.zip"
+    ]
   }
 }

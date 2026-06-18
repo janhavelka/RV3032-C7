@@ -10,9 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `Config::enableEepromWrites` now defaults to `false`; EEPROM persistence is explicit opt-in for configuration changes.
 - Core health timestamping no longer falls back to Arduino `millis()` when `Config::nowMs` is unset.
-
-### Added
-- TunnelMonitor fit report with public API classification and setup-only EEPROM/control surface.
+- Documentation was simplified into maintained `docs/README.md`, `docs/ARCHITECTURE.md`, `docs/DEVICE_REFERENCE.md`, and `docs/IDF_PORT.md`; vendor PDFs moved under `docs/reference-pdfs/`, while compact source-derived chip notes remain under `docs/extracted-md/` for traceability.
 
 ## [1.5.0] - 2026-05-14
 
@@ -28,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Doxyfile project metadata now matches `library.json`.
-- Reference documentation now uses human-readable vendor PDF names and separates compact RTC notes from full PDF extractions under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
+- Reference documentation now uses human-readable vendor PDF names.
 - Explicit recovery bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 - Low-level register access now rejects undocumented address ranges, wraparound blocks, and invalid buffers before dispatching to I2C.
 - Transport validation/configuration errors are excluded from driver health counters while EEPROM `IN_PROGRESS` remains a successful in-flight state.

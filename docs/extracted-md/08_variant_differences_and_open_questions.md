@@ -16,4 +16,4 @@ Not documented in PDFs / repository policy choices:
 - The PDFs state CLKOUT is enabled at 32.768 kHz by default delivery setting and can be disabled; they do not require automatic software disabling.
 - The PDFs define register encodings, but do not define how an API should represent BCD fields or the 100th-second register.
 
-Raw extraction remains in `docs/pdf-extracted-md` for verification.
+Vendor PDFs remain in `docs/reference-pdfs/` for verification.

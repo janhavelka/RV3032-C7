@@ -399,11 +399,16 @@ These helpers are example-only glue and are not part of the public library API.
 ## Running Tests
 
 ```bash
+python scripts/generate_version.py check
+python tools/check_docs_contract.py source
 pio test -e native
 python tools/check_cli_contract.py
 python tools/check_core_timing_guard.py
 pio run -e esp32s3dev
 pio run -e esp32s2dev
+mkdir -p dist
+pio pkg pack -o dist/RV3032-C7.tar.gz .
+python tools/check_docs_contract.py package dist/RV3032-C7.tar.gz
 ```
 
 ## Project Structure
@@ -428,12 +433,12 @@ AGENTS.md               - Coding guidelines
 
 ## Documentation
 
-- `CHANGELOG.md` - full release history
-- `docs/MANAGED_SYNC_DRIVER_PATTERN.md` - managed synchronous driver pattern
-- `docs/IDF_PORT.md` - ESP-IDF portability guidance
-- `docs/RV3032_Register_Reference.md` - register reference guide
-- `docs/RV-3032-C7_datasheet.pdf` - device datasheet
-- `docs/RV-3032-C7_App-Manual.pdf` - vendor application manual
+- `docs/README.md` - documentation map
+- `docs/ARCHITECTURE.md` - lifecycle, health, transport, budget, and EEPROM policy
+- `docs/DEVICE_REFERENCE.md` - device register, flag, timestamp, EEPROM, and timing notes
+- `docs/IDF_PORT.md` - ESP-IDF adapter guidance
+- `docs/extracted-md/` - curated vendor-document review notes retained for traceability
+- `docs/reference-pdfs/` - vendor datasheet and application manual
 
 ## Contributing
 

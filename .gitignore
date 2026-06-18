@@ -9,6 +9,9 @@
 *.elf
 *.bin
 *.map
+*.tar.gz
+*.tgz
+*.zip
 
 # Python (for scripts/)
 __pycache__/
@@ -39,4 +42,3 @@ wifi_credentials.h
 
 # Auto-generated files
 include/RV3032/Version.h
-

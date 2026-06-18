@@ -1,22 +1,22 @@
-# RV3032-C7 ESP-IDF Portability Status
+# RV3032-C7 ESP-IDF Adapter Notes
 
-Last audited: 2026-03-01
+Primary support is PlatformIO + Arduino. The core driver remains portable
+because hardware access is supplied through callbacks, but this repository does
+not currently ship a native ESP-IDF component or ESP-IDF example.
 
-## Current Reality
-- Primary runtime remains PlatformIO + Arduino.
-- I2C is callback-based (`Config.i2cWrite`, `Config.i2cWriteRead`).
-- Optional timing hook is available (`Config.nowMs`, `Config.timeUser`).
-- Core logic uses `_nowMs()` wrapper for health timestamps.
-- If no timing hook is supplied:
-  - `RV3032::_nowMs()` -> `0` when `Config.nowMs == nullptr`
+## Adapter Boundary
 
-## ESP-IDF Adapter Requirements
-To run under pure ESP-IDF, provide:
-1. I2C write callback.
-2. I2C write-read callback.
-3. Optional `nowMs(user)` callback.
+To use the core from ESP-IDF code, provide:
 
-## Minimal Adapter Pattern
+1. `Config::i2cWrite`
+2. `Config::i2cWriteRead`
+3. optional `Config::nowMs` for health timestamps
+
+The adapter owns the I2C driver, pins, pull-ups, locking, bus timeout policy,
+and task scheduling.
+
+## Minimal Pattern
+
 ```cpp
 static uint32_t idfNowMs(void*) {
   return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -25,16 +25,34 @@ static uint32_t idfNowMs(void*) {
 RV3032::Config cfg{};
 cfg.i2cWrite = myI2cWrite;
 cfg.i2cWriteRead = myI2cWriteRead;
+cfg.i2cUser = myContext;
 cfg.nowMs = idfNowMs;
+cfg.enableEepromWrites = false;
 ```
 
-## Porting Notes
-- `tick(nowMs)` should be called regularly.
-- Timeout checks are implemented with wrap-safe unsigned arithmetic.
-- EEPROM queue behavior and offline/degraded transitions must remain unchanged in adapter code.
+Call `tick(nowMs)` regularly if EEPROM persistence may be active. For strict
+owner-task instruction budgets, use `pollEeprom()` and `pollJob()`.
 
-## Verification Checklist
-- `python tools/check_core_timing_guard.py` passes.
-- Native tests pass (`pio test -e native`).
-- Example builds pass (`pio run -e esp32s3dev`, `pio run -e esp32s2dev`).
-- No direct Arduino timing calls are introduced outside wrapper fallback.
+## Porting Rules
+
+- Keep I2C caller-owned; do not add `Wire` or ESP-IDF driver objects to public
+  contracts.
+- Keep timeout and error mapping inside the adapter callbacks.
+- Do not add hidden timing fallbacks to the core. If `nowMs` is absent, health
+  timestamps remain `0`.
+- Keep EEPROM writes explicit opt-in.
+- Keep `recover()` application-controlled; do not auto-recover in `tick()`.
+
+## Local Verification
+
+Run the same checks as CI:
+
+```sh
+python scripts/generate_version.py check
+python tools/check_core_timing_guard.py
+pio test -e native
+python tools/check_cli_contract.py
+pio run -e esp32s2dev
+pio run -e esp32s3dev
+pio pkg pack
+```
