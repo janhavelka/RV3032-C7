@@ -7,10 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-29
+
+### Added
+- Hardware-in-the-loop CLI runner for bounded RTC validation and opt-in destructive soak scenarios.
+- Maintained HIL summary report under `docs/reports/HIL_SUMMARY.md`; raw runner transcripts and generated step logs are not kept in the repository.
+- Documentation/package contract validation for source trees and packaged archives.
+
 ### Changed
 - `Config::enableEepromWrites` now defaults to `false`; EEPROM persistence is explicit opt-in for configuration changes.
 - Core health timestamping no longer falls back to Arduino `millis()` when `Config::nowMs` is unset.
 - Documentation was simplified into maintained `docs/README.md`, `docs/ARCHITECTURE.md`, `docs/DEVICE_REFERENCE.md`, and `docs/IDF_PORT.md`; vendor PDFs moved under `docs/reference-pdfs/`, while compact source-derived chip notes remain under `docs/extracted-md/` for traceability.
+- Package exports now exclude raw HIL runner JSON, stdout/stderr captures, PID files, and generated runner transcripts.
 
 ## [1.5.0] - 2026-05-14
 
@@ -167,7 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...v1.4.0
