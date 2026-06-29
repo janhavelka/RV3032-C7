@@ -50,6 +50,10 @@ inline const char* errToString(RV3032::Err err) {
     case RV3032::Err::QUEUE_FULL:           return "QUEUE_FULL";
     case RV3032::Err::BUSY:                 return "BUSY";
     case RV3032::Err::IN_PROGRESS:          return "IN_PROGRESS";
+    case RV3032::Err::I2C_NACK_ADDR:        return "I2C_NACK_ADDR";
+    case RV3032::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
+    case RV3032::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
+    case RV3032::Err::I2C_BUS:              return "I2C_BUS";
     default:                                 return "UNKNOWN";
   }
 }

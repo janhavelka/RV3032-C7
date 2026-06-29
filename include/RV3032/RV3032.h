@@ -264,8 +264,12 @@ class RV3032 {
    * @return OK on success (library is ready to use), error otherwise
    * @note The transport callbacks must be provided in Config.
    *       backupMode must be one of BackupSwitchMode::Off, Level, or Direct.
-   *       If EEPROM writes are enabled, call tick() to complete EEPROM work.
-   *       Use getEepromStatus() to check if EEPROM persistence is active.
+   *       begin() may update the PMU RAM mirror. If EEPROM writes are enabled,
+   *       that PMU change may queue EEPROM work while begin() still returns OK;
+   *       call tick() to complete EEPROM work and use getEepromStatus() to
+   *       check whether persistence is active or failed.
+   *       Returns BUSY without changing current state when asynchronous driver
+   *       work is already active.
    */
   Status begin(const Config& config);
 
@@ -281,6 +285,8 @@ class RV3032 {
    * @brief Stop and release resources
    * 
    * @note Currently no resources to release. Provided for API consistency.
+   *       If EEPROM or budgeted job work is active, this call leaves the driver
+   *       initialized so the application can finish or observe that work.
    */
   void end();
 
@@ -309,7 +315,8 @@ class RV3032 {
    * Does NOT update health tracking or driver state.
    * Can be called anytime after begin().
    * 
-   * @return OK if device present, DEVICE_NOT_FOUND if no response, other error on failure
+   * @return OK if device present, DEVICE_NOT_FOUND on address NACK,
+   *         or the original timeout/data-NACK/bus error on other failures.
    */
   Status probe();
 
@@ -644,6 +651,9 @@ class RV3032 {
    * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Persistent if Config::enableEepromWrites is true. This preserves
    *       existing trickle-charger and CLKOUT PMU bits.
+   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
+   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
+   *          getEepromStatus() reports a terminal status.
    */
   Status setBackupSwitchMode(BackupSwitchMode mode);
 
@@ -654,6 +664,9 @@ class RV3032 {
    * @note Selects Level Switching Mode and disables the PMU trickle charger.
    *       Intended for non-rechargeable VBACKUP cells such as CR2032.
    *       Persistent if Config::enableEepromWrites is true.
+   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
+   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
+   *          getEepromStatus() reports a terminal status.
    */
   Status setPrimaryBatteryBackupDefaults();
 
@@ -673,6 +686,9 @@ class RV3032 {
    * @param enabled true to enable CLKOUT pin, false to disable
    * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
+   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
+   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
+   *          getEepromStatus() reports a terminal status.
    */
   Status setClkoutEnabled(bool enabled);
 
@@ -690,6 +706,9 @@ class RV3032 {
    * @param freq Desired output frequency
    * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Persistent if Config::enableEepromWrites is true
+   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
+   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
+   *          getEepromStatus() reports a terminal status.
    */
   Status setClkoutFrequency(ClkoutFrequency freq);
 
@@ -710,6 +729,9 @@ class RV3032 {
    * @return Status::Ok() on success, IN_PROGRESS if EEPROM persistence is queued, error otherwise
    * @note Positive values increase frequency, negative decrease it.
    *       Persistent if Config::enableEepromWrites is true.
+   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
+   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
+   *          getEepromStatus() reports a terminal status.
    */
   Status setOffsetPpm(float ppm);
 
@@ -780,6 +802,8 @@ class RV3032 {
    *
    * @param source Timestamp source to reset
    * @return Status::Ok() on success, error otherwise
+   * @warning Clears the selected captured timestamp/count. Call only after the
+   *          application has consumed the event data.
    */
   Status resetTimestamp(TimestampSource source);
 
@@ -799,6 +823,10 @@ class RV3032 {
    * @param mask Bit mask of flags to clear (1=clear, 0=leave unchanged)
    * @return Status::Ok() on success, error otherwise
    * @note Writing STATUS clears THF/TLF regardless of mask (datasheet behavior).
+   *       If THF/TLF are currently set but omitted from mask, this returns
+   *       INVALID_PARAM instead of clearing them implicitly.
+   * @warning Clears latched status flags. Call only after the application has
+   *          handled the corresponding fault/event state.
    */
   Status clearStatus(uint8_t mask);
 
@@ -840,7 +868,8 @@ class RV3032 {
    * @brief Clear backup switchover flag (BSF)
    * 
    * @return Status::Ok() on success, error otherwise
-   * @note Must be cleared while VDD is present (per datasheet).
+   * @note Must be cleared while VDD is present (per datasheet). Returns BUSY
+   *       without writing when EEF, EEbusy, or CLKF are set in the same register.
    */
   Status clearBackupSwitchFlag();
 
@@ -866,7 +895,7 @@ class RV3032 {
    */
   Status writeUserRam(uint8_t offset, const uint8_t* buf, size_t len);
 
-  // ===== Low-Level Operations =====
+  // ===== Low-Level Diagnostic Register Operations =====
 
   /**
    * @brief Read single RTC register
@@ -876,6 +905,9 @@ class RV3032 {
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
    *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
+   *       This is a diagnostic/control helper using tracked I2C bounded by
+   *       Config::i2cTimeoutMs; prefer typed APIs for normal time, alarm,
+   *       timer, status, and EEPROM flows.
    * @warning Direct register access can disrupt RTC operation if misused
    */
   Status readRegister(uint8_t reg, uint8_t& value);
@@ -888,7 +920,12 @@ class RV3032 {
    * @return Status::Ok() on success, error otherwise
    * @note Validates that reg is in a documented RV3032 volatile RAM,
    *       access-control, user RAM, EEPROM-control, or user-EEPROM range.
-   * @warning Direct register access can disrupt RTC operation if misused
+   *       This is a diagnostic/control helper using one tracked I2C write
+   *       bounded by Config::i2cTimeoutMs; it is not the managed EEPROM
+   *       persistence path.
+   * @warning Direct register access can disrupt RTC operation if misused.
+   *          Writes to status/control/EEPROM-command registers may clear flags,
+   *          change RTC behavior, or trigger chip operations.
    */
   Status writeRegister(uint8_t reg, uint8_t value);
 
@@ -900,7 +937,9 @@ class RV3032 {
    * @param len Number of bytes to read
    * @return Status::Ok() on success, error otherwise
    * @note Rejects zero length, oversized reads, wraparound, and blocks that
-   *       cross undocumented address gaps.
+   *       cross undocumented address gaps. This is a diagnostic/control helper
+   *       using tracked I2C bounded by Config::i2cTimeoutMs; prefer typed APIs
+   *       for normal application flows.
    * @warning Direct block access can disrupt RTC operation if misused.
    */
   Status readRegisters(uint8_t reg, uint8_t* buf, size_t len);
@@ -913,8 +952,12 @@ class RV3032 {
    * @param len Number of bytes to write
    * @return Status::Ok() on success, error otherwise
    * @note Rejects zero length, writes larger than the fixed stack buffer,
-   *       wraparound, and blocks that cross undocumented address gaps.
-   * @warning Direct block access can disrupt RTC operation if misused.
+   *       wraparound, and blocks that cross undocumented address gaps. This is
+   *       a diagnostic/control helper using tracked I2C bounded by
+   *       Config::i2cTimeoutMs; it is not the managed EEPROM persistence path.
+   * @warning Direct block access can disrupt RTC operation if misused. Writes
+   *          to status/control/EEPROM-command registers may clear flags,
+   *          change RTC behavior, or trigger chip operations.
    */
   Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len);
 

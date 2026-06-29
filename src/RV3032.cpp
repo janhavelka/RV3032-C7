@@ -47,10 +47,17 @@ bool hasDeadlinePassed(uint32_t now_ms, uint32_t deadline_ms) {
   return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
 }
 
-bool isI2cFailure(const Status& st) {
+Status mapPresenceError(const Status& st) {
+  if (st.code == Err::I2C_NACK_ADDR) {
+    return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
+  }
+  return st;
+}
+
+bool isRecoverTransportFailure(const Status& st) {
   switch (st.code) {
+    case Err::DEVICE_NOT_FOUND:
     case Err::I2C_ERROR:
-    case Err::TIMEOUT:
     case Err::I2C_NACK_ADDR:
     case Err::I2C_NACK_DATA:
     case Err::I2C_TIMEOUT:
@@ -59,13 +66,6 @@ bool isI2cFailure(const Status& st) {
     default:
       return false;
   }
-}
-
-Status mapPresenceError(const Status& st) {
-  if (!st.ok() && isI2cFailure(st)) {
-    return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
-  }
-  return st;
 }
 
 bool shouldTrackHealth(const Status& st) {
@@ -151,6 +151,10 @@ bool timestampResetBit(TimestampSource source, uint8_t& bit) {
 // ===== Lifecycle Functions =====
 
 Status RV3032::begin(const Config& config) {
+  if (_initialized && (isEepromBusy() || isJobBusy())) {
+    return Status::Error(Err::BUSY, "Driver work in progress");
+  }
+
   _resetRuntimeState();
 
   // Validate the input config before storing it.
@@ -208,7 +212,7 @@ void RV3032::tick(uint32_t now_ms) {
   if (!_initialized) {
     return;
   }
-  if (_driverState == DriverState::OFFLINE) {
+  if (_driverState == DriverState::OFFLINE && _eeprom.state == EepromState::Idle) {
     return;
   }
   uint8_t instructionsUsed = 0;
@@ -216,6 +220,9 @@ void RV3032::tick(uint32_t now_ms) {
 }
 
 void RV3032::end() {
+  if (isEepromBusy() || isJobBusy()) {
+    return;
+  }
   _resetRuntimeState();
 }
 
@@ -236,6 +243,14 @@ Status RV3032::pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& ins
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (_driverState == DriverState::OFFLINE) {
+    if (_eeprom.state != EepromState::Idle) {
+      ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
+      Status st = processEeprom(now_ms, maxInstructions, instructionsUsed);
+      if (!st.inProgress()) {
+        _reassertOfflineLatch();
+      }
+      return st;
+    }
     return _offlineStatus();
   }
   return processEeprom(now_ms, maxInstructions, instructionsUsed);
@@ -336,6 +351,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (_driverState == DriverState::OFFLINE) {
+    if (isJobBusy()) {
+      _job.lastStatus = _offlineStatus();
+      _job.state = JobState::Idle;
+      return _job.lastStatus;
+    }
     return _offlineStatus();
   }
   if (!isJobBusy()) {
@@ -529,7 +549,8 @@ Status RV3032::recover() {
     // Re-apply stored configuration
     return _applyConfig();
   }();
-  if (startedOffline && !result.ok() && !result.inProgress()) {
+  if (startedOffline && !result.ok() && !result.inProgress() &&
+      isRecoverTransportFailure(result)) {
     _reassertOfflineLatch();
   }
   return result;
@@ -1456,7 +1477,18 @@ Status RV3032::clearStatus(uint8_t mask) {
     return st;
   }
 
-  status = static_cast<uint8_t>(status & ~mask);
+  const uint8_t activeMask = static_cast<uint8_t>(status & mask);
+  if (activeMask == 0) {
+    return Status::Ok();
+  }
+
+  const uint8_t temperatureFlagMask = static_cast<uint8_t>(
+      (1u << cmd::STATUS_THF_BIT) | (1u << cmd::STATUS_TLF_BIT));
+  if ((status & temperatureFlagMask & ~mask) != 0) {
+    return Status::Error(Err::INVALID_PARAM, "Temperature flags require explicit clear");
+  }
+
+  status = static_cast<uint8_t>(status & ~activeMask);
   return writeRegister(cmd::REG_STATUS, status);
 }
 
@@ -1606,6 +1638,14 @@ Status RV3032::writeEepromRegister(uint8_t reg, uint8_t value) {
 
   // Skip if no change needed
   if (current == value) {
+    if (_config.enableEepromWrites) {
+      if (isEepromBusy()) {
+        return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
+      }
+      if (!_eepromLastStatus.ok()) {
+        return _eepromLastStatus;
+      }
+    }
     return Status::Ok();
   }
 
@@ -1669,7 +1709,11 @@ Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& 
 
     uint8_t nextReg = 0;
     uint8_t nextValue = 0;
-    if (eepromQueuePop(nextReg, nextValue)) {
+    if (!finalStatus.ok()) {
+      _eeprom.queueHead = 0;
+      _eeprom.queueTail = 0;
+      _eeprom.queueCount = 0;
+    } else if (_driverState != DriverState::OFFLINE && eepromQueuePop(nextReg, nextValue)) {
       startEepromUpdate(nextReg, nextValue, now_ms);
     }
   };
@@ -1989,35 +2033,11 @@ Status RV3032::readValidity(ValidityFlags& out) {
 }
 
 Status RV3032::clearPowerOnResetFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
-  if (!st.ok()) {
-    return st;
-  }
-
-  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_PORF_BIT));
-
-  return writeRegister(cmd::REG_STATUS, status);
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_PORF_BIT));
 }
 
 Status RV3032::clearVoltageLowFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-
-  uint8_t status = 0;
-  Status st = readRegister(cmd::REG_STATUS, status);
-  if (!st.ok()) {
-    return st;
-  }
-
-  status = static_cast<uint8_t>(status & ~(1u << cmd::STATUS_VLF_BIT));
-
-  return writeRegister(cmd::REG_STATUS, status);
+  return clearStatus(static_cast<uint8_t>(1u << cmd::STATUS_VLF_BIT));
 }
 
 Status RV3032::clearBackupSwitchFlag() {
@@ -2031,10 +2051,19 @@ Status RV3032::clearBackupSwitchFlag() {
     return st;
   }
 
-  // Clear BSF (bit 0 in REG_TEMP_LSB)
-  tempLsb = static_cast<uint8_t>(tempLsb & ~(1u << cmd::TEMP_BSF_BIT));
+  const uint8_t bsfMask = static_cast<uint8_t>(1u << cmd::TEMP_BSF_BIT);
+  if ((tempLsb & bsfMask) == 0) {
+    return Status::Ok();
+  }
+  const uint8_t otherFlagMask = static_cast<uint8_t>(
+      (1u << cmd::EEPROM_ERROR_BIT) |
+      (1u << cmd::EEPROM_BUSY_BIT) |
+      (1u << cmd::TEMP_CLKF_BIT));
+  if ((tempLsb & otherFlagMask) != 0) {
+    return Status::Error(Err::BUSY, "TEMP_LSB support flags active");
+  }
 
-  return writeRegister(cmd::REG_TEMP_LSB, tempLsb);
+  return writeRegister(cmd::REG_TEMP_LSB, static_cast<uint8_t>(tempLsb & ~bsfMask));
 }
 
 // ===== User RAM Operations =====

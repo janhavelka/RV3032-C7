@@ -296,7 +296,7 @@ void test_begin_rejects_invalid_eeprom_enabled_timeouts() {
   TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
 }
 
-void test_begin_probe_failure_maps_i2c_error_to_device_not_found() {
+void test_begin_probe_failure_preserves_transport_errors() {
   FakeI2cBus bus;
   resetBus(bus);
   bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_BUS,
@@ -305,12 +305,25 @@ void test_begin_probe_failure_maps_i2c_error_to_device_not_found() {
   RV3032::RV3032 rtc;
   RV3032::Status st = rtc.begin(makeConfig(bus));
 
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_BUS),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_INT32(-33, st.detail);
   TEST_ASSERT_FALSE(rtc.isInitialized());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::UNINIT),
                           static_cast<uint8_t>(rtc.state()));
+
+  resetBus(bus);
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
+                                             "address nack", -34);
+  RV3032::RV3032 missingRtc;
+  st = missingRtc.begin(makeConfig(bus));
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-34, st.detail);
+  TEST_ASSERT_FALSE(missingRtc.isInitialized());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::UNINIT),
+                          static_cast<uint8_t>(missingRtc.state()));
 }
 
 void test_invalid_begin_after_success_resets_without_i2c() {
@@ -365,6 +378,9 @@ void test_get_settings_snapshot() {
   RV3032::Status st = rtc.begin(cfg);
   TEST_ASSERT_TRUE(st.ok());
 
+  const uint32_t readsBeforeSettings = bus.readCalls;
+  const uint32_t writesBeforeSettings = bus.writeCalls;
+
   RV3032::SettingsSnapshot snap;
   st = rtc.getSettings(snap);
   TEST_ASSERT_TRUE(st.ok());
@@ -374,6 +390,8 @@ void test_get_settings_snapshot() {
   const RV3032::SettingsSnapshot byValue = rtc.getSettings();
   TEST_ASSERT_EQUAL(static_cast<int>(snap.state), static_cast<int>(byValue.state));
   TEST_ASSERT_EQUAL(static_cast<int>(rtc.state()), static_cast<int>(rtc.driverState()));
+  TEST_ASSERT_EQUAL_UINT32(readsBeforeSettings, bus.readCalls);
+  TEST_ASSERT_EQUAL_UINT32(writesBeforeSettings, bus.writeCalls);
   TEST_ASSERT_EQUAL_HEX8(0x51, snap.i2cAddress);
   TEST_ASSERT_EQUAL_UINT32(77u, snap.i2cTimeoutMs);
   TEST_ASSERT_EQUAL_UINT8(4u, snap.offlineThreshold);
@@ -429,9 +447,19 @@ void test_probe_failure_does_not_update_health() {
   bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT,
                                               "forced probe timeout", -7);
   st = rtc.probe();
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_TIMEOUT),
                           static_cast<uint8_t>(st.code));
   TEST_ASSERT_EQUAL_INT32(-7, st.detail);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
+                          static_cast<uint8_t>(rtc.state()));
+  TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
+
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
+                                             "forced probe nack", -8);
+  st = rtc.probe();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-8, st.detail);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::READY),
                           static_cast<uint8_t>(rtc.state()));
   TEST_ASSERT_EQUAL_UINT8(0, rtc.consecutiveFailures());
@@ -732,6 +760,39 @@ void test_budgeted_user_ram_write_job_chunks_large_write() {
   TEST_ASSERT_EQUAL_UINT8(1u, used);
   TEST_ASSERT_EQUAL_UINT32(writesBefore + 2u, bus.writeCalls);
   TEST_ASSERT_EQUAL_HEX8(0x3F, bus.regs[RV3032::cmd::REG_USER_RAM_END]);
+}
+
+void test_budgeted_job_aborts_when_driver_is_offline() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+
+  st = rtc.startSetTimerJob(0x0123, RV3032::TimerFrequency::Hz1, true);
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_TRUE(rtc.isJobBusy());
+
+  bus.nextReadStatus = RV3032::Status::Error(RV3032::Err::I2C_BUS,
+                                             "forced offline", -30);
+  uint8_t status = 0;
+  st = rtc.readStatus(status);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_BUS),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::OFFLINE),
+                          static_cast<uint8_t>(rtc.state()));
+
+  uint8_t used = 99;
+  st = rtc.pollJob(0, 1, used);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT8(0u, used);
+  TEST_ASSERT_FALSE(rtc.isJobBusy());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::BUSY),
+                          static_cast<uint8_t>(rtc.getJobStatus().code));
 }
 
 void test_default_config_keeps_eeprom_persistence_disabled() {
@@ -1202,6 +1263,133 @@ void test_eeprom_restore_after_write_failure() {
   TEST_ASSERT_EQUAL_HEX8(0xA0, bus.regs[RV3032::cmd::REG_CONTROL1]);
 }
 
+void test_lifecycle_refuses_to_reset_active_eeprom_work() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makePersistentConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  st = rtc.setClkoutEnabled(false);
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_TRUE(rtc.isInitialized());
+  TEST_ASSERT_TRUE(rtc.isEepromBusy());
+
+  st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(rtc.isInitialized());
+  TEST_ASSERT_TRUE(rtc.isEepromBusy());
+
+  rtc.end();
+  TEST_ASSERT_TRUE(rtc.isInitialized());
+  TEST_ASSERT_TRUE(rtc.isEepromBusy());
+}
+
+void test_same_value_eeprom_setter_reports_pending_or_failed_persistence() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makePersistentConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  static constexpr float kOffsetStepPpm = 0.2384f;
+  st = rtc.setOffsetPpm(kOffsetStepPpm);
+  TEST_ASSERT_TRUE(st.inProgress());
+
+  st = rtc.setOffsetPpm(kOffsetStepPpm);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::IN_PROGRESS),
+                          static_cast<uint8_t>(st.code));
+
+  rtc.tick(0);
+  rtc.tick(1);
+  rtc.tick(2);
+  bus.nextWriteStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA,
+                                              "write data failed", -45);
+  rtc.tick(3);
+  rtc.tick(4);
+
+  st = rtc.getEepromStatus();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_DATA),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(rtc.isEepromBusy());
+
+  st = rtc.setOffsetPpm(kOffsetStepPpm);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_DATA),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-45, st.detail);
+}
+
+void test_eeprom_failure_stops_queue_and_preserves_first_error() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makePersistentConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  static constexpr float kOffsetStepPpm = 0.2384f;
+  st = rtc.setOffsetPpm(kOffsetStepPpm);
+  TEST_ASSERT_TRUE(st.inProgress());
+  st = rtc.setOffsetPpm(kOffsetStepPpm * 2.0f);
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_EQUAL_UINT8(1u, rtc.eepromQueueDepth());
+
+  rtc.tick(0);
+  rtc.tick(1);
+  rtc.tick(2);
+  bus.nextWriteStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA,
+                                              "first write failed", -46);
+  rtc.tick(3);
+  rtc.tick(4);
+
+  st = rtc.getEepromStatus();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_DATA),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(-46, st.detail);
+  TEST_ASSERT_FALSE(rtc.isEepromBusy());
+  TEST_ASSERT_EQUAL_UINT8(0u, rtc.eepromQueueDepth());
+  TEST_ASSERT_EQUAL_UINT32(0u, rtc.eepromWriteCount());
+  TEST_ASSERT_EQUAL_UINT32(1u, rtc.eepromWriteFailures());
+}
+
+void test_eeprom_cleanup_can_finish_after_offline_failure() {
+  FakeI2cBus bus;
+  resetBus(bus);
+  bus.regs[RV3032::cmd::REG_CONTROL1] = 0xA0;
+
+  RV3032::Config cfg = makePersistentConfig(bus);
+  cfg.offlineThreshold = 1;
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+
+  st = rtc.setClkoutEnabled(false);
+  TEST_ASSERT_TRUE(st.inProgress());
+
+  rtc.tick(0);
+  rtc.tick(1);
+  rtc.tick(2);
+  bus.nextWriteStatus = RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA,
+                                              "write data failed", -47);
+  rtc.tick(3);
+  TEST_ASSERT_TRUE(rtc.isEepromBusy());
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::OFFLINE),
+                          static_cast<uint8_t>(rtc.state()));
+  TEST_ASSERT_EQUAL_HEX8(0xA4, bus.regs[RV3032::cmd::REG_CONTROL1]);
+
+  rtc.tick(4);
+  st = rtc.getEepromStatus();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_DATA),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(rtc.isEepromBusy());
+  TEST_ASSERT_EQUAL_HEX8(0xA0, bus.regs[RV3032::cmd::REG_CONTROL1]);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::DriverState::OFFLINE),
+                          static_cast<uint8_t>(rtc.state()));
+}
+
 void test_eeprom_queue_full_does_not_change_ram_shadow() {
   FakeI2cBus bus;
   resetBus(bus);
@@ -1332,6 +1520,108 @@ void test_read_timestamp_rejects_invalid_calendar() {
   st = rtc.readTimestamp(RV3032::TimestampSource::TLow, ts);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
                           static_cast<uint8_t>(st.code));
+}
+
+void test_clear_flag_helpers_skip_writes_when_flags_are_absent() {
+  FakeI2cBus bus;
+  resetBus(bus);
+  bus.regs[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(1u << RV3032::cmd::STATUS_THF_BIT);
+  bus.regs[RV3032::cmd::REG_TEMP_LSB] = static_cast<uint8_t>(1u << RV3032::cmd::EEPROM_BUSY_BIT);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  const uint32_t writesBeforeAlarm = bus.writeCalls;
+  st = rtc.clearAlarmFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(writesBeforeAlarm, bus.writeCalls);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(1u << RV3032::cmd::STATUS_THF_BIT),
+                         bus.regs[RV3032::cmd::REG_STATUS]);
+
+  const uint32_t writesBeforePorf = bus.writeCalls;
+  st = rtc.clearPowerOnResetFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(writesBeforePorf, bus.writeCalls);
+
+  const uint32_t writesBeforeBsf = bus.writeCalls;
+  st = rtc.clearBackupSwitchFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_UINT32(writesBeforeBsf, bus.writeCalls);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(1u << RV3032::cmd::EEPROM_BUSY_BIT),
+                         bus.regs[RV3032::cmd::REG_TEMP_LSB]);
+}
+
+void test_clear_flag_helpers_write_only_target_flag_when_present() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.regs[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(
+      (1u << RV3032::cmd::STATUS_AF_BIT) |
+      (1u << RV3032::cmd::STATUS_PORF_BIT));
+  st = rtc.clearAlarmFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS,
+                         bus.writeRegLog[bus.writeLogCount - 1]);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(1u << RV3032::cmd::STATUS_PORF_BIT),
+                         bus.writeValueLog[bus.writeLogCount - 1]);
+
+  bus.regs[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(
+      (1u << RV3032::cmd::STATUS_PORF_BIT) |
+      (1u << RV3032::cmd::STATUS_VLF_BIT));
+  st = rtc.clearPowerOnResetFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS,
+                         bus.writeRegLog[bus.writeLogCount - 1]);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(1u << RV3032::cmd::STATUS_VLF_BIT),
+                         bus.writeValueLog[bus.writeLogCount - 1]);
+
+  bus.regs[RV3032::cmd::REG_TEMP_LSB] = static_cast<uint8_t>(
+      (1u << RV3032::cmd::TEMP_BSF_BIT));
+  st = rtc.clearBackupSwitchFlag();
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_TEMP_LSB,
+                         bus.writeRegLog[bus.writeLogCount - 1]);
+  TEST_ASSERT_EQUAL_HEX8(0u, bus.writeValueLog[bus.writeLogCount - 1]);
+}
+
+void test_clear_flag_helpers_reject_implicit_temperature_and_support_flag_clears() {
+  FakeI2cBus bus;
+  resetBus(bus);
+
+  RV3032::RV3032 rtc;
+  RV3032::Status st = rtc.begin(makeConfig(bus));
+  TEST_ASSERT_TRUE(st.ok());
+
+  bus.regs[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(
+      (1u << RV3032::cmd::STATUS_AF_BIT) |
+      (1u << RV3032::cmd::STATUS_THF_BIT));
+  const uint32_t writesBeforeTempGuard = bus.writeCalls;
+  st = rtc.clearAlarmFlag();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(writesBeforeTempGuard, bus.writeCalls);
+
+  st = rtc.clearStatus(static_cast<uint8_t>(
+      (1u << RV3032::cmd::STATUS_AF_BIT) |
+      (1u << RV3032::cmd::STATUS_THF_BIT)));
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS,
+                         bus.writeRegLog[bus.writeLogCount - 1]);
+  TEST_ASSERT_EQUAL_HEX8(0u, bus.writeValueLog[bus.writeLogCount - 1]);
+
+  bus.regs[RV3032::cmd::REG_TEMP_LSB] = static_cast<uint8_t>(
+      (1u << RV3032::cmd::TEMP_BSF_BIT) |
+      (1u << RV3032::cmd::EEPROM_BUSY_BIT));
+  const uint32_t writesBeforeBsfGuard = bus.writeCalls;
+  st = rtc.clearBackupSwitchFlag();
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::BUSY),
+                          static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(writesBeforeBsfGuard, bus.writeCalls);
 }
 
 void test_user_ram_helpers_round_trip_and_reject_invalid_ranges() {
@@ -1474,7 +1764,7 @@ int main(int, char**) {
   RUN_TEST(test_begin_rejects_non_default_address);
   RUN_TEST(test_begin_rejects_invalid_backup_mode);
   RUN_TEST(test_begin_rejects_invalid_eeprom_enabled_timeouts);
-  RUN_TEST(test_begin_probe_failure_maps_i2c_error_to_device_not_found);
+  RUN_TEST(test_begin_probe_failure_preserves_transport_errors);
   RUN_TEST(test_invalid_begin_after_success_resets_without_i2c);
   RUN_TEST(test_get_settings_snapshot);
   RUN_TEST(test_runtime_i2c_after_begin_updates_health);
@@ -1489,6 +1779,7 @@ int main(int, char**) {
   RUN_TEST(test_budgeted_set_timer_job_honors_instruction_budget);
   RUN_TEST(test_budgeted_register_update_job_honors_instruction_budget);
   RUN_TEST(test_budgeted_user_ram_write_job_chunks_large_write);
+  RUN_TEST(test_budgeted_job_aborts_when_driver_is_offline);
   RUN_TEST(test_default_config_keeps_eeprom_persistence_disabled);
   RUN_TEST(test_eeprom_poll_uses_one_instruction_per_call);
   RUN_TEST(test_eeprom_busy_timeout_restores_control_and_fails);
@@ -1503,11 +1794,18 @@ int main(int, char**) {
   RUN_TEST(test_eeprom_enabled_success_waits_while_busy_then_restores);
   RUN_TEST(test_eeprom_precommand_busy_timeout_restores_control);
   RUN_TEST(test_eeprom_restore_after_write_failure);
+  RUN_TEST(test_lifecycle_refuses_to_reset_active_eeprom_work);
+  RUN_TEST(test_same_value_eeprom_setter_reports_pending_or_failed_persistence);
+  RUN_TEST(test_eeprom_failure_stops_queue_and_preserves_first_error);
+  RUN_TEST(test_eeprom_cleanup_can_finish_after_offline_failure);
   RUN_TEST(test_eeprom_queue_full_does_not_change_ram_shadow);
   RUN_TEST(test_read_timestamp_decodes_evi_and_reset_sets_control_bit);
   RUN_TEST(test_read_timestamp_decodes_tlow_without_hundredths);
   RUN_TEST(test_read_timestamp_rejects_invalid_bcd);
   RUN_TEST(test_read_timestamp_rejects_invalid_calendar);
+  RUN_TEST(test_clear_flag_helpers_skip_writes_when_flags_are_absent);
+  RUN_TEST(test_clear_flag_helpers_write_only_target_flag_when_present);
+  RUN_TEST(test_clear_flag_helpers_reject_implicit_temperature_and_support_flag_clears);
   RUN_TEST(test_user_ram_helpers_round_trip_and_reject_invalid_ranges);
   RUN_TEST(test_public_block_register_access);
   RUN_TEST(test_public_block_register_access_rejects_invalid_params);

@@ -148,7 +148,9 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | Method | Description |
 |--------|-------------|
 | `DriverState state() const` | Current driver health state |
+| `DriverState driverState() const` | Alias of `state()` for cross-driver diagnostics |
 | `bool isOnline() const` | `true` in READY or DEGRADED |
+| `Status probe()` | Active diagnostic probe using raw I2C; does not update health counters |
 | `Status lastError() const` | Most recent tracked transport error |
 | `uint32_t lastOkMs() const` / `lastErrorMs() const` | Last success/error timestamps from the driver timebase |
 | `uint8_t consecutiveFailures() const` | Consecutive tracked failures since last success |
@@ -235,10 +237,10 @@ The library follows a **begin/tick/end** lifecycle with **Status** error handlin
 | `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
 | `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
 | `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
-| `Status readRegister(uint8_t reg, uint8_t& value)` | Read single register |
-| `Status writeRegister(uint8_t reg, uint8_t value)` | Write single register |
-| `Status readRegisters(uint8_t reg, uint8_t* buf, size_t len)` | Read contiguous register block |
-| `Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len)` | Write contiguous register block |
+| `Status readRegister(uint8_t reg, uint8_t& value)` | Diagnostic/control read of one register |
+| `Status writeRegister(uint8_t reg, uint8_t value)` | Diagnostic/control write of one register |
+| `Status readRegisters(uint8_t reg, uint8_t* buf, size_t len)` | Diagnostic/control read of a contiguous register block |
+| `Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len)` | Diagnostic/control write of a contiguous register block |
 
 ### Static Utility Functions
 
@@ -280,7 +282,7 @@ namespace RV3032 {
 - `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
 - Invalid `backupMode` enum values are rejected by `begin()` before any I2C access.
 - `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
-- `enableEepromWrites`: Defaults to `false`. When `false`, config changes are RAM-only (faster, saves EEPROM wear). Set `true` only when config changes must persist across power loss; persistence completes asynchronously.
+- `enableEepromWrites`: Defaults to `false`. When `false`, EEPROM-backed config changes are RAM-only (faster, saves EEPROM wear). Set `true` only when backup PMU, clock output, or offset changes must persist across power loss; persistence completes asynchronously. `begin()` may queue EEPROM work if the requested backup mode differs from the current RAM mirror.
 - `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
 - `nowMs` / `timeUser`: Optional injected timebase used for health timestamps. If omitted, health timestamps stay at 0; EEPROM deadlines use the `tick(now_ms)` argument.
 - `offlineThreshold`: Consecutive tracked I2C failures required before transitioning to `OFFLINE`
@@ -341,7 +343,7 @@ if (!st.ok()) {
 
 **Health / Recovery:** `OFFLINE` is latched. Normal public I2C operations and EEPROM `tick()` work do not touch the bus while OFFLINE; call `recover()` after application-level bus recovery to return to `READY`.
 
-**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` validate documented RV3032 address windows, reject wraparound and invalid buffers, and do not count local validation failures against driver health.
+**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` are diagnostic/control helpers, not the preferred application API for time, alarm, timer, status, or EEPROM flows. They validate documented RV3032 address windows, reject wraparound and invalid buffers, use tracked I2C bounded by `Config::i2cTimeoutMs`, and do not count local validation failures against driver health. Direct writes to status, control, or EEPROM-command registers can clear flags, change RTC behavior, or trigger chip operations.
 
 **EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
 - `setClkoutEnabled()` / `setClkoutFrequency()`
@@ -349,6 +351,8 @@ if (!st.ok()) {
 - Backup mode changes in `begin()`, `setBackupSwitchMode()`, and `setPrimaryBatteryBackupDefaults()`
 
 EEPROM persistence is opt-in and asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
+
+These EEPROM-backed setters are control/setup operations. They first update the RAM mirror through bounded I2C and, when persistence is enabled, queue a wear-limited EEPROM commit that completes through the deadline-driven EEPROM state machine. They should not be treated as ordinary fast register writes in steady polling paths.
 
 **Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI command `backup usual` applies those PMU settings, then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
 
@@ -437,8 +441,12 @@ AGENTS.md               - Coding guidelines
 - `docs/ARCHITECTURE.md` - lifecycle, health, transport, budget, and EEPROM policy
 - `docs/DEVICE_REFERENCE.md` - device register, flag, timestamp, EEPROM, and timing notes
 - `docs/IDF_PORT.md` - ESP-IDF adapter guidance
+- `docs/reports/HIL_SUMMARY.md` - concise hardware-in-the-loop evidence summary
 - `docs/extracted-md/` - curated vendor-document review notes retained for traceability
 - `docs/reference-pdfs/` - vendor datasheet and application manual
+
+Raw HIL runner JSON, generated step tables, stdout/stderr captures, and full
+serial transcripts are not kept in the repository.
 
 ## Contributing
 

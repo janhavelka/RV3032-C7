@@ -92,6 +92,10 @@ static const char* errToStr(RV3032::Err code) {
     case RV3032::Err::QUEUE_FULL:           return "QUEUE_FULL";
     case RV3032::Err::BUSY:                 return "BUSY";
     case RV3032::Err::IN_PROGRESS:          return "IN_PROGRESS";
+    case RV3032::Err::I2C_NACK_ADDR:        return "I2C_NACK_ADDR";
+    case RV3032::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
+    case RV3032::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
+    case RV3032::Err::I2C_BUS:              return "I2C_BUS";
     default: return "UNKNOWN";
   }
 }
@@ -350,12 +354,12 @@ static void print_help() {
   cli::printHelpSection("Status And Registers");
   cli::printHelpItem("status", "Read status register");
   cli::printHelpItem("statusf", "Read decoded status flags");
-  cli::printHelpItem("status_clear [mask]", "Clear status flags by mask (default 0xFF)");
+  cli::printHelpItem("status_clear <mask>", "Clear status flags by explicit mask");
   cli::printHelpItem("validity", "Read PORF/VLF/BSF validity flags");
   cli::printHelpItem("ram [offset len]", "Dump user RAM (default all 16 bytes)");
   cli::printHelpItem("ram_write <offset> <byte...>", "Write user RAM bytes");
   cli::printHelpItem("reg <addr>", "Read register byte");
-  cli::printHelpItem("reg <addr> <val>", "Write register byte");
+  cli::printHelpItem("reg <addr> <val> [confirm]", "Write register byte; confirm required outside user RAM");
   cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
   cli::printHelpItem("backup [usual|off|level|direct]", "Show or set battery backup PMU");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
@@ -392,6 +396,21 @@ static void print_datetime(const RV3032::DateTime& dt) {
                 dt.weekday);
 }
 
+static void warn_if_time_invalid() {
+  RV3032::ValidityFlags flags;
+  RV3032::Status st = g_rtc.readValidity(flags);
+  if (!st.ok()) {
+    LOGW("Time validity check failed: %s", st.msg);
+    return;
+  }
+  if (flags.timeInvalid) {
+    LOGW("RTC time may be invalid (PORF=%d, VLF=%d, BSF=%d)",
+         flags.powerOnReset ? 1 : 0,
+         flags.voltageLow ? 1 : 0,
+         flags.backupSwitched ? 1 : 0);
+  }
+}
+
 /**
  * @brief Handle 'time' command - read current time.
  */
@@ -405,6 +424,7 @@ static void cmd_time() {
   }
   Serial.print(F("Current time: "));
   print_datetime(dt);
+  warn_if_time_invalid();
 }
 
 /**
@@ -473,6 +493,7 @@ static void cmd_unix(const String& args) {
       return;
     }
     Serial.printf("Unix timestamp: %lu\n", static_cast<unsigned long>(ts));
+    warn_if_time_invalid();
     return;
   }
 
@@ -911,15 +932,18 @@ static void cmd_statusf() {
 }
 
 static void cmd_status_clear(const String& args) {
-  uint8_t mask = 0xFF;
-  if (args.length() > 0) {
-    const unsigned long parsed = strtoul(args.c_str(), nullptr, 0);
-    if (parsed > 0xFFUL) {
-      LOGE("Usage: status_clear [mask 0..0xFF]");
-      return;
-    }
-    mask = static_cast<uint8_t>(parsed);
+  if (args.length() == 0) {
+    LOGE("Usage: status_clear <mask 0..0xFF>");
+    return;
   }
+
+  const unsigned long parsed = strtoul(args.c_str(), nullptr, 0);
+  if (parsed > 0xFFUL) {
+    LOGE("Usage: status_clear <mask 0..0xFF>");
+    return;
+  }
+  const uint8_t mask = static_cast<uint8_t>(parsed);
+
   RV3032::Status st = g_rtc.clearStatus(mask);
   if (!st.ok()) {
     LOGE("clearStatus() failed: %s", st.msg);
@@ -940,6 +964,15 @@ static void cmd_reg(const String& args) {
   const String addrTok = (split >= 0) ? trimmed.substring(0, split) : trimmed;
   String valueTok = (split >= 0) ? trimmed.substring(split + 1) : "";
   valueTok.trim();
+  String confirmTok;
+  const int valueSplit = valueTok.indexOf(' ');
+  if (valueSplit >= 0) {
+    confirmTok = valueTok.substring(valueSplit + 1);
+    valueTok = valueTok.substring(0, valueSplit);
+    valueTok.trim();
+    confirmTok.trim();
+    confirmTok.toLowerCase();
+  }
 
   const unsigned long addrRaw = strtoul(addrTok.c_str(), nullptr, 0);
   if (addrRaw > 0xFFUL) {
@@ -962,6 +995,13 @@ static void cmd_reg(const String& args) {
   const unsigned long valueRaw = strtoul(valueTok.c_str(), nullptr, 0);
   if (valueRaw > 0xFFUL) {
     LOGE("Register value out of range");
+    return;
+  }
+
+  const bool userRamReg = (reg >= RV3032::cmd::REG_USER_RAM_START &&
+                           reg <= RV3032::cmd::REG_USER_RAM_END);
+  if (!userRamReg && confirmTok != "confirm") {
+    LOGE("Register writes outside user RAM require: reg <addr> <value> confirm");
     return;
   }
 
@@ -1863,8 +1903,9 @@ static void cmd_selftest() {
   st = g_rtc.getOffsetPpm(offset);
   reportCheck("getOffsetPpm", st.ok(), st.ok() ? "" : st.msg);
 
-  st = g_rtc.recover();
-  reportCheck("recover", st.ok(), st.ok() ? "" : st.msg);
+  if (g_rtc.state() == RV3032::DriverState::OFFLINE) {
+    reportSkip("recover", "selftest is read-only; use recover command");
+  }
   reportCheck("isOnline", g_rtc.isOnline(), "");
 
   Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",

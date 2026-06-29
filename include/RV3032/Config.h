@@ -76,7 +76,9 @@ struct Config {
   BackupSwitchMode backupMode = BackupSwitchMode::Level;
 
   /// @brief Enable automatic EEPROM write for persistent config changes (default: false)
-  /// @note When true, config changes (clock output, offset) persist across power loss.
+  /// @note When true, EEPROM-backed config changes (backup PMU, clock output,
+  ///       offset) persist across power loss. begin() may queue persistence if
+  ///       the requested backupMode differs from the current RAM mirror.
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
   ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
   ///       until tick() completes the EEPROM update.
