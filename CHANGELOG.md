@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The CLI example now applies primary-cell backup settings at startup, disables the internal trickle charger, and persists changed PMU settings through the managed EEPROM state machine.
+
 ## [1.6.0] - 2026-06-29
 
 ### Added

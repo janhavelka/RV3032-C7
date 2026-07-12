@@ -354,7 +354,7 @@ EEPROM persistence is opt-in and asynchronous. Methods that trigger persistence 
 
 These EEPROM-backed setters are control/setup operations. They first update the RAM mirror through bounded I2C and, when persistence is enabled, queue a wear-limited EEPROM commit that completes through the deadline-driven EEPROM state machine. They should not be treated as ordinary fast register writes in steady polling paths.
 
-**Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI command `backup usual` applies those PMU settings, then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
+**Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI example applies and persists those PMU settings during startup; `backup usual` can reapply them manually. Then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
 
 EEPROM has ~100k write endurance. Keep `enableEepromWrites = false` for normal runtime control paths. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
 
@@ -370,6 +370,7 @@ EEPROM has ~100k write endurance. Keep `enableEepromWrites = false` for normal r
 ### 01_basic_bringup_cli
 
 Interactive CLI demonstrating all RTC features:
+- Persistent primary-cell setup at startup (level switchover, internal trickle charger off)
 - Time reading and setting
 - Alarm configuration
 - Timer operations

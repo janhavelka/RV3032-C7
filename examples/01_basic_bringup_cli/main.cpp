@@ -28,6 +28,7 @@
 
 static RV3032::RV3032 g_rtc;
 static bool g_verbose = false;  // Verbose mode - disabled by default for production examples
+static bool g_backupConfigCommitPending = false;
 
 static uint32_t rtc_now_ms(void*) {
   return millis();
@@ -2037,7 +2038,8 @@ void setup() {
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
   cfg.nowMs = rtc_now_ms;
-  cfg.enableEepromWrites = false;
+  cfg.backupMode = RV3032::BackupSwitchMode::Level;
+  cfg.enableEepromWrites = true;
 
   RV3032::Status st = g_rtc.begin(cfg);
   if (!st.ok()) {
@@ -2048,14 +2050,45 @@ void setup() {
   }
 
   LOGI("RTC initialized successfully");
+
+  // Configure a non-rechargeable backup cell and persist the PMU setting.
+  // The helper preserves CLKOUT, selects level switchover, and disables charging.
+  st = g_rtc.setPrimaryBatteryBackupDefaults();
+  if (!st.ok() && !st.inProgress()) {
+    LOGE("Primary battery backup configuration failed: %s (code=%s, detail=%ld)",
+         st.msg, errToStr(st.code), static_cast<long>(st.detail));
+    return;
+  }
+
+  g_backupConfigCommitPending = g_rtc.isEepromBusy();
+  if (g_backupConfigCommitPending) {
+    LOGI("Saving primary battery settings to EEPROM: level switchover, charger off");
+  } else {
+    LOGI("Primary battery settings already active: level switchover, charger off");
+  }
+
   LOGI("Driver state: %s", stateToStr(g_rtc.state()));
   LOGI("Type 'help' for available commands");
   LOGI("Type 'drv' for driver health, 'verbose 1' for detailed output");
-  cli::printPrompt();
+  if (!g_backupConfigCommitPending) {
+    cli::printPrompt();
+  }
 }
 
 void loop() {
   g_rtc.tick(millis());
+
+  if (g_backupConfigCommitPending && !g_rtc.isEepromBusy()) {
+    g_backupConfigCommitPending = false;
+    const RV3032::Status st = g_rtc.getEepromStatus();
+    if (st.ok()) {
+      LOGI("Primary battery settings saved to EEPROM");
+    } else {
+      LOGE("Primary battery EEPROM save failed: %s (code=%s, detail=%ld)",
+           st.msg, errToStr(st.code), static_cast<long>(st.detail));
+    }
+    cli::printPrompt();
+  }
 
   const String line = read_line();
   if (line.length() > 0) {
