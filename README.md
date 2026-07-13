@@ -1,474 +1,262 @@
 # RV3032-C7
 
-Robust **ESP32 (S2/S3)** driver for **Micro Crystal RV-3032-C7** real-time clock module using **Arduino framework** with **PlatformIO**.
+Production-oriented RV-3032-C7 RTC driver for ESP32-S2/S3, Arduino, and
+PlatformIO. The core owns no I2C peripheral, pins, task, lock, logging sink, or
+heap allocation. Applications inject bounded transport and timing callbacks.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
-## Features
+## Design contract
 
-- **Ultra-low power RTC** with battery backup (<1 uA typical)
-- **Temperature compensated** crystal oscillator (TCXO)
-- **Alarm functionality** with INT pin output
-- **Periodic countdown timer** with programmable frequency
-- **External event input configuration** (EVI edge/debounce/overwrite)
-- **Programmable CLKOUT** output (32.768 kHz to 1 Hz)
-- **Frequency offset calibration** (+/-200 ppm range)
-- **Built-in temperature sensor** (+/-3 C accuracy)
-- **EEPROM** for persistent configuration
-- **Deterministic lifecycle** with begin/tick/end and non-blocking EEPROM handling
-- **Unix timestamp** support
-- **No heap allocation** in steady state
+- `begin()` validates and binds callbacks with exactly zero device I/O.
+- `probe()` is the explicit one-read presence check.
+- `recover()` is one tracked read-only health re-probe; physical bus recovery
+  and retry policy remain application-owned.
+- `OFFLINE` is an observational health label and never suppresses the next
+  valid requested operation.
+- Single-transfer calendar helpers remain available. Composite calendar,
+  timer, control, RAM, and persistent work is cooperative through
+  `start...Job()` plus `pollJob()` or `pollEeprom()`.
+- One counted instruction is one library transport callback. Budgets `0`, `1`,
+  and larger bounded values are honored.
+- `ensurePrimaryCellConfiguration()` is the sole synchronous multi-callback
+  exception. It is explicit, once per begin/end lifecycle, deadline-bounded,
+  and uses an injected yielding wait callback.
+- No operation performs application bus recovery or blindly retries a possibly
+  mutating transfer.
 
-## Hardware
+## Memory model
 
-**RV-3032-C7** specifications:
-- I2C interface (address: 0x51)
-- Supply voltage: 1.1V - 5.5V
-- Timekeeping current: <200 nA (typical)
-- Backup current: <45 nA (typical)
-- Temperature range: -40 C to +85 C
-- Accuracy: +/-5 ppm (with calibration)
+The chip has several different storage classes:
 
-**Typical wiring (ESP32):**
-```
-RV-3032   ESP32
-------    -----
-SDA   ->  GPIO8 (or custom)
-SCL   ->  GPIO9 (or custom)
-VDD   ->  3.3V
-VSS   ->  GND
-VBAT  ->  CR2032 battery +
-```
+| Range | Storage | Access |
+| --- | --- | --- |
+| `0x00..0x4F` | Direct volatile registers and 16-byte user RAM | Direct register transfers, subject to public allowlists |
+| `0xC0..0xCA` | Active configuration mirrors | Direct active behavior; not durable proof |
+| `0xC0..0xCA` | Configuration EEPROM | Indirect `EEADDR`/`EEDATA`/`EECMD` access |
+| `0xCB..0xEA` | 32-byte user EEPROM | Indirect access only |
 
-## Quickstart
+There is no FRAM. Time is maintained by the RTC counter while the backup supply
+is valid; the calendar is not stored in EEPROM.
+
+Configuration EEPROM endurance is finite: **10,000 writes at 3.0 V/25 C** and
+**100 writes at 5.5 V/85 C**. Persistent mutation therefore compares first,
+issues at most one write-one command per byte, and directly verifies durability.
+
+## Quick start
 
 ```cpp
 #include <Wire.h>
 #include "RV3032/RV3032.h"
-#include "examples/common/BoardConfig.h"  // Example-only defaults + Wire adapter
 
 RV3032::RV3032 rtc;
 
-static uint32_t rtcNowMs(void*) {
-  return millis();
-}
+static uint32_t nowMs(void*) { return millis(); }
+static void waitMs(uint32_t delayMs, void*) { delay(delayMs); }
 
 void setup() {
-  Serial.begin(115200);
-  board::initI2c();  // Initialize I2C (example defaults)
-
-  // Configure RTC
-  RV3032::Config cfg;
-  cfg.i2cWrite = transport::wireWrite;
-  cfg.i2cWriteRead = transport::wireWriteRead;
+  RV3032::Config cfg{};
+  cfg.i2cWrite = mySingleAttemptWrite;
+  cfg.i2cWriteRead = myBoundedRead;
   cfg.i2cUser = &Wire;
-  cfg.nowMs = rtcNowMs;
-  cfg.backupMode = RV3032::BackupSwitchMode::Level;
+  cfg.nowMs = nowMs;
+  cfg.waitMs = waitMs;
+  cfg.timeUser = nullptr;
+  cfg.i2cTimeoutMs = 5;
   cfg.enableEepromWrites = false;
 
-  // Initialize RTC
-  RV3032::Status st = rtc.begin(cfg);
-  if (!st.ok()) {
-    Serial.printf("RTC init failed: %s\n", st.msg);
-    return;
-  }
-
-  // Set time from build timestamp (first boot only)
-  RV3032::DateTime now;
-  if (RV3032::RV3032::parseBuildTime(now)) {
-    rtc.setTime(now);
-  }
+  RV3032::Status st = rtc.begin(cfg);   // validates/binds; zero I2C
+  if (!st.ok()) return;
+  st = rtc.probe();                     // explicit presence evidence
+  if (!st.ok()) return;
 }
 
 void loop() {
-  rtc.tick(millis());  // Cooperative update (non-blocking)
-
-  // Read time every second
-  RV3032::DateTime dt;
-  if (rtc.readTime(dt).ok()) {
-    Serial.printf("%04d-%02d-%02d %02d:%02d:%02d\n",
-                  dt.year, dt.month, dt.day,
-                  dt.hour, dt.minute, dt.second);
+  rtc.tick(millis());                   // generic persistence only
+  if (rtc.isJobBusy()) {
+    uint8_t used = 0;
+    rtc.pollJob(millis(), 1, used);     // at most one library callback
   }
-  delay(1000);
 }
 ```
 
-## Versioning
+`waitMs` is optional for ordinary cooperative use. It is required only by the
+explicit synchronous primary-cell ensure operation and must sleep/yield rather
+than spin or perform I2C.
 
-The library version is defined in [library.json](library.json). A pre-build script automatically generates `include/RV3032/Version.h` with version constants.
+## Calendar APIs
 
-**Print version in your code:**
-```cpp
-#include "RV3032/Version.h"
+`readTime()` and `setTime()` each perform one calendar burst. `readTime()`
+strictly rejects reserved bits, invalid BCD/calendar fields, and a weekday that
+does not match the date. These helpers do not inspect or clear Status flags.
 
-Serial.println(RV3032::VERSION);           // "<semver>"
-Serial.println(RV3032::VERSION_FULL);      // "<semver> (<git>, <timestamp>)"
-Serial.println(RV3032::BUILD_TIMESTAMP);   // "<YYYY-MM-DD hh:mm:ss>"
-Serial.println(RV3032::GIT_COMMIT);        // "<git>"
-```
-
-**Update version:** Edit `library.json` only. `Version.h` is auto-generated on every build.
-
-## API
-
-The library follows a **begin/tick/end** lifecycle with **Status** error handling:
-
-### Core Methods
-
-| Method | Description |
-|--------|-------------|
-| `Status begin(const Config&)` | Initialize RTC with configuration |
-| `void tick(uint32_t now_ms)` | Cooperative update, call from `loop()` |
-| `void end()` | Stop and release resources |
-| `bool isInitialized() const` | Check if RTC initialized |
-| `const Config& getConfig() const` | Get current configuration |
-| `Status getSettings(SettingsSnapshot& out)` | Populate a snapshot of cached config, EEPROM state, and health counters (no I2C) |
-| `Status recover()` | Re-probe the RTC and return the driver to READY on success |
-| `bool isEepromBusy() const` | Check if EEPROM persistence is active |
-| `Status getEepromStatus() const` | Get last EEPROM persistence status |
-| `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
-| `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
-| `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
-| `Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& used)` | Advance EEPROM persistence with explicit instruction accounting |
-
-### Budgeted Job Operations
-
-| Method | Description |
-|--------|-------------|
-| `bool isJobBusy() const` | Check if a non-EEPROM budgeted job is active |
-| `Status getJobStatus() const` | Get current or last non-EEPROM job status |
-| `Status startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable)` | Stage timer configuration for `pollJob()` |
-| `Status startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t setMask)` | Stage a simple masked register read-modify-write |
-| `Status startWriteUserRamJob(uint8_t offset, const uint8_t* buf, size_t len)` | Stage a user RAM write, chunking writes over 15 bytes |
-| `Status pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& used)` | Advance the active non-EEPROM job by up to `maxInstructions` I2C instructions |
-
-### Health / Recovery
-
-| Method | Description |
-|--------|-------------|
-| `DriverState state() const` | Current driver health state |
-| `DriverState driverState() const` | Alias of `state()` for cross-driver diagnostics |
-| `bool isOnline() const` | `true` in READY or DEGRADED |
-| `Status probe()` | Active diagnostic probe using raw I2C; does not update health counters |
-| `Status lastError() const` | Most recent tracked transport error |
-| `uint32_t lastOkMs() const` / `lastErrorMs() const` | Last success/error timestamps from the driver timebase |
-| `uint8_t consecutiveFailures() const` | Consecutive tracked failures since last success |
-| `uint32_t totalSuccess() const` / `totalFailures() const` | Lifetime tracked I2C counters |
-
-### Time/Date Operations
-
-| Method | Description |
-|--------|-------------|
-| `Status readTime(DateTime& out)` | Read current time and date |
-| `Status setTime(const DateTime& time)` | Set RTC time and date |
-| `Status readUnix(uint32_t& out)` | Read time as Unix timestamp |
-| `Status setUnix(uint32_t ts)` | Set time from Unix timestamp |
-
-### Alarm Operations
-
-| Method | Description |
-|--------|-------------|
-| `Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date)` | Set alarm time values |
-| `Status setAlarmMatch(bool minute, bool hour, bool date)` | Configure which components match |
-| `Status getAlarmConfig(AlarmConfig& out)` | Read alarm configuration |
-| `Status getAlarmFlag(bool& triggered)` | Check if alarm triggered |
-| `Status clearAlarmFlag()` | Clear alarm flag |
-| `Status enableAlarmInterrupt(bool enable)` | Enable/disable INT pin output |
-
-`getAlarmConfig()` reports `AlarmConfig::date == 0` for the RV3032-C7 reset/default alarm state where the date alarm register is `00h` and the alarm function is inactive.
-
-### Timer Operations
-
-| Method | Description |
-|--------|-------------|
-| `Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable)` | Configure countdown timer |
-| `Status getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled)` | Read timer configuration |
-
-### Clock Output
-
-| Method | Description |
-|--------|-------------|
-| `Status setClkoutEnabled(bool enabled)` | Enable/disable CLKOUT pin |
-| `Status setClkoutFrequency(ClkoutFrequency freq)` | Set output frequency (32.768 kHz to 1 Hz) |
-| `Status getClkoutEnabled(bool& enabled)` | Check if CLKOUT enabled |
-| `Status getClkoutFrequency(ClkoutFrequency& freq)` | Read output frequency |
-
-### Calibration
-
-| Method | Description |
-|--------|-------------|
-| `Status setOffsetPpm(float ppm)` | Set frequency offset in parts-per-million |
-| `Status getOffsetPpm(float& ppm)` | Read frequency offset |
-
-### Temperature Sensor
-
-| Method | Description |
-|--------|-------------|
-| `Status readTemperatureC(float& celsius)` | Read die temperature (+/-3 C accuracy) |
-
-### External Event Input
-
-| Method | Description |
-|--------|-------------|
-| `Status setEviEdge(bool rising)` | Set edge sensitivity (rising/falling) |
-| `Status setEviDebounce(EviDebounce debounce)` | Set debounce filter |
-| `Status setEviOverwrite(bool enable)` | Allow overwriting timestamps |
-| `Status getEviConfig(EviConfig& out)` | Read EVI configuration |
-| `Status readTimestamp(TimestampSource source, Timestamp& out)` | Read and decode a hardware timestamp block |
-| `Status resetTimestamp(TimestampSource source)` | Reset one hardware timestamp block |
-
-### Status & Low-Level
-
-| Method | Description |
-|--------|-------------|
-| `Status setBackupSwitchMode(BackupSwitchMode mode)` | Set battery-backup switchover mode |
-| `Status setPrimaryBatteryBackupDefaults()` | Apply primary-cell backup defaults: level switching, trickle charger off |
-| `Status getBackupSwitchMode(BackupSwitchMode& mode)` | Read backup switchover mode from PMU |
-| `Status readStatus(uint8_t& status)` | Read status register |
-| `Status clearStatus(uint8_t mask)` | Clear status flags |
-| `Status readStatusFlags(StatusFlags& out)` | Read decoded status flags |
-| `Status readValidity(ValidityFlags& out)` | Read PORF/VLF/BSF validity flags |
-| `Status clearBackupSwitchFlag()` | Clear backup switchover flag (BSF) |
-| `Status clearPowerOnResetFlag()` | Clear the PORF validity flag after handling a reset event |
-| `Status clearVoltageLowFlag()` | Clear the VLF validity flag after voltage monitoring |
-| `bool isEepromBusy() const` | Check if EEPROM commit is in progress |
-| `Status getEepromStatus() const` | Get last EEPROM commit status |
-| `uint32_t eepromWriteCount() const` | Get successful EEPROM commit count |
-| `uint32_t eepromWriteFailures() const` | Get failed EEPROM commit count |
-| `uint8_t eepromQueueDepth() const` | Get EEPROM queue depth |
-| `Status readRegister(uint8_t reg, uint8_t& value)` | Diagnostic/control read of one register |
-| `Status writeRegister(uint8_t reg, uint8_t value)` | Diagnostic/control write of one register |
-| `Status readRegisters(uint8_t reg, uint8_t* buf, size_t len)` | Diagnostic/control read of a contiguous register block |
-| `Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len)` | Diagnostic/control write of a contiguous register block |
-
-### Static Utility Functions
-
-| Method | Description |
-|--------|-------------|
-| `static bool isValidDateTime(const DateTime& time)` | Validate date/time structure |
-| `static uint8_t computeWeekday(uint16_t year, uint8_t month, uint8_t day)` | Calculate day of week |
-| `static bool parseBuildTime(DateTime& out)` | Parse __DATE__ and __TIME__ macros |
-| `static uint8_t bcdToBinary(uint8_t bcd)` | Convert BCD to binary |
-| `static uint8_t binaryToBcd(uint8_t bin)` | Convert binary to BCD |
-| `static bool unixToDateTime(uint32_t ts, DateTime& out)` | Convert Unix timestamp to DateTime |
-| `static bool dateTimeToUnix(const DateTime& time, uint32_t& out)` | Convert DateTime to Unix timestamp |
-
-## Configuration
-
-Configuration is injected via `Config` struct. The library **never hardcodes pins**.
+Applications needing stronger evidence use:
 
 ```cpp
-namespace RV3032 {
-  struct Config {
-    I2cWriteFn i2cWrite = nullptr;               // I2C write callback (required)
-    I2cWriteReadFn i2cWriteRead = nullptr;       // I2C write-read callback (required)
-    void* i2cUser = nullptr;                     // User context (e.g., TwoWire*)
-    NowMsFn nowMs = nullptr;                     // Optional monotonic clock callback
-    void* timeUser = nullptr;                    // User context for timing callback
-    uint8_t i2cAddress = 0x51;                   // RV3032 I2C address
-    uint32_t i2cTimeoutMs = 50;                  // I2C transaction timeout
-    BackupSwitchMode backupMode = BackupSwitchMode::Level;  // Battery backup mode
-    bool enableEepromWrites = false;             // Persistent config opt-in (EEPROM)
-    uint32_t eepromTimeoutMs = 100;              // EEPROM write timeout
-    uint8_t offlineThreshold = 5;                // Failures before OFFLINE
-  };
-}
+rtc.startReadTimeSnapshotJob(nowMs, 100);
+rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, nowMs, 250);
+
+uint8_t used = 0;
+RV3032::Status st = rtc.pollJob(nowMs, 1, used);
 ```
 
-**Configuration rules:**
-- `i2cWrite` and `i2cWriteRead` must be provided before `begin()`
-- `i2cAddress`: Fixed at `0x51` on RV3032-C7 hardware
-- `backupMode`: Off=no backup, Level=threshold (default), Direct=immediate
-- Invalid `backupMode` enum values are rejected by `begin()` before any I2C access.
-- `i2cTimeoutMs`: Passed to the transport callback (default 50ms); must be >= 50ms when EEPROM writes are enabled.
-- `enableEepromWrites`: Defaults to `false`. When `false`, EEPROM-backed config changes are RAM-only (faster, saves EEPROM wear). Set `true` only when backup PMU, clock output, or offset changes must persist across power loss; persistence completes asynchronously. `begin()` may queue EEPROM work if the requested backup mode differs from the current RAM mirror.
-- `eepromTimeoutMs`: Maximum time for EEPROM writes to complete (default 100ms)
-- `nowMs` / `timeUser`: Optional injected timebase used for health timestamps. If omitted, health timestamps stay at 0; EEPROM deadlines use the `tick(now_ms)` argument.
-- `offlineThreshold`: Consecutive tracked I2C failures required before transitioning to `OFFLINE`
+The snapshot reads Status before the calendar and short-circuits when PORF or
+VLF is set. The verified setter writes once, reconciles an ambiguous callback by
+readback, accepts the requested value or exactly one second later, reads fresh
+Status, explicitly clears PORF/VLF, records the unavoidable THF/TLF clearing,
+and verifies final Status/calendar state.
 
-## Error Handling
+## Persistent APIs
 
-All library functions return `Status` struct:
+Explicit reads work even when generic writes are disabled:
+
+```cpp
+rtc.startReadConfigurationEepromJob(
+    RV3032::ConfigurationEepromRegister::PMU, nowMs);
+rtc.startReadUserEepromJob(offset, length, nowMs);
+```
+
+User EEPROM writes require `Config::enableEepromWrites=true`:
+
+```cpp
+rtc.startWriteUserEepromJob(offset, data, length, nowMs, 4000);
+```
+
+Public user EEPROM offsets are `0..31`; each job is limited to 16 bytes. The
+library copies write input into fixed storage at admission. Reads use an
+adaptive two-read staging proof. Each changed byte is written with at most one
+`0x21` write-one attempt, reconciled after ambiguous callback failure, and
+directly read back. Generic persistence never uses update-all `0x11` or
+refresh-all `0x12`.
+
+Configuration setters can update active mirrors while persistence is disabled.
+When enabled, supported setters queue fixed-capacity durable updates. While the
+EEPROM engine is idle, another persistence-producing setter may run even when
+entries are queued; unrelated jobs remain blocked. Capacity is checked before
+active mutation, and an exact request coalesces only with the newest pending
+value for that address, preserving FIFO final-state intent. The application
+advances durable work with `tick()` or `pollEeprom()`. Once a hard operation
+deadline is reached, no further callback
+is started. If access-state cleanup was still required, the terminal error is
+`EEPROM_CLEANUP_FAILED` so an unproven safe state is never reported as a plain
+timeout. That terminal cleanup failure cancels remaining queued items and does
+not start another EEPROM command; the application must decide when it is safe
+to re-admit persistence work.
+
+## Primary-cell configuration
+
+Battery chemistry is application policy. The library never provisions from
+`begin()`, `probe()`, `recover()`, `tick()`, a setter, or a calendar job.
+
+An authorized application may explicitly call:
+
+```cpp
+RV3032::PrimaryCellConfigurationReport report{};
+RV3032::Status st = rtc.ensurePrimaryCellConfiguration(report);
+```
+
+This operation requires single-attempt transport callbacks plus `nowMs` and
+`waitMs`. It rejects active cooperative work without consuming its lifecycle
+attempt. It directly reads persistent C0 before deciding and uses the exact
+target:
+
+```text
+(persistentC0 & 0x4C) | 0x20
+```
+
+This preserves NCLKE and TCR, clears reserved bit 7 and TCM, and selects level
+switching. Correct state causes zero write-one commands. Incorrect state causes
+at most one C0 write-one, followed by busy/EEF checks and a second direct
+persistent read. Trusted cleanup restores active target state, clears EERD, and
+honors the 10 ms level-switch settle. Untrusted communicable failure holds
+verified BSM00/TCM00 and EERD=1 where possible; that volatile hold is not
+deployment-ready and does not survive POR.
+
+Application-manual page 141 shows `TCR=00` in black as the unchanged delivery
+value and `TCM=00` in red as the primary-cell safety setting. Charging is
+disabled by TCM, so this helper preserves an existing inactive TCR selection
+instead of resetting it.
+
+The call is allowed once per successful begin/end lifecycle. A second call
+returns `PRIMARY_CELL_ALREADY_ATTEMPTED` with zero callbacks. A later explicit
+attempt requires `end()` followed by a new successful `begin()` and always
+re-reads actual chip state.
+
+The generic CLI example does not provision at startup. It requires the exact
+operator command:
+
+```text
+primary-cell ensure CONFIRM-PRIMARY-CELL
+```
+
+## Capability coverage
+
+Typed APIs cover calendar/Unix conversion, alarm/AIE/AF, countdown timer/TIE/TF,
+periodic update/UIE/UF, event input/EIE/EVF/timestamps, temperature thresholds
+and events, coherent two-sample temperature reads and THF/TLF handling,
+complete XTAL/HF CLKOUT configuration and typed CLKF read/clear, signed offset
+calibration,
+independent BSM/TCM/TCR, BSIE/BSF, STOP/ESYN/GP bits, Status/reset/validity,
+user RAM, configuration/user EEPROM, password/protection evidence, and passive
+health diagnostics.
+
+Raw diagnostics are intentionally narrow. Reads are limited to documented
+direct ranges. Writes are limited to temperature thresholds and volatile user
+RAM; they cannot reach calendar, alarm, timer, Status/control, password, EEPROM
+staging/command, indirect EEPROM, read-only, or reserved registers. Use typed
+methods for side-effecting features.
+
+## Status and health
+
+All fallible APIs return:
 
 ```cpp
 struct Status {
-  Err code;           // Error category (OK, I2C_ERROR, TIMEOUT, ...)
-  int32_t detail;     // I2C error code or vendor detail
-  const char* msg;    // Static error message (never heap-allocated)
-
-  bool ok() const;    // Returns true if code == Err::OK
+  Err code;
+  int32_t detail;
+  const char* msg; // static storage only
 };
 ```
 
-**Error codes:**
-- `OK` - Operation successful
-- `NOT_INITIALIZED` - Call `begin()` first
-- `INVALID_CONFIG` - Invalid configuration parameter
-- `I2C_ERROR` - I2C communication failure
-- `TIMEOUT` - Operation timed out (EEPROM write)
-- `INVALID_PARAM` - Invalid parameter value
-- `INVALID_DATETIME` - Invalid date/time value
-- `DEVICE_NOT_FOUND` - RTC not responding on I2C bus
-- `EEPROM_WRITE_FAILED` - EEPROM update failed
-- `REGISTER_READ_FAILED` - Register read failed
-- `REGISTER_WRITE_FAILED` - Register write failed
-- `IN_PROGRESS` - EEPROM persistence queued or active
-- `QUEUE_FULL` - EEPROM persistence queue full
-- `I2C_NACK_ADDR` - I2C address not acknowledged
-- `I2C_NACK_DATA` - I2C data byte not acknowledged
-- `I2C_TIMEOUT` - I2C transaction timed out
-- `I2C_BUS` - I2C bus error (arbitration lost, stuck bus, etc.)
+No exceptions are used. Transport success/failure is recorded only inside the
+tracked wrappers. Validation, precondition failures, and raw `probe()` do not
+change health counters. `READY` after `begin()` means callbacks are bound, not
+that device presence has been proved.
 
-**Example error handling:**
-```cpp
-RV3032::Status st = rtc.setTime(dt);
-if (!st.ok()) {
-  Serial.printf("Error: %s (code=%d, detail=%d)\n",
-                st.msg, static_cast<int>(st.code), st.detail);
-}
-```
+## Repository and examples
 
-## Behavioral Contracts
+- `include/RV3032/` — public Doxygen headers only
+- `src/` — platform-neutral implementation
+- `examples/common/` — example-only board/transport glue, not library code
+- `examples/01_basic_bringup_cli/` — interactive product-neutral bring-up CLI
+- `docs/` — architecture, device reference, adapter notes, reports, local PDFs
+- `test/test_native/` — native fake and unit/integration tests
 
-**Threading Model:** Single-threaded by default. No FreeRTOS tasks created. The driver is not internally synchronized and should not be called from ISRs.
+## Verification
 
-**Timing:** `tick()` completes in <1ms. When EEPROM persistence is enabled, each call performs at most one I2C operation and uses deadline checks (no delay). `pollEeprom()` exposes the same EEPROM state machine with explicit instruction accounting and still caps EEPROM work at one I2C operation per call. `pollJob()` is the budgeted path for non-EEPROM multi-transfer jobs. Other API calls perform synchronous I2C transactions bounded by the transport timeout. The core does not call Arduino `millis()` implicitly; inject `Config::nowMs` when health timestamps are needed.
-
-**Resource Ownership:** I2C transport passed via `Config`. No hardcoded pins or resources.
-
-**Memory:** All allocation in `begin()`. Zero allocation in `tick()` and normal operations.
-
-**Error Handling:** All errors returned as `Status`. No silent failures.
-
-**Health / Recovery:** `OFFLINE` is latched. Normal public I2C operations and EEPROM `tick()` work do not touch the bus while OFFLINE; call `recover()` after application-level bus recovery to return to `READY`.
-
-**Low-level Register Access:** `readRegister()`, `writeRegister()`, `readRegisters()`, and `writeRegisters()` are diagnostic/control helpers, not the preferred application API for time, alarm, timer, status, or EEPROM flows. They validate documented RV3032 address windows, reject wraparound and invalid buffers, use tracked I2C bounded by `Config::i2cTimeoutMs`, and do not count local validation failures against driver health. Direct writes to status, control, or EEPROM-command registers can clear flags, change RTC behavior, or trigger chip operations.
-
-**EEPROM Usage:** When `Config::enableEepromWrites` is `true`, the following operations write to EEPROM:
-- `setClkoutEnabled()` / `setClkoutFrequency()`
-- `setOffsetPpm()`
-- Backup mode changes in `begin()`, `setBackupSwitchMode()`, and `setPrimaryBatteryBackupDefaults()`
-
-EEPROM persistence is opt-in and asynchronous. Methods that trigger persistence return `IN_PROGRESS` when queued; call `tick()` until `getEepromStatus().ok()` or an error is reported. If the queue is full, calls return `QUEUE_FULL`.
-
-These EEPROM-backed setters are control/setup operations. They first update the RAM mirror through bounded I2C and, when persistence is enabled, queue a wear-limited EEPROM commit that completes through the deadline-driven EEPROM state machine. They should not be treated as ordinary fast register writes in steady polling paths.
-
-**Time Retention:** The current time is maintained by the RTC counter while VBACKUP is present; it is not copied into EEPROM. For a normal non-rechargeable backup cell, use `BackupSwitchMode::Level` with the trickle charger disabled. The CLI example applies and persists those PMU settings during startup; `backup usual` can reapply them manually. Then use `set ...` to set the time and clear PORF/VLF/BSF after verifying validity.
-
-EEPROM has ~100k write endurance. Keep `enableEepromWrites = false` for normal runtime control paths. Enable only when persistent configuration is required across power cycles. Use `isEepromBusy()` to check progress and `getEepromStatus()` for the last commit result.
-
-## Supported Targets
-
-| Board | Environment | Notes |
-|-------|-------------|-------|
-| ESP32-S3-MINI-1U-N4R2 | `esp32s3dev` | PSRAM enabled |
-| ESP32-S2-MINI-2-N4 | `esp32s2dev` | No PSRAM |
-
-## Examples
-
-### 01_basic_bringup_cli
-
-Interactive CLI demonstrating all RTC features:
-- Persistent primary-cell setup at startup (level switchover, internal trickle charger off)
-- Time reading and setting
-- Alarm configuration
-- Timer operations
-- Clock output control
-- Calibration (offset adjustment)
-- Temperature monitoring
-
-```bash
-# Build and upload
-pio run -e esp32s3dev -t upload && pio device monitor -e esp32s3dev
-```
-
-### Example Helpers (`examples/common/`)
-
-These helpers are example-only glue and are not part of the public library API.
-
-| File | Purpose |
-|------|---------|
-| `BoardConfig.h` | Board-specific pin defaults and `Wire` setup |
-| `BuildConfig.h` | Compile-time log-level configuration |
-| `Log.h` | Serial logging helpers |
-| `I2cTransport.h` | Wire-backed transport adapter |
-| `I2cScanner.h` | Bus scan helper |
-| `BusDiag.h` | Bus diagnostics wrapper |
-| `CliShell.h` | Simple serial shell helper |
-| `CommandHandler.h` | Example command parsing helpers |
-| `HealthView.h` | Compact health display helper |
-| `HealthDiag.h` | Verbose health diagnostics helper |
-| `TransportAdapter.h` | Transport alias helper |
-
-## Running Tests
-
-```bash
+```powershell
+python -m platformio test -e native
+python -m platformio run -e esp32s3dev
+python -m platformio run -e esp32s2dev
 python scripts/generate_version.py check
-python tools/check_docs_contract.py source
-pio test -e native
-python tools/check_cli_contract.py
 python tools/check_core_timing_guard.py
-pio run -e esp32s3dev
-pio run -e esp32s2dev
-mkdir -p dist
-pio pkg pack -o dist/RV3032-C7.tar.gz .
-python tools/check_docs_contract.py package dist/RV3032-C7.tar.gz
+python tools/check_cli_contract.py
+python tools/check_docs_contract.py source
+python tools/hil_cli_runner.py --parser-self-test
+python tools/hil_cli_runner.py --dry-run
 ```
 
-## Project Structure
+Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
+execution, voltage/backfeed, power-cycle, and retention work require separate
+authorization. Current task evidence is recorded in
+`docs/reports/2026-07-13-v2.0.0-implementation.md`; historical HIL evidence is
+kept separately and is not a 2.0.0 protocol claim.
 
-```
-include/RV3032/         - Public API headers (Doxygen documented)
-  - Status.h            - Error types
-  - Config.h            - Configuration struct
-  - RV3032.h            - Main library class
-  - Version.h           - Auto-generated version constants
-src/
-  - RV3032.cpp          - Implementation
-examples/
-  - 01_basic_bringup_cli/  - Interactive CLI example
-  - common/                - Example-only helpers (shared CLI/log/transport glue)
-platformio.ini          - Build environments
-library.json            - PlatformIO metadata
-README.md               - This file
-CHANGELOG.md            - Version history
-AGENTS.md               - Coding guidelines
-```
+## Versioning
 
-## Documentation
-
-- `docs/README.md` - documentation map
-- `docs/ARCHITECTURE.md` - lifecycle, health, transport, budget, and EEPROM policy
-- `docs/DEVICE_REFERENCE.md` - device register, flag, timestamp, EEPROM, and timing notes
-- `docs/IDF_PORT.md` - ESP-IDF adapter guidance
-- `docs/reports/HIL_SUMMARY.md` - concise hardware-in-the-loop evidence summary
-- `docs/extracted-md/` - curated vendor-document review notes retained for traceability
-- `docs/reference-pdfs/` - vendor datasheet and application manual
-
-Raw HIL runner JSON, generated step tables, stdout/stderr captures, and full
-serial transcripts are not kept in the repository.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
-
-**Coding standards:**
-- Follow [AGENTS.md](AGENTS.md) guidelines
-- Non-blocking by default (begin/tick/end pattern)
-- Status error model (no exceptions)
-- No heap allocation in steady state
-- Doxygen documentation for public API
+`library.json` is the single version source. `include/RV3032/Version.h` is
+generated and must not be edited manually.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file.
-
-## References
-
-- [RV-3032-C7 Datasheet](https://www.microcrystal.com/en/products/real-time-clock-rtc-modules/rv-3032-c7/)
-- [Application Manual](https://www.microcrystal.com/fileadmin/Media/Products/RTC/App.Manual/RV-3032-C7_App-Manual.pdf)
-
-## Credits
-
-Based on original RtcManager implementation. Refactored to follow ESP32 embedded engineering best practices from [AGENTS.md](AGENTS.md).
+MIT. See `LICENSE`.

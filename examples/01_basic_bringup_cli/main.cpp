@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <cstdlib>
+#include <cstring>
 
 #include "examples/common/BoardConfig.h"
 #include "examples/common/BusDiag.h"
@@ -27,11 +28,22 @@
 #include "RV3032/RV3032.h"
 
 static RV3032::RV3032 g_rtc;
+
+static bool operation_accepted(const RV3032::Status& st) {
+  return st.ok() || st.inProgress();
+}
+
+static const char* cooperative_suffix(const RV3032::Status& st) {
+  return st.inProgress() ? " (cooperative job accepted)" : "";
+}
 static bool g_verbose = false;  // Verbose mode - disabled by default for production examples
-static bool g_backupConfigCommitPending = false;
 
 static uint32_t rtc_now_ms(void*) {
   return millis();
+}
+
+static void rtc_wait_ms(uint32_t delayMs, void*) {
+  delay(delayMs);
 }
 
 /**
@@ -97,6 +109,12 @@ static const char* errToStr(RV3032::Err code) {
     case RV3032::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
     case RV3032::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
     case RV3032::Err::I2C_BUS:              return "I2C_BUS";
+    case RV3032::Err::EEPROM_VERIFY_FAILED: return "EEPROM_VERIFY_FAILED";
+    case RV3032::Err::EEPROM_CLEANUP_FAILED:return "EEPROM_CLEANUP_FAILED";
+    case RV3032::Err::PRIMARY_CELL_ALREADY_ATTEMPTED:
+      return "PRIMARY_CELL_ALREADY_ATTEMPTED";
+    case RV3032::Err::JOB_RESULT_UNAVAILABLE:return "JOB_RESULT_UNAVAILABLE";
+    case RV3032::Err::INCOHERENT_DATA:      return "INCOHERENT_DATA";
     default: return "UNKNOWN";
   }
 }
@@ -150,48 +168,21 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
   Serial.println(F("  ----------------------"));
 }
 
-/**
- * @brief Read a byte from user EEPROM (0xCB-0xEA) via EE_ADDRESS/EE_DATA.
- */
-static RV3032::Status read_user_eeprom_byte(uint8_t addr, uint8_t& value) {
-  if (addr < RV3032::cmd::USER_EEPROM_START || addr > RV3032::cmd::USER_EEPROM_END) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "EEPROM address out of range");
+static RV3032::Status read_user_eeprom_chunk(uint8_t offset, uint8_t length,
+                                              uint8_t* out) {
+  RV3032::Status st = g_rtc.startReadUserEepromJob(offset, length, millis(), 1000);
+  const uint32_t started = millis();
+  while (st.inProgress() && static_cast<uint32_t>(millis() - started) < 1000) {
+    uint8_t used = 0;
+    st = g_rtc.pollJob(millis(), 1, used);
+    if (st.inProgress()) delay(1);
   }
-  if (g_rtc.isEepromBusy()) {
-    return RV3032::Status::Error(RV3032::Err::BUSY, "EEPROM update in progress");
-  }
-
-  uint8_t control1 = 0;
-  RV3032::Status st = g_rtc.readRegister(RV3032::cmd::REG_CONTROL1, control1);
-  if (!st.ok()) {
-    return st;
-  }
-
-  const uint8_t eerdMask = static_cast<uint8_t>(1u << RV3032::cmd::CTRL1_EERD_BIT);
-  const uint8_t newControl1 = static_cast<uint8_t>(control1 | eerdMask);
-  if (newControl1 != control1) {
-    st = g_rtc.writeRegister(RV3032::cmd::REG_CONTROL1, newControl1);
-    if (!st.ok()) {
-      return st;
-    }
-  }
-
-  st = g_rtc.writeRegister(RV3032::cmd::REG_EE_ADDRESS, addr);
-  if (st.ok()) {
-    st = g_rtc.writeRegister(RV3032::cmd::REG_EE_COMMAND, RV3032::cmd::EEPROM_CMD_READ);
-  }
-  if (st.ok()) {
-    st = g_rtc.readRegister(RV3032::cmd::REG_EE_DATA, value);
-  }
-
-  if (newControl1 != control1) {
-    RV3032::Status restore = g_rtc.writeRegister(RV3032::cmd::REG_CONTROL1, control1);
-    if (!restore.ok() && st.ok()) {
-      st = restore;
-    }
-  }
-
-  return st;
+  if (!st.ok()) return st;
+  RV3032::PersistentReadResult result{};
+  st = g_rtc.getPersistentReadJobResult(result);
+  if (!st.ok() || !result.persistentVerified || result.length != length) return st;
+  memcpy(out, result.data, length);
+  return RV3032::Status::Ok();
 }
 
 /**
@@ -362,7 +353,9 @@ static void print_help() {
   cli::printHelpItem("reg <addr>", "Read register byte");
   cli::printHelpItem("reg <addr> <val> [confirm]", "Write register byte; confirm required outside user RAM");
   cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
-  cli::printHelpItem("backup [usual|off|level|direct]", "Show or set battery backup PMU");
+  cli::printHelpItem("backup [off|level|direct]", "Show or set active battery backup PMU");
+  cli::printHelpItem("primary-cell ensure CONFIRM-PRIMARY-CELL",
+                     "Explicit one-shot primary-cell provisioning");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
   cli::printHelpItem("clear_vlf", "Clear voltage low flag");
   cli::printHelpItem("clear_bsf", "Clear backup switchover flag");
@@ -551,11 +544,12 @@ static void cmd_ts_reset(const String& args) {
   }
 
   RV3032::Status st = g_rtc.resetTimestamp(source);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("resetTimestamp(%s) failed: %s", timestamp_source_name(source), st.msg);
     return;
   }
-  LOGI("%s timestamp reset requested", timestamp_source_name(source));
+  LOGI("%s timestamp reset requested%s", timestamp_source_name(source),
+       cooperative_suffix(st));
 }
 
 /**
@@ -611,10 +605,11 @@ static void cmd_alarm_set(const String& args) {
   }
 
   RV3032::Status st = g_rtc.setAlarmTime(minute, hour, date);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("setAlarmTime() failed: %s", st.msg);
   } else {
-    LOGI("Alarm time set: %02d:%02d (date=%02d)", hour, minute, date);
+    LOGI("Alarm time requested: %02d:%02d (date=%02d)%s",
+         hour, minute, date, cooperative_suffix(st));
   }
 }
 
@@ -642,10 +637,11 @@ static void cmd_alarm_match(const String& args) {
   }
 
   RV3032::Status st = g_rtc.setAlarmMatch(matchMin != 0, matchHour != 0, matchDate != 0);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("setAlarmMatch() failed: %s", st.msg);
   } else {
-    LOGI("Alarm match set: minute=%d hour=%d date=%d", matchMin, matchHour, matchDate);
+    LOGI("Alarm match requested: minute=%d hour=%d date=%d%s",
+         matchMin, matchHour, matchDate, cooperative_suffix(st));
   }
 }
 
@@ -667,10 +663,11 @@ static void cmd_alarm_int(const String& args) {
 
   bool enable = (args.toInt() != 0);
   RV3032::Status st = g_rtc.enableAlarmInterrupt(enable);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("enableAlarmInterrupt() failed: %s", st.msg);
   } else {
-    LOGI("Alarm interrupt %s", enable ? "enabled" : "disabled");
+    LOGI("Alarm interrupt %s requested%s",
+         enable ? "enabled" : "disabled", cooperative_suffix(st));
   }
 }
 
@@ -679,10 +676,10 @@ static void cmd_alarm_int(const String& args) {
  */
 static void cmd_alarm_clear() {
   RV3032::Status st = g_rtc.clearAlarmFlag();
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("clearAlarmFlag() failed: %s", st.msg);
   } else {
-    LOGI("Alarm flag cleared");
+    LOGI("Alarm flag clear requested%s", cooperative_suffix(st));
   }
 }
 
@@ -706,7 +703,8 @@ static void cmd_clkout(const String& args) {
   if (st.ok()) {
     LOGI("Clock output %s", enable ? "enabled" : "disabled");
   } else if (st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Clock output %s (EEPROM update queued)", enable ? "enabled" : "disabled");
+    LOGI("Clock output %s requested%s", enable ? "enabled" : "disabled",
+         cooperative_suffix(st));
   } else {
     LOGE("setClkoutEnabled() failed: %s", st.msg);
   }
@@ -741,7 +739,8 @@ static void cmd_clkout_freq(const String& args) {
   if (st.ok()) {
     LOGI("Clock output frequency set to %s", freqStr[freq]);
   } else if (st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Clock output frequency set to %s (EEPROM update queued)", freqStr[freq]);
+    LOGI("Clock output frequency %s requested%s", freqStr[freq],
+         cooperative_suffix(st));
   } else {
     LOGE("setClkoutFrequency() failed: %s", st.msg);
   }
@@ -768,7 +767,8 @@ static void cmd_offset(const String& args) {
     if (st.ok()) {
       LOGI("Frequency offset set to %.2f ppm", ppm);
     } else if (st.code == RV3032::Err::IN_PROGRESS) {
-      LOGI("Frequency offset set to %.2f ppm (EEPROM update queued)", ppm);
+      LOGI("Frequency offset %.2f ppm requested%s", ppm,
+           cooperative_suffix(st));
     } else {
       LOGE("setOffsetPpm() failed: %s", st.msg);
     }
@@ -825,11 +825,12 @@ static void cmd_timer(const String& args) {
   RV3032::Status st = g_rtc.setTimer(static_cast<uint16_t>(ticks),
                                      static_cast<RV3032::TimerFrequency>(freq),
                                      enable != 0);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("setTimer() failed: %s", st.msg);
     return;
   }
-  LOGI("Timer set: ticks=%d freq=%d enable=%d", ticks, freq, enable);
+  LOGI("Timer requested: ticks=%d freq=%d enable=%d%s",
+       ticks, freq, enable, cooperative_suffix(st));
 }
 
 static void cmd_evi(const String& args) {
@@ -863,11 +864,12 @@ static void cmd_evi(const String& args) {
       return;
     }
     RV3032::Status st = g_rtc.setEviEdge(v != 0);
-    if (!st.ok()) {
+    if (!operation_accepted(st)) {
       LOGE("setEviEdge() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI edge set to %s", v ? "rising" : "falling");
+    LOGI("EVI edge %s requested%s", v ? "rising" : "falling",
+         cooperative_suffix(st));
     return;
   }
 
@@ -882,11 +884,11 @@ static void cmd_evi(const String& args) {
       return;
     }
     RV3032::Status st = g_rtc.setEviDebounce(static_cast<RV3032::EviDebounce>(v));
-    if (!st.ok()) {
+    if (!operation_accepted(st)) {
       LOGE("setEviDebounce() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI debounce set to %d", v);
+    LOGI("EVI debounce %d requested%s", v, cooperative_suffix(st));
     return;
   }
 
@@ -901,11 +903,11 @@ static void cmd_evi(const String& args) {
       return;
     }
     RV3032::Status st = g_rtc.setEviOverwrite(v != 0);
-    if (!st.ok()) {
+    if (!operation_accepted(st)) {
       LOGE("setEviOverwrite() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI overwrite set to %d", v);
+    LOGI("EVI overwrite %d requested%s", v, cooperative_suffix(st));
     return;
   }
 
@@ -946,11 +948,12 @@ static void cmd_status_clear(const String& args) {
   const uint8_t mask = static_cast<uint8_t>(parsed);
 
   RV3032::Status st = g_rtc.clearStatus(mask);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("clearStatus() failed: %s", st.msg);
     return;
   }
-  LOGI("Status flags cleared with mask=0x%02X", mask);
+  LOGI("Status clear requested with mask=0x%02X%s", mask,
+       cooperative_suffix(st));
 }
 
 static void cmd_reg(const String& args) {
@@ -1159,7 +1162,7 @@ static void cmd_eeprom() {
     {RV3032::cmd::REG_EEPROM_TREFERENCE1, "TREF1"},
   };
 
-  Serial.println(F("Config EEPROM registers:"));
+  Serial.println(F("Active configuration mirrors (not persistent EEPROM):"));
   for (size_t i = 0; i < (sizeof(kRegs) / sizeof(kRegs[0])); ++i) {
     uint8_t value = 0;
     RV3032::Status st = g_rtc.readRegister(kRegs[i].reg, value);
@@ -1176,28 +1179,24 @@ static void cmd_eeprom() {
   }
 
   Serial.println(F("User EEPROM (0xCB..0xEA):"));
-  static constexpr uint8_t kStart = RV3032::cmd::USER_EEPROM_START;
-  static constexpr uint8_t kEnd = RV3032::cmd::USER_EEPROM_END;
-  static constexpr uint8_t kSize = static_cast<uint8_t>(kEnd - kStart + 1);
+  static constexpr uint8_t kSize = RV3032::USER_EEPROM_SIZE;
   uint8_t nonFF = 0;
 
-  for (uint8_t i = 0; i < kSize; ++i) {
-    const uint8_t addr = static_cast<uint8_t>(kStart + i);
-    uint8_t value = 0;
-    RV3032::Status st = read_user_eeprom_byte(addr, value);
+  for (uint8_t offset = 0; offset < kSize; offset += 16) {
+    uint8_t values[16] = {};
+    RV3032::Status st = read_user_eeprom_chunk(offset, 16, values);
     if (!st.ok()) {
-      LOGE("User EEPROM read failed at 0x%02X: %s", addr, st.msg);
+      LOGE("User EEPROM read failed at offset %u: %s", offset, st.msg);
       return;
     }
-    if (value != 0xFF) {
-      nonFF++;
-    }
-    if ((i % 8) == 0) {
-      Serial.printf("  0x%02X: ", addr);
-    }
-    Serial.printf("%02X ", value);
-    if ((i % 8) == 7 || i == (kSize - 1)) {
-      Serial.println();
+    for (uint8_t i = 0; i < 16; ++i) {
+      if (values[i] != 0xFF) ++nonFF;
+      if ((i % 8) == 0) {
+        Serial.printf("  0x%02X: ",
+                      RV3032::cmd::USER_EEPROM_START + offset + i);
+      }
+      Serial.printf("%02X ", values[i]);
+      if ((i % 8) == 7) Serial.println();
     }
   }
 
@@ -1231,7 +1230,7 @@ static void cmd_backup(const String& args) {
 
     const RV3032::BackupSwitchMode mode = backup_mode_from_pmu(pmu);
     const bool clkoutDisabled = (pmu & RV3032::cmd::PMU_CLKOUT_DISABLE) != 0;
-    const bool trickleEnabled = (pmu & RV3032::cmd::PMU_TRICKLE_MASK) != 0;
+    const bool trickleEnabled = (pmu & RV3032::cmd::PMU_TCM_MASK) != 0;
 
     Serial.println();
     Serial.println(F("=== Battery Backup ==="));
@@ -1241,14 +1240,15 @@ static void cmd_backup(const String& args) {
                       ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
                   backup_mode_name(mode),
                   LOG_COLOR_RESET);
-    Serial.printf("Cached config mode: %s\n", backup_mode_name(snap.backupMode));
     Serial.printf("EEPROM persistence: %s busy=%s queue=%u\n",
                   log_bool_str(snap.enableEepromWrites),
                   log_bool_str(snap.eepromBusy),
                   static_cast<unsigned>(snap.eepromQueueDepth));
     Serial.printf("CLKOUT disabled bit: %s\n", log_bool_str(clkoutDisabled));
     Serial.printf("Trickle charger bits: 0x%X (%s)\n",
-                  static_cast<unsigned>(pmu & RV3032::cmd::PMU_TRICKLE_MASK),
+                   static_cast<unsigned>(pmu &
+                                         (RV3032::cmd::PMU_TCR_MASK |
+                                          RV3032::cmd::PMU_TCM_MASK)),
                   trickleEnabled ? "enabled/configured" : "off");
     Serial.printf("Flags: PORF=%s VLF=%s BSF=%s time=%s\n",
                   flags.powerOnReset ? "set" : "clear",
@@ -1256,36 +1256,59 @@ static void cmd_backup(const String& args) {
                   flags.backupSwitched ? "set" : "clear",
                   flags.timeInvalid ? "invalid" : "valid");
     Serial.println(F("Time is held by the RTC counter while VBACKUP is present; it is not stored in EEPROM."));
-    Serial.println(F("Usual primary-cell setup: backup usual, set time, then clear_porf/clear_vlf/clear_bsf after verification."));
+    Serial.println(F("Primary-cell provisioning is separate: primary-cell ensure CONFIRM-PRIMARY-CELL"));
     return;
   }
 
   RV3032::Status st = RV3032::Status::Ok();
-  if (modeArg == "usual" || modeArg == "coin" || modeArg == "primary") {
-    st = g_rtc.setPrimaryBatteryBackupDefaults();
-    if (st.ok() || st.code == RV3032::Err::IN_PROGRESS) {
-      LOGI("Primary battery backup defaults applied: level switching, trickle charger off%s",
-           st.code == RV3032::Err::IN_PROGRESS ? " (EEPROM update queued)" : "");
-    } else {
-      LOGE("setPrimaryBatteryBackupDefaults() failed: %s", st.msg);
-    }
-    return;
-  }
-
   RV3032::BackupSwitchMode mode = RV3032::BackupSwitchMode::Off;
   if (!parse_backup_mode(modeArg, mode)) {
-    LOGE("Expected backup [usual|off|level|direct]");
+    LOGE("Expected backup [off|level|direct]");
     return;
   }
 
   st = g_rtc.setBackupSwitchMode(mode);
   if (st.ok() || st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Backup mode set to %s%s",
+    LOGI("Backup mode %s requested%s",
          backup_mode_name(mode),
-         st.code == RV3032::Err::IN_PROGRESS ? " (EEPROM update queued)" : "");
+         cooperative_suffix(st));
   } else {
     LOGE("setBackupSwitchMode() failed: %s", st.msg);
   }
+}
+
+static void cmd_primary_cell(const String& args) {
+  String confirmation = args;
+  confirmation.trim();
+  if (confirmation != "ensure CONFIRM-PRIMARY-CELL") {
+    LOGE("Exact confirmation required: primary-cell ensure CONFIRM-PRIMARY-CELL");
+    return;
+  }
+
+  RV3032::PrimaryCellConfigurationReport report{};
+  const RV3032::Status st = g_rtc.ensurePrimaryCellConfiguration(report);
+  const char* outcome = "NOT_ATTEMPTED";
+  switch (report.outcome) {
+    case RV3032::PrimaryCellConfigurationOutcome::ALREADY_CONFIGURED:
+      outcome = "ALREADY_CONFIGURED";
+      break;
+    case RV3032::PrimaryCellConfigurationOutcome::EEPROM_UPDATED:
+      outcome = "EEPROM_UPDATED";
+      break;
+    case RV3032::PrimaryCellConfigurationOutcome::FAILED:
+      outcome = "FAILED";
+      break;
+    default:
+      break;
+  }
+  Serial.printf("Primary-cell ensure: %s status=%s before=%s0x%02X target=0x%02X after=%s0x%02X cleanup=%s\n",
+                outcome, errToStr(st.code),
+                report.persistentBeforeValid ? "" : "?",
+                report.persistentBefore,
+                report.persistentTarget,
+                report.persistentAfterValid ? "" : "?",
+                report.persistentAfter,
+                report.cleanupVerified ? "verified" : "unverified");
 }
 
 /**
@@ -1293,10 +1316,10 @@ static void cmd_backup(const String& args) {
  */
 static void cmd_clear_bsf() {
   RV3032::Status st = g_rtc.clearBackupSwitchFlag();
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("clearBackupSwitchFlag() failed: %s", st.msg);
   } else {
-    LOGI("Backup switchover flag cleared");
+    LOGI("Backup switchover flag clear requested%s", cooperative_suffix(st));
   }
 }
 
@@ -1305,10 +1328,10 @@ static void cmd_clear_bsf() {
  */
 static void cmd_clear_porf() {
   RV3032::Status st = g_rtc.clearPowerOnResetFlag();
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("clearPowerOnResetFlag() failed: %s", st.msg);
   } else {
-    LOGI("Power-on reset flag cleared");
+    LOGI("Power-on reset flag clear requested%s", cooperative_suffix(st));
   }
 }
 
@@ -1318,10 +1341,10 @@ static void cmd_clear_porf() {
 static void cmd_clear_vlf() {
   RV3032::Status st = g_rtc.clearVoltageLowFlag();
   print_verbose_status("clearVoltageLowFlag", st);
-  if (!st.ok()) {
+  if (!operation_accepted(st)) {
     LOGE("clearVoltageLowFlag() failed: %s", st.msg);
   } else {
-    LOGI("Voltage low flag cleared");
+    LOGI("Voltage low flag clear requested%s", cooperative_suffix(st));
   }
 }
 
@@ -1990,6 +2013,8 @@ static void process_command(const String& line) {
     cmd_eeprom();
   } else if (cmd == "backup") {
     cmd_backup(args);
+  } else if (cmd == "primary-cell") {
+    cmd_primary_cell(args);
   } else if (cmd == "clear_porf") {
     cmd_clear_porf();
   } else if (cmd == "clear_vlf") {
@@ -2038,8 +2063,8 @@ void setup() {
   cfg.i2cWriteRead = transport::wireWriteRead;
   cfg.i2cUser = &Wire;
   cfg.nowMs = rtc_now_ms;
-  cfg.backupMode = RV3032::BackupSwitchMode::Level;
-  cfg.enableEepromWrites = true;
+  cfg.waitMs = rtc_wait_ms;
+  cfg.enableEepromWrites = false;
 
   RV3032::Status st = g_rtc.begin(cfg);
   if (!st.ok()) {
@@ -2049,45 +2074,33 @@ void setup() {
     return;
   }
 
-  LOGI("RTC initialized successfully");
-
-  // Configure a non-rechargeable backup cell and persist the PMU setting.
-  // The helper preserves CLKOUT, selects level switchover, and disables charging.
-  st = g_rtc.setPrimaryBatteryBackupDefaults();
-  if (!st.ok() && !st.inProgress()) {
-    LOGE("Primary battery backup configuration failed: %s (code=%s, detail=%ld)",
+  LOGI("RTC callbacks bound; probing device explicitly...");
+  st = g_rtc.probe();
+  if (!st.ok()) {
+    LOGE("RTC probe failed: %s (code=%s, detail=%ld)",
          st.msg, errToStr(st.code), static_cast<long>(st.detail));
     return;
   }
-
-  g_backupConfigCommitPending = g_rtc.isEepromBusy();
-  if (g_backupConfigCommitPending) {
-    LOGI("Saving primary battery settings to EEPROM: level switchover, charger off");
-  } else {
-    LOGI("Primary battery settings already active: level switchover, charger off");
-  }
+  LOGI("RTC probe successful; no backup chemistry or EEPROM policy was applied");
 
   LOGI("Driver state: %s", stateToStr(g_rtc.state()));
   LOGI("Type 'help' for available commands");
   LOGI("Type 'drv' for driver health, 'verbose 1' for detailed output");
-  if (!g_backupConfigCommitPending) {
-    cli::printPrompt();
-  }
+  cli::printPrompt();
 }
 
 void loop() {
   g_rtc.tick(millis());
 
-  if (g_backupConfigCommitPending && !g_rtc.isEepromBusy()) {
-    g_backupConfigCommitPending = false;
-    const RV3032::Status st = g_rtc.getEepromStatus();
-    if (st.ok()) {
-      LOGI("Primary battery settings saved to EEPROM");
-    } else {
-      LOGE("Primary battery EEPROM save failed: %s (code=%s, detail=%ld)",
-           st.msg, errToStr(st.code), static_cast<long>(st.detail));
+  if (g_rtc.isJobBusy()) {
+    uint8_t used = 0;
+    const RV3032::Status jobStatus = g_rtc.pollJob(millis(), 1, used);
+    if (!jobStatus.ok() && !jobStatus.inProgress() &&
+        jobStatus.code != RV3032::Err::BUSY) {
+      LOGE("RTC cooperative job failed: %s (code=%s, detail=%ld)",
+           jobStatus.msg, errToStr(jobStatus.code),
+           static_cast<long>(jobStatus.detail));
     }
-    cli::printPrompt();
   }
 
   const String line = read_line();

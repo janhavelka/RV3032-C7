@@ -31,7 +31,12 @@ enum class Err : uint8_t {
   I2C_NACK_ADDR,         ///< I2C address not acknowledged
   I2C_NACK_DATA,         ///< I2C data byte not acknowledged
   I2C_TIMEOUT,           ///< I2C transaction timed out
-  I2C_BUS                ///< I2C bus error (arbitration lost, etc.)
+  I2C_BUS,               ///< I2C bus error (arbitration lost, etc.)
+  EEPROM_VERIFY_FAILED = 18,   ///< Persistent readback did not match
+  EEPROM_CLEANUP_FAILED = 19,  ///< Safe EEPROM access-state cleanup failed
+  PRIMARY_CELL_ALREADY_ATTEMPTED = 20, ///< Ensure already called this lifecycle
+  JOB_RESULT_UNAVAILABLE = 21, ///< Requested typed job result is unavailable
+  INCOHERENT_DATA = 22         ///< Repeated hardware samples did not agree
 };
 
 /**

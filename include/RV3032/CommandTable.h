@@ -3,9 +3,11 @@
  * @brief RV-3032-C7 command table definitions and register addresses.
  *
  * Contains all RV-3032-C7 registers and control addresses from the datasheet.
- * Use for direct register access via transport layer.
+ * Side-effecting addresses are available to driver internals but are not
+ * necessarily accepted by the public raw-access allowlists.
  *
- * @note All addresses are 7-bit I2C addresses. Register values are BCD unless noted.
+ * @note These are register or indirect-memory addresses, not I2C addresses.
+ *       Only fields documented as BCD use BCD encoding.
  */
 
 #pragma once
@@ -41,7 +43,7 @@ static constexpr uint8_t REG_MINUTES = 0x02;
 static constexpr uint8_t REG_HOURS = 0x03;
 
 /// @brief Weekday register (0x04, read/write-protectable)
-/// BCD: b7-b3=reserved, b2-b0 = 4, 2, 1 (0–6, 0=Sunday)
+/// Binary: b7-b3=reserved, b2-b0 = 0..6 (0=Sunday)
 static constexpr uint8_t REG_WEEKDAY = 0x04;
 
 /// @brief Date/Day-of-Month register (0x05, read/write-protectable)
@@ -59,25 +61,26 @@ static constexpr uint8_t REG_YEAR = 0x07;
 // ========== Alarm Registers (0x08–0x0A) ==========
 
 /// @brief Minutes Alarm register (0x08, read/write-protectable)
-/// Bit 7 = AE_M (alarm enable for minutes), b6-b0 = BCD minutes (0–59)
+/// Bit 7 = AE_M (0 enables minute matching), b6-b0 = BCD minutes (0–59)
 static constexpr uint8_t REG_ALARM_MINUTE = 0x08;
 
 /// @brief Hours Alarm register (0x09, read/write-protectable)
-/// Bit 7 = AE_H (alarm enable for hours), b6-b0 = BCD hours (0–23)
+/// Bit 7 = AE_H (0 enables hour matching), bit 6 reserved, b5-b0 = BCD hours
 static constexpr uint8_t REG_ALARM_HOUR = 0x09;
 
 /// @brief Date Alarm register (0x0A, read/write-protectable)
-/// Bit 7 = AE_D (alarm enable for date), b6-b0 = BCD date (1–31)
+/// Bit 7 = AE_D (0 enables date matching), bit 6 reserved, b5-b0 = BCD date
 static constexpr uint8_t REG_ALARM_DATE = 0x0A;
 
 // ========== Timer Registers (0x0B–0x0C) ==========
 
 /// @brief Timer Value 0 (Low Byte) register (0x0B, read/write-protectable)
-/// 8-bit value (0–255), LSB of 16-bit timer countdown
+/// Bits 7:0 are the low byte of the 12-bit countdown.
+/// Valid running presets are 1..4095; preset 0 does not start the timer.
 static constexpr uint8_t REG_TIMER_LOW = 0x0B;
 
-/// @brief Timer Value 1 (High Byte) register (0x0C, read/write-protectable)
-/// 8-bit value (0–255), MSB of 16-bit timer countdown
+/// @brief Timer Value 1 (High Nibble) register (0x0C, read/write-protectable)
+/// Bits 3:0 are the high nibble; bits 7:4 are reserved and written zero.
 static constexpr uint8_t REG_TIMER_HIGH = 0x0C;
 
 // ========== Status / Flag Registers (0x0D–0x0F) ==========
@@ -87,28 +90,29 @@ static constexpr uint8_t REG_TIMER_HIGH = 0x0C;
 /// @see StatusFlags for bit definitions
 static constexpr uint8_t REG_STATUS = 0x0D;
 
-/// @brief Temperature LSBs register (0x0E, read/write-protectable)
-/// Lower 8 bits of temperature measurement (1/256 °C per LSB)
+/// @brief Temperature LSB/support-flags register (0x0E)
+/// Bits 7:4 are the fractional temperature nibble; bits 3:0 are EEF, EEBUSY,
+/// CLKF, and BSF support flags with documented write-clear semantics.
 static constexpr uint8_t REG_TEMP_LSB = 0x0E;
 
-/// @brief Temperature MSBs register (0x0F, read-only)
-/// Upper 8 bits of temperature measurement (1 °C per LSB, two's complement)
+/// @brief Temperature integer register (0x0F, read-only)
+/// Signed integer portion of the 12-bit two's-complement temperature value.
 static constexpr uint8_t REG_TEMP_MSB = 0x0F;
 
 // ========== Control Registers (0x10–0x12) ==========
 
 /// @brief Control 1 register (0x10, read/write-protectable)
-/// Bits: TRPT, EERD, TE, TD1, TD0
+/// Bits: GP0, USEL, TE, EERD, TD1, TD0; bits 7:6 reserved.
 /// @see Control1Bits for bit definitions
 static constexpr uint8_t REG_CONTROL1 = 0x10;
 
 /// @brief Control 2 register (0x11, read/write-protectable)
-/// Bits: THFM, TLFM, UIE, TAFIE, TIE, AIE, OUT_A, OUT_B
+/// Bits: CLKIE, UIE, TIE, AIE, EIE, GP1, STOP; bit 7 reserved.
 /// @see Control2Bits for bit definitions
 static constexpr uint8_t REG_CONTROL2 = 0x11;
 
 /// @brief Control 3 register (0x12, read/write-protectable)
-/// Reserved or for future use; typically read as 0x00
+/// Bits: BSIE, THE, TLE, THIE, TLIE; bits 7:5 reserved.
 static constexpr uint8_t REG_CONTROL3 = 0x12;
 
 // ========== Timestamp Control (0x13–0x15) ==========
@@ -122,7 +126,7 @@ static constexpr uint8_t REG_TS_CONTROL = 0x13;
 static constexpr uint8_t REG_CLOCK_INT_MASK = 0x14;
 
 /// @brief EVI Control register (0x15, read/write-protectable)
-/// Bits: EVI_EB, EVI_DB1, EVI_DB0, EVI_EN, EVI_DEB, reserved
+/// Bits: CLKDE, EHL, EVI_DB1, EVI_DB0, ESYN. There is no enable bit 3.
 static constexpr uint8_t REG_EVI_CONTROL = 0x15;
 
 /// @brief TLow Threshold register (0x16, read/write-protectable)
@@ -246,16 +250,15 @@ static constexpr uint8_t REG_PASSWORD2 = 0x3B;
 static constexpr uint8_t REG_PASSWORD3 = 0x3C;
 
 /// @brief EE Address register (0x3D, read/write-protectable)
-/// Address pointer for EEPROM access (range 0xCB–0xEA for user EEPROM)
+/// Address pointer for configuration/user EEPROM access (range 0xC0–0xEA)
 static constexpr uint8_t REG_EE_ADDRESS = 0x3D;
 
 /// @brief EE Data register (0x3E, read/write-protectable)
 /// Data byte for EEPROM read/write operations
 static constexpr uint8_t REG_EE_DATA = 0x3E;
 
-/// @brief EE Command register (0x3F, write-only)
-/// Command for EEPROM operations (read 0x00 when read)
-/// Typical command: 0x21 (EEPROM update)
+/// @brief EE Command register (0x3F, write-only/read-zero)
+/// WRITE_ONE=0x21 and READ_ONE=0x22; UPDATE_ALL=0x11 and REFRESH_ALL=0x12.
 static constexpr uint8_t REG_EE_COMMAND = 0x3F;
 
 // ========== User RAM (0x40–0x4F) ==========
@@ -268,50 +271,46 @@ static constexpr uint8_t REG_USER_RAM_START = 0x40;
 /// Last byte of volatile user storage
 static constexpr uint8_t REG_USER_RAM_END = 0x4F;
 
-// ========== EEPROM Control (0xC0–0xCA) ==========
+// ========== Active configuration mirrors (0xC0–0xCA) ==========
 
-/// @brief EEPROM Power Management Unit register (0xC0, read/write-protectable)
-/// Bit-managed register for power and oscillator control
-static constexpr uint8_t REG_EEPROM_PMU = 0xC0;
+/// @brief Active PMU mirror (0xC0, read/write-protectable)
+/// Direct access changes active state only; persistent proof uses READ_ONE.
+static constexpr uint8_t REG_ACTIVE_PMU = 0xC0;
+static constexpr uint8_t REG_EEPROM_PMU = REG_ACTIVE_PMU;  ///< Legacy alias
 
-/// @brief EEPROM Offset register (0xC1, read/write-protectable)
-/// Calibration offset for crystal frequency
-static constexpr uint8_t REG_EEPROM_OFFSET = 0xC1;
+/// @brief Active offset mirror (0xC1, read/write-protectable)
+static constexpr uint8_t REG_ACTIVE_OFFSET = 0xC1;
+static constexpr uint8_t REG_EEPROM_OFFSET = REG_ACTIVE_OFFSET;  ///< Legacy alias
 
-/// @brief EEPROM CLKOUT 1 register (0xC2, read/write-protectable)
-/// Primary CLKOUT configuration in EEPROM
-static constexpr uint8_t REG_EEPROM_CLKOUT1 = 0xC2;
+/// @brief Active CLKOUT 1 mirror (0xC2, read/write-protectable)
+static constexpr uint8_t REG_ACTIVE_CLKOUT1 = 0xC2;
+static constexpr uint8_t REG_EEPROM_CLKOUT1 = REG_ACTIVE_CLKOUT1;  ///< Legacy alias
 
-/// @brief EEPROM CLKOUT 2 register (0xC3, read/write-protectable)
-/// Secondary CLKOUT frequency / divider configuration in EEPROM
-static constexpr uint8_t REG_EEPROM_CLKOUT2 = 0xC3;
+/// @brief Active CLKOUT 2 mirror (0xC3, read/write-protectable)
+static constexpr uint8_t REG_ACTIVE_CLKOUT2 = 0xC3;
+static constexpr uint8_t REG_EEPROM_CLKOUT2 = REG_ACTIVE_CLKOUT2;  ///< Legacy alias
 
-/// @brief EEPROM TReference 0 register (0xC4, read/write-protectable)
-/// Temperature compensation reference 0 in EEPROM
-static constexpr uint8_t REG_EEPROM_TREFERENCE0 = 0xC4;
+/// @brief Active temperature-reference 0 mirror (0xC4)
+static constexpr uint8_t REG_ACTIVE_TREFERENCE0 = 0xC4;
+static constexpr uint8_t REG_EEPROM_TREFERENCE0 = REG_ACTIVE_TREFERENCE0;  ///< Legacy alias
 
-/// @brief EEPROM TReference 1 register (0xC5, read/write-protectable)
-/// Temperature compensation reference 1 in EEPROM
-static constexpr uint8_t REG_EEPROM_TREFERENCE1 = 0xC5;
+/// @brief Active temperature-reference 1 mirror (0xC5)
+static constexpr uint8_t REG_ACTIVE_TREFERENCE1 = 0xC5;
+static constexpr uint8_t REG_EEPROM_TREFERENCE1 = REG_ACTIVE_TREFERENCE1;  ///< Legacy alias
 
-/// @brief EEPROM Password 0 register (0xC6, write-only, EEPROM-backed)
-/// EEPROM copy of first password byte
+/// @brief Active password mirror 0 (0xC6, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD0 = 0xC6;
 
-/// @brief EEPROM Password 1 register (0xC7, write-only, EEPROM-backed)
-/// EEPROM copy of second password byte
+/// @brief Active password mirror 1 (0xC7, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD1 = 0xC7;
 
-/// @brief EEPROM Password 2 register (0xC8, write-only, EEPROM-backed)
-/// EEPROM copy of third password byte
+/// @brief Active password mirror 2 (0xC8, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD2 = 0xC8;
 
-/// @brief EEPROM Password 3 register (0xC9, write-only, EEPROM-backed)
-/// EEPROM copy of fourth password byte
+/// @brief Active password mirror 3 (0xC9, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD3 = 0xC9;
 
-/// @brief EEPROM Password Enable register (0xCA, write-only)
-/// Register to enable/manage password protection
+/// @brief Active password-enable mirror (0xCA, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PW_ENABLE = 0xCA;
 
 // ========== User EEPROM (0xCB–0xEA) ==========
@@ -319,6 +318,8 @@ static constexpr uint8_t REG_EEPROM_PW_ENABLE = 0xCA;
 /// @brief User EEPROM start address (0xCB)
 /// 32 bytes of non-volatile user storage
 /// Accessed via REG_EE_ADDRESS, REG_EE_DATA, REG_EE_COMMAND
+static constexpr uint8_t CONFIG_EEPROM_START = 0xC0;
+static constexpr uint8_t CONFIG_EEPROM_END = 0xCA;
 static constexpr uint8_t USER_EEPROM_START = 0xCB;
 
 /// @brief User EEPROM end address (0xEA)
@@ -338,21 +339,32 @@ static constexpr uint8_t STATUS_TLF_BIT = 6;          ///< Temperature Low Flag
 static constexpr uint8_t STATUS_THF_BIT = 7;          ///< Temperature High Flag
 
 // Control 1 register bits (REG_CONTROL1, 0x10)
-static constexpr uint8_t CTRL1_TRPT_BIT = 7;          ///< Timer Repeat
-static constexpr uint8_t CTRL1_EERD_BIT = 2;          ///< EEPROM Refresh/Read
-static constexpr uint8_t CTRL1_TE_BIT = 3;            ///< Timer Enable
-static constexpr uint8_t CTRL1_TD_MASK = 0x03;        ///< Timer Divisor (2 bits)
+static constexpr uint8_t CONTROL1_IMPLEMENTED_MASK = 0x3F;
+static constexpr uint8_t CTRL1_GP0_BIT = 5;
+static constexpr uint8_t CTRL1_USEL_BIT = 4;
+static constexpr uint8_t CTRL1_TE_BIT = 3;
+static constexpr uint8_t CTRL1_EERD_BIT = 2;
+static constexpr uint8_t CONTROL1_EERD_MASK = 0x04;
+static constexpr uint8_t CTRL1_TD_MASK = 0x03;
 static constexpr uint8_t CTRL1_TD_SHIFT = 0;
 
 // Control 2 register bits (REG_CONTROL2, 0x11)
-static constexpr uint8_t CTRL2_THFM_BIT = 7;          ///< Temperature High Flag Mask
-static constexpr uint8_t CTRL2_TLFM_BIT = 6;          ///< Temperature Low Flag Mask
-static constexpr uint8_t CTRL2_UIE_BIT = 5;           ///< Update Interrupt Enable
-static constexpr uint8_t CTRL2_TAFIE_BIT = 4;         ///< Timer Alarm Flag Interrupt Enable
-static constexpr uint8_t CTRL2_TIE_BIT = 3;           ///< Timer Interrupt Enable
-static constexpr uint8_t CTRL2_AIE_BIT = 2;           ///< Alarm Interrupt Enable
-static constexpr uint8_t CTRL2_OUT_A_BIT = 1;         ///< Output A
-static constexpr uint8_t CTRL2_OUT_B_BIT = 0;         ///< Output B
+static constexpr uint8_t CONTROL2_IMPLEMENTED_MASK = 0x7F;
+static constexpr uint8_t CTRL2_CLKIE_BIT = 6;
+static constexpr uint8_t CTRL2_UIE_BIT = 5;
+static constexpr uint8_t CTRL2_TIE_BIT = 4;
+static constexpr uint8_t CTRL2_AIE_BIT = 3;
+static constexpr uint8_t CTRL2_EIE_BIT = 2;
+static constexpr uint8_t CTRL2_GP1_BIT = 1;
+static constexpr uint8_t CTRL2_STOP_BIT = 0;
+
+// Control 3 register bits (REG_CONTROL3, 0x12)
+static constexpr uint8_t CONTROL3_IMPLEMENTED_MASK = 0x1F;
+static constexpr uint8_t CTRL3_BSIE_BIT = 4;
+static constexpr uint8_t CTRL3_THE_BIT = 3;
+static constexpr uint8_t CTRL3_TLE_BIT = 2;
+static constexpr uint8_t CTRL3_THIE_BIT = 1;
+static constexpr uint8_t CTRL3_TLIE_BIT = 0;
 
 // Timestamp Control register bits (REG_TS_CONTROL, 0x13)
 static constexpr uint8_t TS_TLOW_OVERWRITE_BIT = 0;   ///< TLow timestamp overwrite enable
@@ -362,31 +374,70 @@ static constexpr uint8_t TS_OVERWRITE_BIT = TS_EVI_OVERWRITE_BIT;  ///< Backward
 static constexpr uint8_t TS_TLOW_RESET_BIT = 3;        ///< Reset TLow timestamp
 static constexpr uint8_t TS_THIGH_RESET_BIT = 4;       ///< Reset THigh timestamp
 static constexpr uint8_t TS_EVI_RESET_BIT = 5;         ///< Reset EVI timestamp
+static constexpr uint8_t TS_CONTROL_IMPLEMENTED_MASK = 0x3F;
+static constexpr uint8_t TS_CONTROL_OVERWRITE_MASK = 0x07;
+/// EVR may read back as 1; TLR and THR always read back as 0.
+static constexpr uint8_t TS_CONTROL_READBACK_MASK = 0x27;
+
+// Clock Interrupt Mask register bits (REG_CLOCK_INT_MASK, 0x14)
+static constexpr uint8_t CLOCK_INT_MASK_IMPLEMENTED_MASK = 0xFF;
+static constexpr uint8_t CLOCK_INT_CLKD_BIT = 7;
+static constexpr uint8_t CLOCK_INT_INTDE_BIT = 6;
+static constexpr uint8_t CLOCK_INT_CEIE_BIT = 5;
+static constexpr uint8_t CLOCK_INT_CAIE_BIT = 4;
+static constexpr uint8_t CLOCK_INT_CTIE_BIT = 3;
+static constexpr uint8_t CLOCK_INT_CUIE_BIT = 2;
+static constexpr uint8_t CLOCK_INT_CTHIE_BIT = 1;
+static constexpr uint8_t CLOCK_INT_CTLIE_BIT = 0;
 
 // EVI Control register bits (REG_EVI_CONTROL, 0x15)
-static constexpr uint8_t EVI_EB_BIT = 6;              ///< EVI Edge Bit (0=fall, 1=rise)
+static constexpr uint8_t EVI_CLKDE_BIT = 7;
+static constexpr uint8_t EVI_EB_BIT = 6;              ///< EHL: falling/low or rising/high
 static constexpr uint8_t EVI_DB_MASK = 0x30;          ///< EVI Debounce mask (2 bits)
 static constexpr uint8_t EVI_DB_SHIFT = 4;
-static constexpr uint8_t EVI_EN_BIT = 3;              ///< EVI Enable
+static constexpr uint8_t EVI_ESYN_BIT = 0;
+static constexpr uint8_t EVI_IMPLEMENTED_MASK = 0xF1;
 
-// EEPROM PMU register bits (REG_EEPROM_PMU, 0xC0)
-static constexpr uint8_t PMU_CLKOUT_DISABLE = 0x40;   ///< CLKOUT disable bit
+// Active/persistent PMU byte fields (C0)
+static constexpr uint8_t PMU_IMPLEMENTED_MASK = 0x7F;
+static constexpr uint8_t PMU_NCLKE_MASK = 0x40;
+static constexpr uint8_t PMU_CLKOUT_DISABLE = PMU_NCLKE_MASK; ///< Legacy alias
 static constexpr uint8_t PMU_BSM_MASK = 0x30;         ///< Backup Switching Mode mask
+static constexpr uint8_t PMU_BSM_DISABLED = 0x00;
+static constexpr uint8_t PMU_BSM_DISABLED_ALT = 0x30; ///< Alternate disabled encoding
 static constexpr uint8_t PMU_BSM_LEVEL = 0x20;        ///< BSM: Level switching mode
 static constexpr uint8_t PMU_BSM_DIRECT = 0x10;       ///< BSM: Direct switching mode
-static constexpr uint8_t PMU_TRICKLE_MASK = 0x0F;     ///< Trickle-charger resistor/mode bits
+static constexpr uint8_t PMU_TCR_MASK = 0x0C;
+static constexpr uint8_t PMU_TCM_MASK = 0x03;
+static constexpr uint8_t PMU_PRIMARY_PRESERVE_MASK = 0x4C;
+
+// Active/persistent Offset byte fields (C1)
+static constexpr uint8_t OFFSET_REGISTER_IMPLEMENTED_MASK = 0xFF;
+static constexpr uint8_t OFFSET_PORIE_MASK = 0x80;
+static constexpr uint8_t OFFSET_VLIE_MASK = 0x40;
+static constexpr uint8_t OFFSET_VALUE_MASK = 0x3F;
 
 // EEPROM CLKOUT 2 register bits (REG_EEPROM_CLKOUT2, 0xC3)
 static constexpr uint8_t CLKOUT_FREQ_MASK = 0x60;     ///< CLKOUT frequency select mask
 static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit shift
+static constexpr uint8_t CLKOUT_OS_MASK = 0x80;
+static constexpr uint8_t CLKOUT_HFD_HIGH_MASK = 0x1F;
 
 // EEPROM Command values
-static constexpr uint8_t EEPROM_CMD_UPDATE = 0x21;    ///< EEPROM update/write command
-static constexpr uint8_t EEPROM_CMD_READ = 0x22;      ///< EEPROM read command
-static constexpr uint8_t EEPROM_BUSY_BIT = 2;         ///< EEPROM operation busy flag (in REG_TEMP_LSB)
-static constexpr uint8_t EEPROM_ERROR_BIT = 3;        ///< EEPROM operation error flag (in REG_TEMP_LSB)
-static constexpr uint8_t TEMP_CLKF_BIT = 1;           ///< Clock flag (in REG_TEMP_LSB)
-static constexpr uint8_t TEMP_BSF_BIT = 0;            ///< Backup switchover flag (in REG_TEMP_LSB)
+static constexpr uint8_t EEPROM_CMD_UPDATE_ALL = 0x11;
+static constexpr uint8_t EEPROM_CMD_REFRESH_ALL = 0x12;
+static constexpr uint8_t EEPROM_CMD_WRITE_ONE = 0x21;
+static constexpr uint8_t EEPROM_CMD_READ_ONE = 0x22;
+static constexpr uint8_t EEPROM_BUSY_BIT = 2;
+static constexpr uint8_t EEPROM_BUSY_MASK = 0x04;
+static constexpr uint8_t EEPROM_ERROR_BIT = 3;
+static constexpr uint8_t EEPROM_EEF_MASK = 0x08;
+static constexpr uint8_t TEMP_CLKF_BIT = 1;
+static constexpr uint8_t TEMP_CLKF_MASK = 0x02;
+static constexpr uint8_t TEMP_BSF_BIT = 0;
+static constexpr uint8_t TEMP_BSF_MASK = 0x01;
+static constexpr uint8_t EEPROM_CLEAR_EEF_VALUE = 0x03;
+static constexpr uint8_t PERSISTENT_READ_SENTINEL = 0x80;
 
 // I2C Address
 static constexpr uint8_t I2C_ADDR_7BIT = 0x51;        ///< 7-bit I2C slave address

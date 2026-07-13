@@ -54,6 +54,12 @@ inline const char* errToString(RV3032::Err err) {
     case RV3032::Err::I2C_NACK_DATA:        return "I2C_NACK_DATA";
     case RV3032::Err::I2C_TIMEOUT:          return "I2C_TIMEOUT";
     case RV3032::Err::I2C_BUS:              return "I2C_BUS";
+    case RV3032::Err::EEPROM_VERIFY_FAILED: return "EEPROM_VERIFY_FAILED";
+    case RV3032::Err::EEPROM_CLEANUP_FAILED:return "EEPROM_CLEANUP_FAILED";
+    case RV3032::Err::PRIMARY_CELL_ALREADY_ATTEMPTED:
+      return "PRIMARY_CELL_ALREADY_ATTEMPTED";
+    case RV3032::Err::JOB_RESULT_UNAVAILABLE:return "JOB_RESULT_UNAVAILABLE";
+    case RV3032::Err::INCOHERENT_DATA:      return "INCOHERENT_DATA";
     default:                                 return "UNKNOWN";
   }
 }

@@ -7,8 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-13
+
+### Added
+
+- Status-first calendar snapshot and verified set/invalid-flag-clear jobs with
+  fixed typed result storage, instruction budgets, deadlines, and ambiguous
+  write reconciliation.
+- Explicit configuration/user EEPROM read jobs, verified bounded user EEPROM
+  writes, and typed password/protection evidence.
+- `ensurePrimaryCellConfiguration()` as the sole synchronous multi-callback
+  operation, with exact C0 policy, once-per-lifecycle admission, bounded
+  yielding waits, durable verification, and safety cleanup reporting.
+- Typed periodic-update, timer/event/clock interrupts, temperature events,
+  complete CLKOUT, independent trickle-mode/resistance, STOP, synchronization,
+  and general-purpose-bit coverage.
+- Typed clock-output interrupt flag inspection and cooperative W0C-safe clear.
+- Two-sample cooperative temperature reads with explicit incoherence errors,
+  plus typed THF/TLF inspection and combined clearing.
+- Protocol-faithful native fake with separate active and persistent state,
+  EEPROM command timing, W0C semantics, transfer logs, and fault injection.
+
 ### Changed
-- The CLI example now applies primary-cell backup settings at startup, disables the internal trickle charger, and persists changed PMU settings through the managed EEPROM state machine.
+
+- `begin()` is now passive and performs zero I2C/wait callbacks; `probe()` is
+  the explicit raw presence check and `recover()` is one tracked read-only
+  health re-probe.
+- OFFLINE is observational and no longer suppresses an explicitly requested
+  transport operation.
+- Ordinary multi-transfer setup work uses the cooperative job/EEPROM engines;
+  caller budgets of `0`, `1`, or `N` are honored.
+- Generic persistence now uses safe PMU/EERD access, compare-before-write,
+  write-one only, adaptive direct-read proof, durable verification, minimum
+  waits, verified cleanup, and hard-deadline cleanup-failure evidence.
+  Cleanup failure cancels later queued entries; update-all/refresh-all are not
+  used.
+- Raw register access is restricted to reviewed direct read/write allowlists.
+- The CLI example starts with passive begin plus explicit probe, keeps generic
+  persistence disabled, and requires the exact command
+  `primary-cell ensure CONFIRM-PRIMARY-CELL` for provisioning.
+
+### Removed
+
+- `Config::backupMode`, lifecycle PMU application, and the unsafe
+  `setPrimaryBatteryBackupDefaults()` helper.
+
+### Fixed
+
+- Control 1/2/3, EVI, timer-high, PMU TCR/TCM, CLKOUT, alarm, TEMP_LSB, and
+  EEPROM command encodings now match the vendor register tables.
+- Calendar reads reject reserved bits and weekday/date mismatches; offset input
+  outside the exact signed six-bit range is rejected instead of clamped.
+- Timer readback rejects reserved high bits; password cleanup deterministically
+  loads a credential distinct from both old and new references.
+- Timer preset zero is rejected, C1 interrupt bits survive offset/CLKOUT
+  updates, legacy CLKOUT frequency reads reject high-frequency mode, and a
+  repeated EVI timestamp reset performs the required cooperative EVR 0-to-1
+  transition.
+- Password changes now persist and activate protection-disable before changing
+  the reference, establish the new credential before protected cleanup, and
+  lock only after cleanup and optional re-enable.
+- Persistence-producing setters can now fill the fixed queue while its engine
+  is idle; capacity is proven before active mutation, and coalescing uses the
+  newest pending value so a later revert is not silently discarded.
+- Primary-cell cleanup reports retain the specific `SETTLE` failure stage
+  instead of flattening a level-switch settle timeout to generic cleanup.
 
 ## [1.6.0] - 2026-06-29
 

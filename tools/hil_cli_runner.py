@@ -70,7 +70,7 @@ class SoakStats:
 
 
 SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
-    Step("HIL-001", "boot", "", ("RTC initialized successfully", "Type 'help'"), timeout_s=8.0),
+    Step("HIL-001", "boot", "", ("RTC probe successful", "Type 'help'"), timeout_s=8.0),
     Step("HIL-002", "identity", "version", ("RV3032 library version",)),
     Step("HIL-003", "cli", "help", ("RV3032-C7 CLI Help", "selftest")),
     Step("HIL-004", "bus", "scan", ("Scan complete",), timeout_s=15.0),
@@ -118,9 +118,8 @@ SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
     Step("HIL-022", "ram", "ram 0 16", ("User RAM",), allow_unknown=True),
     Step("HIL-023", "register", "reg 0x0D", ("reg[0x0D]",), allow_unknown=True),
     Step("HIL-024", "register", "reg 0x0E", ("reg[0x0E]",), allow_unknown=True),
-    Step("HIL-025", "eeprom", "eeprom", ("EEPROM",), timeout_s=20.0, allow_unknown=True),
-    Step("HIL-026", "diagnostics", "selftest", ("Selftest result:", "fail=0"), timeout_s=15.0),
-    Step("HIL-027", "validation", "not_a_real_command", ("Unknown command",), timeout_s=5.0),
+    Step("HIL-025", "diagnostics", "selftest", ("Selftest result:", "fail=0"), timeout_s=15.0),
+    Step("HIL-026", "validation", "not_a_real_command", ("Unknown command",), timeout_s=5.0),
 )
 
 STRESS_STEPS: tuple[Step, ...] = (
@@ -144,7 +143,7 @@ INTENSIVE_SETUP_STEPS: tuple[Step, ...] = (
     Step("HIL-D002", "destructive-setup", "clear_porf", ("Power-on reset flag cleared",), timeout_s=5.0),
     Step("HIL-D003", "destructive-setup", "clear_vlf", ("Voltage low flag cleared",), timeout_s=5.0),
     Step("HIL-D004", "destructive-setup", "clear_bsf", ("Backup switchover flag cleared",), timeout_s=5.0),
-    Step("HIL-D005", "destructive-setup", "backup usual", ("Primary battery backup defaults applied",), timeout_s=5.0),
+    Step("HIL-D005", "destructive-setup", "primary-cell ensure CONFIRM-PRIMARY-CELL", ("Primary-cell ensure:",), timeout_s=10.0),
     Step("HIL-D006", "destructive-setup", "alarm_int 0", ("Alarm interrupt disabled",), timeout_s=5.0),
     Step("HIL-D007", "destructive-setup", "timer 0 2 0", ("Timer set",), timeout_s=5.0),
     Step("HIL-D008", "destructive-setup", "clkout 0", ("Clock output disabled",), timeout_s=5.0),

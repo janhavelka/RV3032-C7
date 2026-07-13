@@ -22,7 +22,10 @@ REQUIRED_COMMON = [
     "HealthDiag.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "drv", "read", "verbose", "stress"]
+MANDATORY_COMMANDS = [
+    "help", "scan", "probe", "recover", "drv", "read", "verbose", "stress",
+    "primary-cell",
+]
 
 
 def fail(msg: str) -> None:
@@ -64,6 +67,26 @@ def main() -> int:
 
     if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
         fail("either 'cfg' or 'settings' command must be present")
+
+    required_contract = [
+        "primary-cell ensure CONFIRM-PRIMARY-CELL",
+        "cfg.enableEepromWrites = false",
+        "cfg.waitMs = rtc_wait_ms",
+        "g_rtc.probe()",
+    ]
+    for token in required_contract:
+        if token not in text:
+            fail(f"passive/provisioning contract token missing: {token!r}")
+
+    forbidden_contract = [
+        "setPrimaryBatteryBackupDefaults",
+        "cfg.backupMode",
+        "REG_EE_COMMAND",
+        "backup usual",
+    ]
+    for token in forbidden_contract:
+        if token in text:
+            fail(f"unsafe legacy provisioning token remains: {token!r}")
 
     print("CLI contract PASSED")
     return 0

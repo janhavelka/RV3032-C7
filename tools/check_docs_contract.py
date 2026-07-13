@@ -18,6 +18,7 @@ REQUIRED_SOURCE_FILES = [
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
+    "docs/reports/2026-07-13-v2.0.0-implementation.md",
     "docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
     "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf",
     "docs/extracted-md/00_document_inventory.md",
@@ -45,6 +46,7 @@ REQUIRED_PACKAGE_FILES = [
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
+    "docs/reports/2026-07-13-v2.0.0-implementation.md",
     "docs/extracted-md/00_document_inventory.md",
     "docs/extracted-md/01_chip_overview.md",
     "docs/extracted-md/02_pinout_and_signals.md",
@@ -81,6 +83,14 @@ def check_source() -> int:
     for pattern in REQUIRED_EXPORT_EXCLUDES:
         if pattern not in excludes:
             errors.append(f"library.json export.exclude missing {pattern!r}")
+
+    report = ROOT / "docs/reports/2026-07-13-v2.0.0-implementation.md"
+    if report.is_file():
+        report_text = report.read_text(encoding="utf-8", errors="replace")
+        for token in ("Vendor capability matrix", "Requirement-to-evidence matrix",
+                      "Hardware-in-the-loop status is **NOT RUN**", "Worktree state"):
+            if token not in report_text:
+                errors.append(f"implementation report missing token: {token!r}")
 
     if errors:
         print("Docs source contract FAILED:")

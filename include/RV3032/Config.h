@@ -38,6 +38,10 @@ using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* tx, size_t txLen,
 /// @return Current monotonic milliseconds
 using NowMsFn = uint32_t (*)(void* user);
 
+/// Yielding millisecond wait callback used only by the explicit synchronous
+/// primary-cell ensure operation.
+using WaitMsFn = void (*)(uint32_t delayMs, void* user);
+
 /**
  * @struct Config
  * @brief RTC configuration parameters
@@ -52,12 +56,16 @@ struct Config {
   /// @brief I2C write-read callback (required).
   I2cWriteReadFn i2cWriteRead = nullptr;
 
-  /// @brief User context passed to I2C callbacks (e.g., TwoWire*).
+  /// @brief Opaque application transport-owner context.
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
   /// @note If null, health timestamps remain 0. EEPROM deadlines are driven by tick(nowMs).
   NowMsFn nowMs = nullptr;
+
+  /// @brief Yielding wait source (optional for cooperative use).
+  /// @note Required by ensurePrimaryCellConfiguration().
+  WaitMsFn waitMs = nullptr;
 
   /// @brief User context passed to timing callbacks.
   void* timeUser = nullptr;
@@ -68,31 +76,28 @@ struct Config {
 
   /// @brief I2C transaction timeout in milliseconds (default: 50ms)
   /// @note Passed to the transport callback. The library never configures the bus.
-  ///       Must be >= 50ms when enableEepromWrites is true.
+  ///       Valid range is 1..100 ms.
   uint32_t i2cTimeoutMs = 50;
 
-  /// @brief Battery backup switching mode (default: Level)
-  /// @note Applied during begin(). Off=no backup, Level=threshold, Direct=immediate
-  BackupSwitchMode backupMode = BackupSwitchMode::Level;
-
-  /// @brief Enable automatic EEPROM write for persistent config changes (default: false)
+  /// @brief Enable explicit generic EEPROM persistence (default: false)
   /// @note When true, EEPROM-backed config changes (backup PMU, clock output,
-  ///       offset) persist across power loss. begin() may queue persistence if
-  ///       the requested backupMode differs from the current RAM mirror.
+  ///       offset) may queue persistence after an explicit typed setter.
+  ///       begin() never reads or mutates the device and never queues work.
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
-  ///       When true, persistence is asynchronous; methods may return IN_PROGRESS
-  ///       until tick() completes the EEPROM update.
-  ///       EEPROM has ~100k write endurance - use sparingly in production.
+  ///       Typed setters that need read-modify-write return IN_PROGRESS and must
+  ///       first be advanced through pollJob(). Their resulting active bytes are
+  ///       then queued for tick()/pollEeprom() persistence.
+  ///       Configuration EEPROM endurance is 10,000 writes at 3.0 V/25 C and
+  ///       100 writes at 5.5 V/85 C. Compare before writing.
   bool enableEepromWrites = false;
 
-  /// @brief EEPROM write timeout in milliseconds (default: 100ms)
-  /// @note RV3032 EEPROM writes take several milliseconds. This is the max wait time.
-  ///       Must be > 0 when enableEepromWrites is true.
+  /// @brief EEPROM operation timeout in milliseconds (default: 100ms)
+  /// @note Valid range is 10..250 ms when generic persistence is enabled.
   uint32_t eepromTimeoutMs = 100;
 
   /// @brief Consecutive failure threshold before transitioning to OFFLINE
   /// @note Default: 5. DEGRADED = [1, offlineThreshold-1], OFFLINE >= offlineThreshold.
-  ///       Values < 1 are clamped to 1 during begin().
+  ///       Values below 1 are rejected by begin().
   uint8_t offlineThreshold = 5;
 };
 

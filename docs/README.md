@@ -14,7 +14,25 @@ README, CHANGELOG, API headers, tests, or the maintained docs below.
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver lifecycle, health model, transport layering, instruction budget, and EEPROM policy. |
 | [`DEVICE_REFERENCE.md`](DEVICE_REFERENCE.md) | Device facts used by the driver: I2C address, register map, flags, EEPROM sequence, timing, and implementation notes. |
 | [`IDF_PORT.md`](IDF_PORT.md) | ESP-IDF adapter boundary and verification checklist. |
+| [`reports/2026-07-13-v2.0.0-implementation.md`](reports/2026-07-13-v2.0.0-implementation.md) | Version 2.0.0 audit, capability matrix, and software verification evidence. |
 | [`reports/HIL_SUMMARY.md`](reports/HIL_SUMMARY.md) | Concise HIL evidence summary. Raw runner artifacts are not retained. |
+
+## Implementation Prompt Suite 04
+
+The v2.0.0 implementation prompt is ordered as one shared contract followed by
+five bounded phases. Read the shared contract first and execute the remaining
+files in filename order:
+
+1. [`prompts/04-00-shared-contract.md`](prompts/04-00-shared-contract.md)
+2. [`prompts/04-01-cooperative-core-architecture.md`](prompts/04-01-cooperative-core-architecture.md)
+3. [`prompts/04-02-calendar-and-capability-coverage.md`](prompts/04-02-calendar-and-capability-coverage.md)
+4. [`prompts/04-03-generic-eeprom-persistence.md`](prompts/04-03-generic-eeprom-persistence.md)
+5. [`prompts/04-04-primary-cell-and-raw-access.md`](prompts/04-04-primary-cell-and-raw-access.md)
+6. [`prompts/04-05-native-fake-verification-and-release.md`](prompts/04-05-native-fake-verification-and-release.md)
+
+These prompts are implementation workflow artifacts. The public README, API
+headers, maintained architecture/device docs, tests, and changelog remain the
+authority for shipped behavior.
 
 ## Curated Source Notes
 

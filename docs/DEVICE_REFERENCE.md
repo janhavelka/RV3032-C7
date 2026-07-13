@@ -1,268 +1,139 @@
-# RV3032-C7 Device Reference
+# RV3032-C7 device reference used by the driver
 
-This is the maintained device-facing reference for the driver. It records the
-device facts the library depends on in one concise document.
+This is an implementation-oriented summary of the local Micro Crystal
+datasheet and application manual. The vendor PDFs in `reference-pdfs/` remain
+the authority for electrical limits, layout, and qualification.
 
-Source documents are kept in [`reference-pdfs/`](reference-pdfs/). This file is
-not hardware-validation evidence.
-
-## Device Scope
-
-The RV-3032-C7 is a Micro Crystal temperature-compensated real-time clock with
-I2C, backup supply switching, alarms, periodic timer, timestamp capture,
-temperature readout, EEPROM-backed configuration, 16 bytes of volatile user RAM,
-and 32 bytes of user EEPROM.
-
-The library targets the fixed 7-bit I2C address `0x51`.
-
-## Pins And Board Notes
-
-| Pin | Signal | Notes |
-|---:|---|---|
-| 1 | `VBACKUP` | Backup supply. If backup is unused, do not leave it floating; vendor application guidance recommends tying it to `VSS` through 10 kOhm to keep test access possible. |
-| 2 | `SDA` | Open-drain I2C data; requires a pull-up to the active bus rail. High-Z in backup state. |
-| 3 | `INT` | Open-drain interrupt output. Pull up according to the host interrupt domain. Can operate in backup state except for the external-event function. |
-| 4 | `EVI` | External event input. Do not leave floating and do not tie to `VBACKUP`; EVI capture is disabled in backup state. |
-| 5 | `VSS` | Ground; metal lid is connected to `VSS`. |
-| 6 | `VDD` | Main supply. |
-| 7 | `CLKOUT` | Programmable clock output. Vendor delivery default enables 32.768 kHz; disable if unused to reduce current. Low in backup state. |
-| 8 | `SCL` | Open-drain I2C clock; requires a pull-up to the active bus rail. |
-
-Use local decoupling for `VDD` and `VBACKUP` where applicable. Software cannot
-validate pull-up sizing, backup-cell installation, oscillator accuracy, or
-interrupt wiring.
-
-## Electrical And Timing Notes
-
-| Parameter | Value |
-|---|---:|
-| Timekeeping voltage range | 1.3 V to 5.5 V |
-| Headline timekeeping current | 160 nA at 3 V |
-| Time accuracy | +/-2.5 ppm from -40 degC to +85 degC; wider outside that range |
-| I2C maximum at `VDD >= 1.4 V` | 100 kHz |
-| I2C maximum at `VDD >= 2.0 V` | 400 kHz |
-| I2C communication timeout | START-to-STOP must complete within 950 ms |
-| Power-on reset time | 6 ms typical, 10 ms max |
-| Offset correction step | about 0.2384 ppm |
-
-The short datasheet advertises 400 kHz I2C; the application manual qualifies
-that fast-mode limit with the higher `VDD >= 2.0 V` operating condition.
-
-## Bring-Up Checklist
-
-1. Confirm I2C address `0x51` responds after power-on reset timing.
-2. Read `0x0D` and `0x0E`; handle `PORF`, `VLF`, `EEF`, or `EEbusy` before trusting time or persistent configuration state.
-3. If `CLKOUT` is unused, disable it to reduce current.
-4. If `EVI` is unused, tie it to a defined board level.
-5. Set clock/calendar registers using the documented control/STOP sequence when the application requires a precise set boundary.
-6. Configure interrupts and clear pending flags before enabling host interrupt handling.
-
-## Transport And Timing Facts
+## Interface and memory model
 
 - 7-bit I2C address: `0x51`.
-- 8-bit address bytes for datasheet comparison: write `0xA2`, read `0xA3`.
-- Register reads use a one-byte register pointer followed by a repeated-start
-  read.
-- The internal register pointer auto-increments after each byte.
-- A single register read/write, a contiguous block transfer, and one `EECMD`
-  write are each one bus instruction in the driver budget model.
-- Do not split a repeated-start register read across polls.
+- Active calendar/control/register space: `0x00..0x2D`.
+- Volatile user RAM: `0x40..0x4F` (16 bytes).
+- Active configuration mirrors: `0xC0..0xCA`.
+- Indirect persistent configuration EEPROM: `0xC0..0xCA`.
+- Indirect persistent user EEPROM: `0xCB..0xEA` (32 bytes).
+- EEADDR/EEDATA/EECMD staging registers: `0x3D..0x3F`.
+- EECMD is write-only/read-zero. Persistent EEPROM is not directly mapped and
+  is not FRAM.
 
-## Register Windows
+The driver exposes typed persistent reads instead of pretending that an active
+mirror read proves durable state.
 
-| Range | Purpose | Driver policy |
-|---:|---|---|
-| `0x00..0x2D` | RTC, alarm, timer, status, control, timestamp registers | Public helpers and bounded low-level block access. |
-| `0x39..0x3F` | Password and EEPROM access registers | Internal EEPROM state machine and guarded low-level access. |
-| `0x40..0x4F` | 16-byte volatile user RAM | `readUserRam()` and `writeUserRam()` with bounds checks. |
-| `0xC0..0xCA` | EEPROM-backed configuration mirror | Config helpers preserve reserved bits and optionally queue persistence. |
-| `0xCB..0xEA` | 32-byte user EEPROM | Addressed through `EEADDR`, `EEDATA`, and `EECMD`; not direct RAM-mapped storage. |
+## Calendar and alarm
 
-The driver rejects undocumented register windows and wraparound block accesses
-before touching I2C.
+Calendar registers `0x01..0x07` are packed BCD. Seconds, minutes, hours, date,
+month, and year have reserved upper bits that must be zero. Weekday is a
+binary value from 0..6 and must agree with the Gregorian date. Supported years are
+2000..2099.
 
-## Time And Calendar
+Alarm registers `0x08..0x0A` contain minute, hour, and date match fields. Their
+AE bits disable individual matches. The reset-state date value `00` is accepted
+only in the documented inactive configuration.
 
-The runtime calendar block is BCD encoded:
+## Timer, event, and timestamps
 
-| Register | Name | Notes |
-|---:|---|---|
-| `0x00` | 100th seconds | Read-only; not part of `DateTime`. |
-| `0x01` | Seconds | BCD `00..59`; bit 7 reserved. |
-| `0x02` | Minutes | BCD `00..59`; bit 7 reserved. |
-| `0x03` | Hours | BCD `00..23`; bits 7:6 reserved. |
-| `0x04` | Weekday | `0..6`; driver computes weekday on writes. |
-| `0x05` | Date | BCD `01..31`. |
-| `0x06` | Month | BCD `01..12`. |
-| `0x07` | Year | BCD `00..99`, interpreted as `2000..2099`. |
+The countdown timer is 12 bits. Running presets are `1..4095`; zero does not
+start the timer and is rejected by the typed setter. A write to Timer High
+writes only bits 3:0; reserved bits 7:4 are zero. The readable value is the
+configured preset, not a live remaining-count register. Timer source and enable
+are in Control 1.
 
-Driver consequences:
+External-event edge/filtering and synchronization plus CLKOUT stop-delay enable
+are in EVI Control. Event and low/high-temperature timestamp blocks have
+different layouts; the typed source selects the exact burst and decoder.
+Timestamp reset is a cooperative control-register mutation. TLow/THigh reset
+also clears TLF/THF. EVR may read back set, so a repeated EVI reset emits a
+preserved 0-to-1 EVR sequence; it does not clear EVF.
 
-- `readTime()` performs one burst read of `0x01..0x07`.
-- `setTime()` validates calendar fields, computes weekday, and performs one
-  burst write of `0x01..0x07`.
-- BCD nibbles and calendar ranges are validated strictly.
+## Status side effects
 
-## Status And Validity
+Status contains THF, TLF, UF, TF, AF, EVF, PORF, and VLF. Status bits use
+write-zero-to-clear semantics, but the device additionally clears THF and TLF
+on every Status-register write regardless of the written values. Every driver
+Status writer accounts for that rule. The named verified calendar job is the
+only calendar API that deliberately clears PORF/VLF.
 
-`0x0D` Status:
+TEMP_LSB combines the temperature fraction with CLKF, BSF, EEBUSY, and EEF
+support flags. BSF/EEF clearing is guarded so unrelated support state is not
+silently destroyed.
 
-| Bit | Name | Meaning |
-|---:|---|---|
-| 7 | `THF` | Temperature high event flag. |
-| 6 | `TLF` | Temperature low event flag. |
-| 5 | `UF` | Periodic update flag. |
-| 4 | `TF` | Periodic countdown timer flag. |
-| 3 | `AF` | Alarm flag. |
-| 2 | `EVF` | External event flag. |
-| 1 | `PORF` | Power-on reset flag. |
-| 0 | `VLF` | Voltage low flag; time/data may be invalid. |
+## Control bit facts
 
-Writing the Status register clears `THF` and `TLF` regardless of the written bit
-values. Public flag clearing must therefore be explicit and documented.
+- Control 1 contains EERD, USEL, GP0, timer enable, and timer source.
+- Control 2 AIE is bit 3 and EIE is bit 2; it also contains STOP, CLKIE, UIE,
+  TIE, and GP1.
+- Control 3 contains temperature event/interrupt controls and BSIE.
+- EVI Control has no generic enable bit 3.
+- PMU C0 fields are NCLKE, BSM, TCR, and TCM. TCR and TCM are independent.
+- TCM `00` disables the trickle charger. BSM `10` selects level switching.
 
-`0x0E` Temperature LSBs and fault flags:
+The primary-cell target is exactly:
 
-| Bit | Name | Meaning |
-|---:|---|---|
-| 7:4 | `TEMP[3:0]` | Fractional temperature bits. |
-| 3 | `EEF` | EEPROM write access failed. |
-| 2 | `EEbusy` | EEPROM operation or refresh in progress. |
-| 1 | `CLKF` | Interrupt-controlled clock-output flag. |
-| 0 | `BSF` | Backup switchover flag. |
+```text
+(persistentC0 & 0x4C) | 0x20
+```
 
-The driver derives time-invalid state from `PORF || VLF`.
+It preserves NCLKE and TCR, selects BSM level mode, and selects TCM disabled.
 
-## Alarm And Timer
+## CLKOUT, calibration, and temperature
 
-Alarm registers:
+CLKOUT uses PMU NCLKE plus active C2/C3. C3 OS selects crystal-derived versus
+high-frequency-divider operation. In high-frequency mode the 13-bit divider is
+encoded across C2 and C3 and represents `divider - 1` for a public range of
+1..8192. The legacy enable getter reports direct NCLKE state, not possible
+interrupt-selected activity, and the legacy frequency getter rejects OS=1;
+complete mode inspection uses the typed CLKOUT configuration getter.
+The typed CLKF helpers inspect and cooperatively clear the interrupt-controlled
+clock-output latch while preserving the neighboring EEF and BSF W0C flags.
 
-| Register | Name | Notes |
-|---:|---|---|
-| `0x08` | Minutes alarm | Bit 7 disables minute matching when set. |
-| `0x09` | Hours alarm | Bit 7 disables hour matching when set. |
-| `0x0A` | Date alarm | Bit 7 disables date matching when set. |
+Offset C1 is a signed six-bit correction with a nominal 0.2384 ppm step. The
+driver rejects values outside the exact representable range and preserves the
+PORIE/VLIE bits while changing only the six-bit offset field.
 
-Timer registers:
+Temperature is a signed 12-bit value with 1/16 degree C resolution. Thresholds
+are signed bytes. Temperature references are active C4/C5 and can be handed to
+explicit opt-in persistence by their typed cooperative setter. TEMP_LSB and
+TEMP_MSB have no blocking/shadowing; the cooperative coherent-temperature job
+compares two samples and reports `INCOHERENT_DATA` if they differ. Typed flag
+helpers inspect THF/TLF and clear both together, matching the Status-write side
+effect.
 
-| Register | Name | Notes |
-|---:|---|---|
-| `0x0B` | Timer low byte | Low 8 bits of timer value. |
-| `0x0C` | Timer high nibble | Low nibble holds bits 11:8; high nibble is preserved. |
-| `0x10` | Control 1 | `TE` enables timer, `TD[1:0]` selects frequency. |
+## Indirect EEPROM commands and timing
 
-Timer frequency encodings in `Control 1`:
+Commands used by the implementation:
 
-| `TD` | Meaning |
-|---:|---|
-| `0` | 4096 Hz |
-| `1` | 64 Hz |
-| `2` | 1 Hz |
-| `3` | 1/60 Hz |
+| Command | Value | Driver use |
+| --- | ---: | --- |
+| UPDATE_ALL | `0x11` | Defined for reference; never dispatched by generic persistence or primary ensure |
+| REFRESH_ALL | `0x12` | Defined for reference; never dispatched by generic persistence or primary ensure |
+| WRITE_ONE | `0x21` | One staged persistent byte; at most once per byte/invocation |
+| READ_ONE | `0x22` | Direct persistent-byte inspection and verification |
 
-The driver preserves the high nibble of `0x0C` and configures timer counts
-before enabling the timer.
+EERD must be controlled through Control 1. EEBUSY and EEF are checked before
+mutation and after vendor waits. A READ_ONE requires at least 1 ms settling; a
+WRITE_ONE requires at least 10 ms before completion polling. Safe C0 access and
+cleanup include the documented 10 ms backup-switch settle interval.
 
-## Control Registers
+A command callback error does not prove the command failed to reach silicon.
+The driver therefore never retries WRITE_ONE blindly. It performs direct
+persistent proof and reports ambiguity or failure.
 
-| Register | Name | Implemented driver uses |
-|---:|---|---|
-| `0x10` | Control 1 | Timer enable/frequency and EEPROM `EERD` gate. |
-| `0x11` | Control 2 | Alarm interrupt enable and related status helpers. |
-| `0x12` | Control 3 | Temperature/backup interrupt flags; reserved bits preserved. |
-| `0x13` | Timestamp Control | Timestamp reset and overwrite controls. |
-| `0x14` | Clock Interrupt Mask | Low-level access only today. |
-| `0x15` | EVI Control | Event edge/debounce helpers. |
+## EEPROM endurance
 
-Simple control read-modify-write operations should use the budgeted register
-update job when instruction accounting matters.
+The vendor guarantees at least 10,000 write cycles at 3 V and 25 degrees C,
+but only 100 cycles at 5.5 V and 85 degrees C. Configuration and user EEPROM
+are wear-limited. The driver compares before writing, coalesces exact queued
+duplicates, and requires durable readback; the application remains responsible
+for a product-level write-frequency policy.
 
-## Timestamp Blocks
+## Password protection
 
-| Source | Range | Length | Notes |
-|---|---:|---:|---|
-| TLow | `0x18..0x1E` | 7 bytes | Count + BCD seconds, minutes, hours, date, month, year. |
-| THigh | `0x1F..0x25` | 7 bytes | Count + BCD seconds, minutes, hours, date, month, year. |
-| EVI | `0x26..0x2D` | 8 bytes | Count + BCD hundredths and date/time fields. |
-
-`readTimestamp()` reads each timestamp block as one contiguous transfer and
-validates BCD/date fields.
-
-Timestamp reset bits in `0x13`:
-
-| Bit | Name | Effect |
-|---:|---|---|
-| 5 | `EVR` | Reset EVI timestamp registers. |
-| 4 | `THR` | Reset THigh timestamp registers and clear `THF`. |
-| 3 | `TLR` | Reset TLow timestamp registers and clear `TLF`. |
-
-## Temperature And Offset
-
-Temperature readout uses `0x0E` upper nibble plus `0x0F` as a signed 12-bit
-fixed-point value with 1/16 degC resolution. The public helper returns Celsius
-as `float` for convenience.
-
-`0xC1` EEPROM Offset stores a signed 6-bit frequency offset. The public helper
-maps it to approximately `0.2384 ppm` steps while preserving bits 7:6.
-
-## EEPROM-Backed Configuration
-
-EEPROM-backed configuration mirrors:
-
-| Register | Name | Driver use |
-|---:|---|---|
-| `0xC0` | EEPROM PMU | Backup switch mode, trickle charger, CLKOUT enable. |
-| `0xC1` | EEPROM Offset | Frequency offset. |
-| `0xC2` | EEPROM CLKOUT 1 | Low-level access only today. |
-| `0xC3` | EEPROM CLKOUT 2 | CLKOUT frequency. |
-| `0xC4..0xC5` | Temperature reference | Low-level access only today. |
-| `0xC6..0xC9` | EEPROM password bytes | Low-level/password flow only. |
-| `0xCA` | EEPROM password enable | Low-level/password flow only. |
-
-Default library behavior is RAM-only for configuration helpers:
-`Config::enableEepromWrites = false`. EEPROM persistence is opt-in because
-EEPROM endurance is finite and writes require a multi-step busy-gated sequence.
-
-## EEPROM Write Sequence
-
-The state machine for one-byte EEPROM persistence is:
-
-1. Read `Control 1`.
-2. Set `EERD=1` to disable automatic refresh.
-3. Write target EEPROM address to `EEADDR` (`0x3D`).
-4. Write target byte to `EEDATA` (`0x3E`).
-5. Poll `EEbusy` clear before command write, with a deadline.
-6. Write one `EECMD` update command (`0x21`) to `0x3F`.
-7. Poll `EEbusy` clear after command, with `Config::eepromTimeoutMs`.
-8. Check `EEF`.
-9. Restore original `Control 1` with `EERD` cleared.
-
-Each state performs at most one I2C instruction per `tick()` or `pollEeprom()`
-call. Waiting on `EEbusy` returns to the caller; the library never uses delay
-loops for EEPROM.
-
-## User Storage
-
-Volatile user RAM:
-
-- Range: `0x40..0x4F`.
-- Size: 16 bytes.
-- Direct register window.
-- Writes larger than the 15-byte low-level write limit are split by
-  `startWriteUserRamJob()` and `pollJob()`.
-
-User EEPROM:
-
-- Range: `0xCB..0xEA`.
-- Size: 32 bytes.
-- Accessed through `EEADDR`, `EEDATA`, and `EECMD`.
-- Do not assume erased state; applications should initialize their own layout.
-
-## Reserved Bits And Write Policy
-
-- Public helpers preserve reserved bits by read-modify-write.
-- Validation errors do not touch I2C and do not update health.
-- I2C health is updated only by tracked transport wrappers.
-- `probe()` is diagnostic raw I2C and does not update health.
-- `recover()` is explicit; normal public I2C operations do not auto-recover from
-  `OFFLINE`.
+Active password inputs are write-only/read-zero. Persistent password bytes and
+the enable byte are accessed only through the typed cooperative protection job.
+Enabling protection first persists disabled state, then password bytes, then
+the enable byte, each with WRITE_ONE and direct proof. Callback success while
+loading an active credential is not by itself authentication evidence. Public
+status is redacted and never returns credential bytes. After the durable job,
+the active mirrors are applied in the safe disabled-password state and an
+input credential that differs byte-for-byte from both old and new references
+is written to relock protected registers.

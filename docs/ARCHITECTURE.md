@@ -1,159 +1,173 @@
-# RV3032-C7 Driver Architecture
+# RV3032-C7 driver architecture
 
-This document records the maintained driver contract. Keep it concise; detailed
-API comments live in the public headers.
+## Ownership and lifecycle
 
-## Model
+The application owns the I2C controller, pins, locking, timeout policy,
+recovery, and scheduling. The driver receives `i2cWrite` and `i2cWriteRead`
+callbacks and never touches `Wire` or reconfigures a bus.
 
-The driver is a managed synchronous I2C driver:
+`begin(const Config&)` validates and stores callbacks only. It performs no I2C,
+does not prove device presence, does not apply a PMU policy, and does not start
+persistence. A successful passive bind enters `READY`. Calling `begin()` again
+without `end()` returns `BUSY` and preserves the live configuration.
 
-- The application owns I2C and supplies callbacks through `Config`.
-- The library never touches `Wire`, pins, bus locks, or bus timeout registers.
-- Public I2C APIs are synchronous and bounded by the caller's transport timeout.
-- EEPROM persistence is asynchronous and advanced by `tick()` or
-  `pollEeprom()`.
-- Recovery is manual through `recover()`; `tick()` does not auto-recover.
+`probe()` is the explicit diagnostic presence check. It performs one raw
+register read and does not affect health counters. `recover()` is a single
+tracked register read that can restore the observational health state; it does
+not recover the bus or reapply device configuration. `end()` uses no I2C and is
+idempotent while uninitialized. If work is active or queued it leaves the
+lifecycle intact; once work is idle it releases all driver state.
 
-## Lifecycle
+The four states are `UNINIT`, `READY`, `DEGRADED`, and `OFFLINE`. `OFFLINE` is a
+health label, not an admission policy: a valid caller-requested operation still
+reaches the transport. Only tracked transport wrappers update health.
 
-```cpp
-Status begin(const Config& cfg);
-void tick(uint32_t nowMs);
-void end();
-```
-
-`begin()` validates config, probes address `0x51`, applies the requested RAM
-mirror configuration, and enters `READY` on success.
-
-`tick(nowMs)` advances EEPROM persistence only. It performs at most one I2C
-instruction per call and returns immediately when uninitialized or offline.
-
-`end()` clears runtime state and returns to `UNINIT`.
-
-## Driver State
-
-| State | Meaning |
-|---|---|
-| `UNINIT` | `begin()` has not succeeded or `end()` was called. |
-| `READY` | Operational; no consecutive tracked failures. |
-| `DEGRADED` | One or more consecutive tracked failures below `offlineThreshold`. |
-| `OFFLINE` | Consecutive tracked failures reached `offlineThreshold`; normal public I2C is blocked until `recover()`. |
-
-Transitions:
-
-- `begin()` success -> `READY`
-- `end()` -> `UNINIT`
-- first tracked I2C failure in `READY` -> `DEGRADED`
-- tracked success in `DEGRADED` or `OFFLINE` -> `READY`
-- failures reach `offlineThreshold` -> `OFFLINE`
-
-## Transport Layers
-
-All normal I2C goes through these layers:
+## Transport layers
 
 ```text
-Public API
-  -> register helpers: readRegs/writeRegs
-  -> tracked wrappers: _i2cWriteReadTracked/_i2cWriteTracked
-  -> raw wrappers: _i2cWriteReadRaw/_i2cWriteRaw
-  -> Config transport callbacks
+typed public API
+    -> register helpers
+    -> tracked transport wrappers       (health updated here only)
+    -> raw transport wrappers
+    -> application callbacks
 ```
 
-Health is updated only inside tracked wrappers. Public methods and register
-helpers do not call health update directly.
+Each transport callback is one physical attempt from the driver's point of
+view. The driver never retries, resets, or recovers the bus. A read-only
+application adapter may implement its separately documented bounded recovery
+and at most one read retry; mutating callbacks must never be replayed.
 
-Raw wrappers are used for diagnostics such as `probe()`. `probe()` does not
-update health.
+Every callback receives a finite timeout. `i2cTimeoutMs` is constrained to
+1..100 ms. `nowMs` provides wrap-safe health and operation time. `waitMs` is a
+yielding application wait used only by the explicit primary-cell ensure
+operation; it must sleep or yield and must not spin.
 
-## Health Tracking
+## Execution forms
 
-Tracked I2C results update:
+Single-transfer reads and writes can complete synchronously. Work requiring
+more than one transfer uses the one fixed-capacity job engine:
 
-- `lastOkMs`
-- `lastErrorMs`
-- `lastError`
-- `consecutiveFailures`
-- `totalFailures`
-- `totalSuccess`
+- `start...Job()` validates and admits work without I2C.
+- `pollJob(nowMs, budget, used)` advances at most `budget` callbacks.
+- `pollEeprom(nowMs, budget, used)` advances optional queued persistence with
+  the same instruction accounting.
+- `tick(nowMs)` is the compatibility scheduler for persistence with a budget of
+  one. It does not poll ordinary jobs.
 
-Config errors, parameter validation errors, invalid date/time decode results,
-and `NOT_INITIALIZED` precondition failures do not update health.
+A budget of zero performs no callback. A resource owner can pass one so that
+one owner poll performs at most one transport callback. Wait states consume no
+instruction. Jobs have fixed storage, fixed callback/check caps, and either a
+derived transfer bound or wrap-safe phase and whole-operation deadlines.
 
-If `Config::nowMs` is unset, health timestamps remain `0`. EEPROM deadlines use
-the `nowMs` argument passed to `tick()` or `pollEeprom()`.
+At a hard persistence deadline, no new callback is started. If cleanup remains
+unverified, the terminal result is `EEPROM_CLEANUP_FAILED`; queued persistence
+items are cancelled rather than executed against uncertain C0/C1 or password
+authorization state. The application owns any later recovery and re-admission.
+No callback starts at or after a hard deadline. If a persistent job reaches
+that boundary before cleanup proof, it terminates with
+`EEPROM_CLEANUP_FAILED`; the application must treat the hardware access state
+as unknown and apply its own later admission/recovery policy.
 
-## Instruction Budget
+Control register read-modify-write operations, flag clears, timer programming,
+calendar composites, large RAM writes, and all indirect persistence use this
+engine. There is no second asynchronous scheduler.
 
-An I2C instruction is one backend transport operation:
+## Calendar contracts
 
-- one register read
-- one register write
-- one contiguous block read or write
-- one time/calendar burst read or write
-- one `EECMD` command write
+`readTime()` is a strict single burst read. It rejects reserved bits, malformed
+BCD, invalid Gregorian dates, years outside 2000..2099, and weekday mismatch.
 
-Repeated-start register reads are atomic and are never split across polls.
+`startReadTimeSnapshotJob()` reads Status first. If PORF or VLF is set, the
+typed result records invalid time and the job does not read the calendar.
 
-## Atomic Steady Operations
+`startSetTimeAndClearInvalidFlagsVerifiedJob()` writes and reads back the
+calendar, reads Status immediately before clearing PORF/VLF, writes Status, then
+verifies Status and calendar again. Its public name exposes the mutation. Every
+Status-register write also clears THF and TLF in RV3032 silicon; the result
+records whether those flags were set before the write. Possibly committed
+calendar or Status writes are reconciled by readback and are never replayed.
 
-These operations are intended to remain compact:
+The temperature registers have no shadow latch. `readTemperatureC()` remains a
+single-transfer convenience API, while `startReadCoherentTemperatureJob()`
+uses two separately budgeted samples and returns `INCOHERENT_DATA` if their
+TEMP fields differ. THF and TLF can be inspected together and are cleared
+together because every Status write clears both flags in silicon.
 
-- `readTime()` - one burst read of `0x01..0x07`
-- `setTime()` - one burst write of `0x01..0x07`
-- `readTimestamp()` - one timestamp block read
-- `readRegister()` / `writeRegister()`
-- bounded `readRegisters()` / `writeRegisters()`
-- `readUserRam()`
-- snapshot and health getters with no I2C
+## Active configuration and persistent EEPROM
 
-## Budgeted Operations
+Addresses `0xC0..0xC5` are active configuration mirrors. Persistent
+configuration and the 32-byte user EEPROM are accessed indirectly through
+EEADDR, EEDATA, and EECMD. The part does not contain FRAM.
 
-Use budgeted APIs when the caller needs explicit instruction accounting:
+Generic writes are disabled by default. When enabled, an active configuration
+job can hand its resulting bytes to the fixed queue. If the EEPROM state
+machine is idle, another persistence-producing setter may be admitted while
+entries are pending. It checks exact capacity after reading/computing the new
+active value but before writing it. Duplicate coalescing compares only with the
+newest pending value for the same address, so FIFO final-state intent is not
+lost. Persistent inspection is available even while writes are disabled.
 
-- EEPROM persistence: `tick()` or `pollEeprom(nowMs, maxInstructions, used)`
-- timer setup: `startSetTimerJob()` then `pollJob()`
-- simple masked control RMW: `startRegisterUpdateJob()` then `pollJob()`
-- user RAM writes over the low-level write limit: `startWriteUserRamJob()` then
-  `pollJob()`
+The shared persistence protocol:
 
-EEPROM persistence always caps itself at one I2C instruction per poll call even
-when `maxInstructions` is larger than one.
+1. saves Control 1 and enables EERD with readback verification;
+2. proves EEPROM idle, reads active C0, and installs a safe temporary C0;
+3. performs an adaptive two-command READ_ONE proof of the persistent byte;
+4. skips wear if the byte already matches;
+5. clears stale EEF, stages and verifies EEADDR/EEDATA, and issues at most one
+   WRITE_ONE (`0x21`);
+6. waits for vendor settle time, checks busy/EEF, and directly proves the
+   persistent byte again;
+7. restores and verifies active C0 and the exact original Control 1 value, then
+   observes the BSM settle interval.
 
-## Setup And Control Helpers
+Callback failure after a command write is ambiguous, so the engine continues
+with direct proof and never retries the wear-limited command. Generic paths do
+not dispatch UPDATE_ALL (`0x11`) or REFRESH_ALL (`0x12`). User EEPROM writes are
+bounded to 16 bytes per job and stop at the first failed byte with a partial
+typed report.
 
-The following public APIs are setup/control-plane convenience helpers and may
-perform multiple synchronous I2C instructions:
+## Primary-cell provisioning boundary
 
-- alarm setup and alarm interrupt helpers
-- timer get/set convenience helpers
-- EVI setup helpers
-- status and validity clear helpers
-- EEPROM-backed config setters when persistence is enabled
-- `recover()`
-- large `writeUserRam()` calls
+`ensurePrimaryCellConfiguration()` is the sole synchronous multi-callback
+exception. It exists for a serialized application I2C owner during startup and
+is never called by `begin()`, `recover()`, `tick()`, or another library API.
 
-They are safe and bounded, but not the preferred steady RTC polling surface when
-an owner task needs strict instruction budgets.
+Admission requires `nowMs`, `waitMs`, and no active/pending job or EEPROM work.
+The same successful begin/end lifecycle permits only one admitted attempt.
+Rejected preconditions do not consume the latch.
 
-## EEPROM Policy
+The operation directly reads persistent C0 before deciding and computes:
 
-`Config::enableEepromWrites` defaults to `false`.
+```text
+target = (persistentC0 & 0x4C) | 0x20
+```
 
-With EEPROM writes disabled, configuration helpers update the RAM mirror only.
-When enabled, changed EEPROM-backed configuration values queue persistence and
-complete through the EEPROM state machine. Queue-full is reported before the RAM
-mirror is changed.
+This selects level backup switching and disables the charger mode while
+preserving NCLKE and TCR. If already correct, no persistent write is issued. If
+wrong, exactly one WRITE_ONE is permitted, followed by direct durable proof.
+Bounded cleanup either restores a trusted active target and clears EERD, or
+holds a safe active C0 with automatic refresh disabled when persistence cannot
+be trusted. The report separates operation and cleanup evidence.
 
-The state machine:
+## Status and raw access
 
-1. reads and saves `Control 1`
-2. sets `EERD`
-3. writes `EEADDR`
-4. writes `EEDATA`
-5. waits for pre-command `EEbusy=0`
-6. writes one `EECMD`
-7. waits for post-command `EEbusy=0`
-8. checks `EEF`
-9. restores `Control 1`
+All fallible APIs return `Status`; errors are never logged or hidden. Status
+flags are explicit. The guarded Status clear refuses a write that would
+silently erase an active THF/TLF flag not named by the caller.
 
-All waits are deadline-based; the library does not use delay loops.
+Raw access is intentionally narrow. Reads cover ordinary active registers,
+user RAM, and active configuration mirrors. Writes cover temperature
+thresholds and user RAM only. Calendar, alarm, timer, control, Status, password,
+EEADDR/EEDATA/EECMD, and persistent storage require typed APIs.
+
+## Memory and concurrency
+
+The driver allocates no heap memory in steady operation. Jobs, credentials,
+reports, and queues use fixed arrays. Password bytes are copied only into the
+active job, zeroed at terminal completion, and never returned in settings,
+status, logs, or raw reads.
+
+The application serializes all calls. Job admission rejects overlapping work
+with `BUSY`. Queued-only persistence permits the narrow setter admission above,
+but `pollEeprom()` cannot execute while that setter job is active; all unrelated
+jobs and primary ensure reject pending queue entries.
