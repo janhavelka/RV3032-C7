@@ -89,10 +89,13 @@ than spin or perform I2C.
 `readTime()` and `setTime()` each perform one calendar burst. `readHundredths()`
 provides a separate strict BCD read of register `0x00`; applications must allow
 for rollover relative to a separate calendar burst. `readTime()`
-strictly rejects reserved bits, invalid BCD/calendar fields, and a weekday that
-does not match the date. Writing Seconds resets the hundredths counter and the
-4096 Hz through 1 Hz prescalers. These helpers do not inspect or clear Status
-flags.
+strictly rejects reserved bits, invalid BCD/calendar fields, and weekday values
+outside `0..6`. The RV3032 weekday is user-assigned: every value `0..6` is
+accepted without requiring agreement with the date, and setters preserve the
+caller's valid value. `computeWeekday()` remains available for applications
+that want Gregorian weekday policy. Writing Seconds resets the hundredths
+counter and the 4096 Hz through 1 Hz prescalers. These helpers do not inspect
+or clear Status flags.
 
 Applications needing stronger evidence use:
 
@@ -104,12 +107,15 @@ uint8_t used = 0;
 RV3032::Status st = rtc.pollJob(nowMs, 1, used);
 ```
 
-The snapshot reads Status before the calendar and short-circuits when PORF or
-VLF is set. The verified setter writes once, reconciles an ambiguous callback by
-readback, accepts the requested value or exactly one second later, reads fresh
-Status, explicitly clears PORF/VLF, records the unavoidable THF/TLF clearing,
-and verifies final Status/calendar state. Larger polling budgets refresh elapsed
-time between callbacks so no later mutation starts after its cutoff.
+The snapshot reads Status before the calendar, returns typed `StatusFlags` from
+that same first callback, and short-circuits when typed PORF or VLF is set. The
+verified setter writes once, reconciles an ambiguous callback by readback,
+accepts the requested value or exactly one second later, reads fresh Status,
+and writes the named fixed payload `0xFC`. That payload clears PORF/VLF while
+preserving UF/TF/AF/EVF that may assert between the cooperative read and write.
+The report records the unavoidable THF/TLF clearing, and the job verifies final
+Status/calendar state. Larger polling budgets refresh elapsed time between
+callbacks so no later mutation starts after its cutoff.
 
 ## Persistent APIs
 
@@ -194,6 +200,14 @@ persistent read. Trusted cleanup restores active target state, clears EERD, and
 honors the 10 ms level-switch settle. Untrusted communicable failure holds
 verified BSM00/TCM00 and EERD=1 where possible; that volatile hold is not
 deployment-ready and does not survive POR.
+
+The terminal report exposes semantic evidence without requiring raw C0
+interpretation. `persistentTargetVerified` is set at the direct persistent
+read proving the derived target; `activeTargetVerified` is set only after the
+active C0 target is read back. Both remain true if a later Control 1 cleanup or
+settle step fails. A verified safe BSM00/TCM00 failure hold is deliberately not
+reported as active-target proof. `cleanupVerified` remains the separate
+terminal cleanup result.
 
 The caller must prove the electrical preconditions; the library cannot measure
 them. Keep VDD stable and at least 1.6 V through any EEPROM write and busy-clear
@@ -293,9 +307,12 @@ python tools/hil_cli_runner.py --dry-run
 
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
-authorization. Current task evidence is recorded in
-`docs/reports/2026-07-13-v2.0.0-implementation.md`; historical HIL evidence is
-kept separately and is not a 2.0.0 protocol claim.
+authorization. Current compatibility evidence is recorded in
+`docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md`; the broad
+2.0.0 implementation report and historical HIL evidence are kept separately.
+The library is a dependency candidate only: TunnelMonitor integration and an
+immutable commit pin remain external work, and old 1.5.0 HIL is not a 2.0.0
+primary-cell or retention claim.
 
 After such fresh authorization, `--destructive-setup` additionally requires
 explicit `--authorization-port`, `--authorization-module`,

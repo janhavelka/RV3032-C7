@@ -15,6 +15,7 @@ README, CHANGELOG, API headers, tests, or the maintained docs below.
 | [`DEVICE_REFERENCE.md`](DEVICE_REFERENCE.md) | Device facts used by the driver: I2C address, register map, flags, EEPROM sequence, timing, and implementation notes. |
 | [`IDF_PORT.md`](IDF_PORT.md) | ESP-IDF adapter boundary and verification checklist. |
 | [`reports/2026-07-13-v2.0.0-implementation.md`](reports/2026-07-13-v2.0.0-implementation.md) | Version 2.0.0 audit, capability matrix, and software verification evidence. |
+| [`reports/2026-07-14-tunnelmonitor-integration-readiness.md`](reports/2026-07-14-tunnelmonitor-integration-readiness.md) | Additive dependency-candidate compatibility remediation and verification evidence. |
 | [`reports/HIL_SUMMARY.md`](reports/HIL_SUMMARY.md) | Concise HIL evidence summary. Raw runner artifacts are not retained. |
 
 ## Implementation Prompt Suite 04
@@ -33,6 +34,11 @@ files in filename order:
 These prompts are implementation workflow artifacts. The public README, API
 headers, maintained architecture/device docs, tests, and changelog remain the
 authority for shipped behavior.
+
+The focused follow-up is
+[`prompts/05-tunnelmonitor-integration-readiness.md`](prompts/05-tunnelmonitor-integration-readiness.md).
+It corrects the weekday, typed snapshot, verified Status payload, and semantic
+primary-report contracts without moving consumer policy into the library.
 
 ## Curated Source Notes
 

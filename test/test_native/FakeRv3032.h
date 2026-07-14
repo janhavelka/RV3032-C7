@@ -46,6 +46,7 @@ struct FakeRv3032 {
   bool ignoreNextCommandAcked = false;
   bool earlyWait = false;
   uint32_t lateWaitExtraMs = 0;
+  uint32_t lateWaitOrdinal = 0;
   uint32_t callbackDurationMs = 0;
   uint32_t lateCallbackOrdinal = 0;
   uint32_t lateCallbackExtraMs = 0;
@@ -556,9 +557,12 @@ struct FakeRv3032 {
       fake.waitLogOverflow = true;
       fake.logOverflow = true;
     }
+    const bool lateThisWait = fake.lateWaitExtraMs != 0 &&
+        (fake.lateWaitOrdinal == 0 ||
+         fake.waitCount == fake.lateWaitOrdinal);
     const uint32_t actual = fake.earlyWait && delayMs > 0
         ? delayMs - 1U
-        : delayMs + fake.lateWaitExtraMs;
+        : delayMs + (lateThisWait ? fake.lateWaitExtraMs : 0U);
     fake.waitedMs += actual;
     fake.nowMs += actual;
     fake.completeCommand();

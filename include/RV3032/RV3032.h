@@ -80,7 +80,7 @@ struct DateTime {
   uint8_t hour = 0;      ///< Hour (0-23, 24-hour format)
   uint8_t minute = 0;    ///< Minute (0-59)
   uint8_t second = 0;    ///< Second (0-59)
-  uint8_t weekday = 0;   ///< Day of week (0-6, 0=Sunday, auto-calculated)
+  uint8_t weekday = 0;   ///< User-assigned weekday value (0-6)
 };
 
 /**
@@ -258,6 +258,7 @@ struct CoherentTemperatureResult {
 /** @brief Result of a status-first cooperative calendar snapshot. */
 struct TimeSnapshot {
   DateTime time{}; ///< Decoded time when timeValid is true.
+  StatusFlags statusFlags{}; ///< Typed flags decoded from the same Status callback.
   uint8_t statusRaw = 0; ///< Status byte observed before calendar access.
   bool statusValid = false; ///< True after the Status read succeeded.
   bool timeValid = false; ///< False when PORF/VLF prevented calendar access.
@@ -265,12 +266,12 @@ struct TimeSnapshot {
 
 /** @brief Evidence from the verified calendar-set and invalid-flag-clear job. */
 struct VerifiedTimeSetReport {
-  DateTime requested{}; ///< Requested calendar with weekday normalized from the date.
+  DateTime requested{}; ///< Requested calendar, including its user-assigned weekday.
   DateTime verified{}; ///< Last accepted calendar readback.
   Status calendarWriteStatus = Status::Ok(); ///< Exact callback result; meaningful only when calendarWriteAttempted is true.
   Status statusWriteStatus = Status::Ok(); ///< Exact callback result; meaningful only when statusWriteAttempted is true.
   uint8_t statusBefore = 0; ///< Status observed before any mutation.
-  uint8_t statusBeforeClear = 0; ///< Fresh Status used to construct the W0C write.
+  uint8_t statusBeforeClear = 0; ///< Fresh pre-clear Status retained as side-effect evidence.
   uint8_t statusAfter = 0; ///< Status read back after the W0C write.
   bool calendarWriteAttempted = false; ///< True after the sole calendar write callback was invoked.
   bool statusWriteAttempted = false; ///< True after the sole Status write callback was invoked.
@@ -374,6 +375,8 @@ struct PrimaryCellConfigurationReport {
   uint8_t control1After = 0;
   bool persistentBeforeValid = false;
   bool persistentAfterValid = false;
+  bool persistentTargetVerified = false; ///< Direct EEPROM read proved the exact derived primary-cell target.
+  bool activeTargetVerified = false; ///< Active-C0 readback proved the exact derived persistent target.
   bool writeCommandAttempted = false;
   bool writeDurablyVerified = false;
   bool cleanupVerified = false;
@@ -733,8 +736,9 @@ class RV3032 {
    * @brief Start a status-first calendar snapshot job.
    *
    * Admission performs zero I2C and stores a wrap-safe operation deadline.
-   * Each pollJob() instruction invokes at most one transport callback. PORF or
-   * VLF short-circuits the job after the Status read with `timeValid=false`.
+   * Each pollJob() instruction invokes at most one transport callback. Typed
+   * PORF or VLF evidence from that Status read short-circuits the job with
+   * `timeValid=false`.
    *
    * @param nowMs Current application monotonic time.
    * @param operationTimeoutMs Whole-operation timeout in `1..1000` ms.
@@ -756,13 +760,15 @@ class RV3032 {
   /**
    * @brief Start a verified calendar set followed by the named PORF/VLF clear.
    *
-   * The caller's weekday is ignored and normalized from year/month/day.
+   * The caller's user-assigned weekday is range-validated and written exactly.
    * Admission performs zero I2C. Calendar and Status writes are each attempted
    * at most once and ambiguous callback failures are reconciled by later
-   * readback. Clearing PORF/VLF necessarily also clears THF/TLF; the completed
-   * report records their fresh pre-clear state.
+   * readback. The Status payload is the fixed value 0xFC, preserving
+   * UF/TF/AF/EVF even if they become set between the pre-clear read and write.
+   * Clearing PORF/VLF necessarily also clears THF/TLF; the completed report
+   * records their fresh pre-clear state.
    *
-   * @param value Requested calendar value; `weekday` is ignored.
+   * @param value Requested calendar value; `weekday` must be in 0..6.
    * @param nowMs Current application monotonic time.
    * @param operationTimeoutMs Whole-operation timeout in `126..1000` ms.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
@@ -875,8 +881,8 @@ class RV3032 {
    * 
    * @param time Date/time structure with values to set
    * @return Status::Ok() on success, error on validation or I2C failure
-   * @note Weekday is auto-calculated from year/month/day. The time.weekday field is ignored.
-   *       Validates date/time values before writing. Writing Seconds resets the
+   * @note Weekday is user-assigned: values 0..6 are accepted without requiring
+   *       agreement with the date and are written unchanged. Writing Seconds resets the
    *       chip's hundredths counter and the 4096 Hz through 1 Hz prescalers.
    *       This helper does not verify readback or clear Status flags. Use
    *       startSetTimeAndClearInvalidFlagsVerifiedJob() for that contract.
@@ -1073,6 +1079,9 @@ class RV3032 {
   /// @note Rejected preconditions perform zero callbacks, leave report unchanged,
   ///       and do not consume the lifecycle attempt. operationStatus preserves
   ///       the forward-path result while cleanupStatus reports safety cleanup.
+  ///       persistentTargetVerified and activeTargetVerified are set at their
+  ///       direct-readback proof points and remain set if a later cleanup or
+  ///       settle step fails. A safe BSM00/TCM00 hold is not active-target proof.
   /// @warning The application transport owner must place both i2cWrite and
   ///          i2cWriteRead in scoped single-physical-attempt mode for the whole
   ///          call. No ensure read or write may recover or retry internally.
@@ -1916,8 +1925,8 @@ class RV3032 {
                          uint16_t checkCap, uint8_t& tempLsb,
                          bool requireCleanupReserve = false,
                          bool* callbackReturnedLate = nullptr);
-  static bool decodeCalendar(const uint8_t* data, DateTime& out,
-                             bool requireWeekdayMatch);
+  static StatusFlags decodeStatusFlags(uint8_t raw);
+  static bool decodeCalendar(const uint8_t* data, DateTime& out);
   static bool acceptedVerifiedTime(const DateTime& requested,
                                    const DateTime& observed);
 

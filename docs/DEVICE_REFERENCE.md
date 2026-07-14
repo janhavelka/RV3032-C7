@@ -23,7 +23,8 @@ mirror read proves durable state.
 
 Calendar registers `0x01..0x07` are packed BCD. Seconds, minutes, hours, date,
 month, and year have reserved upper bits that must be zero. Weekday is a
-binary value from 0..6 and must agree with the Gregorian date. Supported years are
+user-assigned BCD value from 0..6 and is not required to agree with the
+Gregorian date. Setters preserve a valid supplied weekday. Supported years are
 2000..2099.
 Register `0x00` is packed-BCD hundredths. It is read independently by the typed
 API. Writing Seconds or setting STOP resets hundredths and the 4096 Hz through
@@ -59,7 +60,10 @@ Status contains THF, TLF, UF, TF, AF, EVF, PORF, and VLF. Status bits use
 write-zero-to-clear semantics, but the device additionally clears THF and TLF
 on every Status-register write regardless of the written values. Every driver
 Status writer accounts for that rule. The named verified calendar job is the
-only calendar API that deliberately clears PORF/VLF.
+only calendar API that deliberately clears PORF/VLF. It writes exactly `0xFC`:
+ones in bits 7:2 preserve UF/TF/AF/EVF across the cooperative pre-read/write
+window, while PORF/VLF receive zeros. THF/TLF still clear unconditionally, and
+their immediately-preceding values are retained as typed report evidence.
 
 Guarded general Status clearing writes one to every unnamed lower-six W0C flag,
 so a newly asserted UF/TF/AF/EVF/PORF/VLF between its read and write is
@@ -96,6 +100,12 @@ least 2.0 V when the owner uses 400 kHz, and safely above the maximum 2.2 V LSM
 threshold through level-switch activation and the measured 10 ms settle. The
 application must also prove the board's backup/backfeed conditions; the driver
 cannot observe any of these electrical prerequisites.
+
+Primary reports expose `persistentTargetVerified` only after direct EEPROM
+equality proof and `activeTargetVerified` only after active-C0 target readback.
+Those fields retain partial proof if a later EERD cleanup or settle fails. A
+verified safe BSM00/TCM00 hold with untrusted persistence is not target proof;
+`cleanupVerified` reports completion of the required terminal cleanup.
 
 ## CLKOUT, calibration, and temperature
 

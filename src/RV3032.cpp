@@ -813,8 +813,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           finishJob(st);
           return st;
         }
+        _job.timeSnapshot.statusFlags =
+            decodeStatusFlags(_job.timeSnapshot.statusRaw);
         _job.timeSnapshot.statusValid = true;
-        if ((_job.timeSnapshot.statusRaw & 0x03u) != 0) {
+        if (_job.timeSnapshot.statusFlags.powerOnReset ||
+            _job.timeSnapshot.statusFlags.voltageLow) {
           finishJob(Status::Ok());
           return Status::Ok();
         }
@@ -827,7 +830,7 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           finishJob(st);
           return st;
         }
-        if (!decodeCalendar(_job.calendarBuf, _job.timeSnapshot.time, true)) {
+        if (!decodeCalendar(_job.calendarBuf, _job.timeSnapshot.time)) {
           st = Status::Error(Err::INVALID_DATETIME, "Invalid calendar encoding");
           finishJob(st);
           return st;
@@ -867,7 +870,7 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           return st;
         }
         DateTime decoded{};
-        if (!decodeCalendar(observed, decoded, true) ||
+        if (!decodeCalendar(observed, decoded) ||
             !acceptedVerifiedTime(_job.verifiedSet.requested, decoded)) {
           st = Status::Error(Err::EEPROM_VERIFY_FAILED, "Calendar readback mismatch");
           finishJob(st);
@@ -903,7 +906,7 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           finishJob(st);
           return st;
         }
-        const uint8_t value = static_cast<uint8_t>(_job.verifiedSet.statusBeforeClear & 0x3Cu);
+        const uint8_t value = cmd::STATUS_CLEAR_INVALID_TIME_VALUE;
         _job.verifiedSet.statusWriteAttempted = true;
         st = writeRegs(cmd::REG_STATUS, &value, 1);
         ++instructionsUsed;
@@ -939,7 +942,7 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           return st;
         }
         DateTime decoded{};
-        if (!decodeCalendar(observed, decoded, true) ||
+        if (!decodeCalendar(observed, decoded) ||
             !acceptedVerifiedTime(_job.verifiedSet.requested, decoded)) {
           st = Status::Error(Err::EEPROM_VERIFY_FAILED, "Final calendar mismatch");
           finishJob(st);
@@ -1114,7 +1117,8 @@ Status RV3032::startSetTimeAndClearInvalidFlagsVerifiedJob(
   if (value.year < 2000 || value.year > 2099 ||
       value.month < 1 || value.month > 12 ||
       value.day < 1 || value.day > daysInMonth(value.year, value.month) ||
-      value.hour > 23 || value.minute > 59 || value.second > 59) {
+      value.hour > 23 || value.minute > 59 || value.second > 59 ||
+      value.weekday > 6) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time");
   }
   if (operationTimeoutMs <= MIN_SET_TIME_OPERATION_BUDGET_MS ||
@@ -1122,8 +1126,6 @@ Status RV3032::startSetTimeAndClearInvalidFlagsVerifiedJob(
     return Status::Error(Err::INVALID_PARAM, "Verified-set timeout must be 126..1000 ms");
   }
 
-  DateTime normalized = value;
-  normalized.weekday = computeWeekday(value.year, value.month, value.day);
   _job = JobOp{};
   _job.activeKind = JobKind::SetTimeVerified;
   _job.deadlineMs = nowMs + operationTimeoutMs;
@@ -1131,14 +1133,14 @@ Status RV3032::startSetTimeAndClearInvalidFlagsVerifiedJob(
       (operationTimeoutMs - MIN_SET_TIME_OPERATION_BUDGET_MS);
   _job.deadlineActive = true;
   _job.mutationCutoffActive = true;
-  _job.verifiedSet.requested = normalized;
-  _job.calendarBuf[0] = binToBcd(normalized.second);
-  _job.calendarBuf[1] = binToBcd(normalized.minute);
-  _job.calendarBuf[2] = binToBcd(normalized.hour);
-  _job.calendarBuf[3] = binToBcd(normalized.weekday);
-  _job.calendarBuf[4] = binToBcd(normalized.day);
-  _job.calendarBuf[5] = binToBcd(normalized.month);
-  _job.calendarBuf[6] = binToBcd(static_cast<uint8_t>(normalized.year - 2000));
+  _job.verifiedSet.requested = value;
+  _job.calendarBuf[0] = binToBcd(value.second);
+  _job.calendarBuf[1] = binToBcd(value.minute);
+  _job.calendarBuf[2] = binToBcd(value.hour);
+  _job.calendarBuf[3] = binToBcd(value.weekday);
+  _job.calendarBuf[4] = binToBcd(value.day);
+  _job.calendarBuf[5] = binToBcd(value.month);
+  _job.calendarBuf[6] = binToBcd(static_cast<uint8_t>(value.year - 2000));
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
   _job.state = JobState::SetTimeReadStatusBefore;
   return _job.lastStatus;
@@ -1486,7 +1488,7 @@ Status RV3032::readTime(DateTime& out) {
     return st;  // readRegs() uses tracked I2C, so health state is already updated
   }
 
-  if (!decodeCalendar(buf, out, true)) {
+  if (!decodeCalendar(buf, out)) {
     return Status::Error(Err::INVALID_DATETIME, "RTC returned invalid calendar encoding");
   }
 
@@ -1512,22 +1514,19 @@ Status RV3032::setTime(const DateTime& time) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
 
-  // Validate input fields BEFORE computing weekday to avoid calling
-  // dateToDays() with out-of-range month/day values.
   if (time.year < 2000 || time.year > 2099 ||
       time.month < 1 || time.month > 12 ||
       time.day < 1 || time.day > daysInMonth(time.year, time.month) ||
-      time.hour > 23 || time.minute > 59 || time.second > 59) {
+      time.hour > 23 || time.minute > 59 || time.second > 59 ||
+      time.weekday > 6) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time values");
   }
-
-  uint8_t weekday = computeWeekday(time.year, time.month, time.day);
 
   uint8_t buf[7] = {
     binToBcd(time.second),
     binToBcd(time.minute),
     binToBcd(time.hour),
-    static_cast<uint8_t>(weekday & 0x07),
+    binToBcd(time.weekday),
     binToBcd(time.day),
     binToBcd(time.month),
     binToBcd(static_cast<uint8_t>(time.year % 100))
@@ -2026,6 +2025,7 @@ Status RV3032::ensurePrimaryCellConfiguration(
         cmd::PMU_BSM_LEVEL);
     local.persistentTarget = target;
     if (persistentBefore == target) {
+      local.persistentTargetVerified = true;
       persistenceTrusted = true;
       local.persistentAfter = persistentBefore;
       local.persistentAfterValid = true;
@@ -2157,6 +2157,9 @@ Status RV3032::ensurePrimaryCellConfiguration(
                                              local, callbackReturnedLate);
       local.persistentAfter = persistentAfter;
       local.persistentAfterValid = operation.ok();
+      if (operation.ok() && persistentAfter == target) {
+        local.persistentTargetVerified = true;
+      }
     }
     if (operation.ok() && !eefClear) {
       operation = Status::Error(Err::EEPROM_WRITE_FAILED,
@@ -2979,14 +2982,7 @@ Status RV3032::readStatusFlags(StatusFlags& out) {
     return st;
   }
 
-  out.tempHigh = (status & (1u << cmd::STATUS_THF_BIT)) != 0;
-  out.tempLow = (status & (1u << cmd::STATUS_TLF_BIT)) != 0;
-  out.update = (status & (1u << cmd::STATUS_UF_BIT)) != 0;
-  out.timer = (status & (1u << cmd::STATUS_TF_BIT)) != 0;
-  out.alarm = (status & (1u << cmd::STATUS_AF_BIT)) != 0;
-  out.event = (status & (1u << cmd::STATUS_EVF_BIT)) != 0;
-  out.powerOnReset = (status & (1u << cmd::STATUS_PORF_BIT)) != 0;
-  out.voltageLow = (status & (1u << cmd::STATUS_VLF_BIT)) != 0;
+  out = decodeStatusFlags(status);
 
   return Status::Ok();
 }
@@ -3513,12 +3509,12 @@ Status RV3032::cleanupPrimaryCellEnsure(
   }
 
   uint8_t activeTarget = 0;
-  bool activeTargetVerified = false;
+  bool activeTargetAlreadyVerified = false;
   if (persistenceTrusted) {
     activeTarget = target;
   } else if (safeValid) {
     activeTarget = safeActive;
-    activeTargetVerified = true;
+    activeTargetAlreadyVerified = true;
     report.activeAfter = safeActive;
   } else if (safeActiveWriteAmbiguous) {
     uint8_t observedActive = 0;
@@ -3532,9 +3528,9 @@ Status RV3032::cleanupPrimaryCellEnsure(
     }
     activeTarget = static_cast<uint8_t>(
         observedActive & cmd::PMU_PRIMARY_PRESERVE_MASK);
-    activeTargetVerified =
+    activeTargetAlreadyVerified =
         (observedActive & cmd::PMU_IMPLEMENTED_MASK) == activeTarget;
-    if (activeTargetVerified) report.activeAfter = observedActive;
+    if (activeTargetAlreadyVerified) report.activeAfter = observedActive;
   } else if (activeValid) {
     activeTarget = static_cast<uint8_t>(
         activeBefore & cmd::PMU_PRIMARY_PRESERVE_MASK);
@@ -3552,7 +3548,7 @@ Status RV3032::cleanupPrimaryCellEnsure(
 
   uint32_t activeVerifiedAt = 0;
   uint8_t activeCheck = 0;
-  if (!activeTargetVerified) {
+  if (!activeTargetAlreadyVerified) {
     st = ensureWrite(cmd::REG_ACTIVE_PMU, &activeTarget, 1, operationStart,
                      PRIMARY_CELL_OPERATION_TIMEOUT_MS, false, nullptr,
                      &callbackReturnedLate);
@@ -3572,7 +3568,10 @@ Status RV3032::cleanupPrimaryCellEnsure(
   } else {
     activeCheck = report.activeAfter;
   }
-  if (persistenceTrusted) activeVerifiedAt = _nowMs();
+  if (persistenceTrusted) {
+    report.activeTargetVerified = true;
+    activeVerifiedAt = _nowMs();
+  }
 
   if (!control1Valid) {
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
@@ -4638,8 +4637,20 @@ Status RV3032::readEepromFlags(bool& busy, bool& failed) {
 
 // ===== Conversion Helper Functions =====
 
-bool RV3032::decodeCalendar(const uint8_t* data, DateTime& out,
-                            bool requireWeekdayMatch) {
+StatusFlags RV3032::decodeStatusFlags(uint8_t raw) {
+  StatusFlags flags{};
+  flags.tempHigh = (raw & (1u << cmd::STATUS_THF_BIT)) != 0;
+  flags.tempLow = (raw & (1u << cmd::STATUS_TLF_BIT)) != 0;
+  flags.update = (raw & (1u << cmd::STATUS_UF_BIT)) != 0;
+  flags.timer = (raw & (1u << cmd::STATUS_TF_BIT)) != 0;
+  flags.alarm = (raw & (1u << cmd::STATUS_AF_BIT)) != 0;
+  flags.event = (raw & (1u << cmd::STATUS_EVF_BIT)) != 0;
+  flags.powerOnReset = (raw & (1u << cmd::STATUS_PORF_BIT)) != 0;
+  flags.voltageLow = (raw & (1u << cmd::STATUS_VLF_BIT)) != 0;
+  return flags;
+}
+
+bool RV3032::decodeCalendar(const uint8_t* data, DateTime& out) {
   if (data == nullptr || (data[0] & 0x80u) != 0 ||
       (data[1] & 0x80u) != 0 || (data[2] & 0xC0u) != 0 ||
       (data[3] & 0xF8u) != 0 || (data[4] & 0xC0u) != 0 ||
@@ -4659,11 +4670,7 @@ bool RV3032::decodeCalendar(const uint8_t* data, DateTime& out,
   decoded.day = bcdToBin(data[4]);
   decoded.month = bcdToBin(data[5]);
   decoded.year = static_cast<uint16_t>(2000 + bcdToBin(data[6]));
-  if (!isValidDateTime(decoded) || decoded.weekday > 6) {
-    return false;
-  }
-  if (requireWeekdayMatch && decoded.weekday !=
-      computeWeekday(decoded.year, decoded.month, decoded.day)) {
+  if (!isValidDateTime(decoded)) {
     return false;
   }
   out = decoded;

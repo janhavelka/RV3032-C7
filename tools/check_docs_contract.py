@@ -19,6 +19,7 @@ REQUIRED_SOURCE_FILES = [
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
     "docs/reports/2026-07-13-v2.0.0-implementation.md",
+    "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
     "docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
     "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf",
     "docs/extracted-md/00_document_inventory.md",
@@ -47,6 +48,7 @@ REQUIRED_PACKAGE_FILES = [
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
     "docs/reports/2026-07-13-v2.0.0-implementation.md",
+    "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
     "docs/extracted-md/00_document_inventory.md",
     "docs/extracted-md/01_chip_overview.md",
     "docs/extracted-md/02_pinout_and_signals.md",
@@ -91,6 +93,24 @@ def check_source() -> int:
                       "Hardware-in-the-loop status is **NOT RUN**", "Worktree state"):
             if token not in report_text:
                 errors.append(f"implementation report missing token: {token!r}")
+
+    readiness_report = (
+        ROOT / "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md"
+    )
+    if readiness_report.is_file():
+        readiness_text = readiness_report.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        for token in (
+            "Four closed compatibility gaps",
+            "Requirement-to-evidence matrix",
+            "Physical HIL status is **NOT RUN**",
+            "Final worktree state",
+        ):
+            if token not in readiness_text:
+                errors.append(
+                    f"readiness report missing token: {token!r}"
+                )
 
     if errors:
         print("Docs source contract FAILED:")

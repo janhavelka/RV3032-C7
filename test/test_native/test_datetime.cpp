@@ -118,12 +118,53 @@ uint32_t findWriteOrdinal(const FakeRv3032& fake, uint8_t reg,
   return 0;
 }
 
+uint32_t findPersistentProofOrdinal(const FakeRv3032& fake,
+                                    uint8_t readOneOccurrence) {
+  uint8_t readOneCount = 0;
+  for (size_t i = 0; i < fake.logCount; ++i) {
+    if (fake.log[i].write &&
+        fake.log[i].reg == RV3032::cmd::REG_EE_COMMAND &&
+        fake.log[i].length == 1 &&
+        fake.log[i].data[0] == RV3032::cmd::EEPROM_CMD_READ_ONE) {
+      ++readOneCount;
+    } else if (readOneCount == readOneOccurrence &&
+               !fake.log[i].write &&
+               fake.log[i].reg == RV3032::cmd::REG_EE_DATA) {
+      return static_cast<uint32_t>(i + 1U);
+    }
+  }
+  return 0;
+}
+
+uint32_t findActiveTargetProofOrdinal(const FakeRv3032& fake) {
+  uint32_t ordinal = 0;
+  for (size_t i = 0; i < fake.logCount; ++i) {
+    if (!fake.log[i].write &&
+        fake.log[i].reg == RV3032::cmd::REG_ACTIVE_PMU) {
+      ordinal = static_cast<uint32_t>(i + 1U);
+    }
+  }
+  return ordinal;
+}
+
+void assertPrimaryTargetEvidence(
+    const RV3032::PrimaryCellConfigurationReport& report,
+    bool expectedPersistent, bool expectedActive) {
+  TEST_ASSERT_EQUAL(expectedPersistent, report.persistentTargetVerified);
+  TEST_ASSERT_EQUAL(expectedActive, report.activeTargetVerified);
+  if (report.activeTargetVerified) {
+    TEST_ASSERT_TRUE(report.persistentTargetVerified);
+  }
+}
+
 void assertPrimaryFaultCleanup(const FakeRv3032& fake,
                                const RV3032::RV3032& rtc,
                                const RV3032::Status& status,
                                const RV3032::PrimaryCellConfigurationReport& report,
                                uint32_t ordinal, uint8_t initialActive,
-                               uint8_t initialControl1) {
+                               uint8_t initialControl1,
+                               bool expectedPersistent,
+                               bool expectedActive) {
   TEST_ASSERT_GREATER_OR_EQUAL_UINT32(ordinal, fake.callbackCount);
   TEST_ASSERT_FALSE(status.ok());
   TEST_ASSERT_EQUAL_UINT8(
@@ -136,6 +177,8 @@ void assertPrimaryFaultCleanup(const FakeRv3032& fake,
   TEST_ASSERT_FALSE(fake.protocolViolation);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   TEST_ASSERT_FALSE(fake.logOverflow);
+
+  assertPrimaryTargetEvidence(report, expectedPersistent, expectedActive);
 
   if (report.cleanupVerified) {
     TEST_ASSERT_TRUE(report.cleanupStatus.ok());
@@ -412,8 +455,84 @@ void test_read_time_is_strict_single_transfer() {
                           static_cast<uint8_t>(rtc.readTime(value).code));
   fake.direct[RV3032::cmd::REG_HOURS] &= 0x3F;
   fake.direct[RV3032::cmd::REG_WEEKDAY] = 2;
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
-                          static_cast<uint8_t>(rtc.readTime(value).code));
+  TEST_ASSERT_TRUE(rtc.readTime(value).ok());
+  TEST_ASSERT_EQUAL_UINT8(2, value.weekday);
+}
+
+void test_calendar_weekday_is_user_assigned_and_range_only() {
+  for (uint8_t weekday = 0; weekday <= 6; ++weekday) {
+    FakeRv3032 fake;
+    fake.setCalendar(2026, 7, 13, 12, 34, 56, weekday);
+    fake.direct[RV3032::cmd::REG_STATUS] = 0;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+
+    RV3032::DateTime read{};
+    TEST_ASSERT_TRUE(rtc.readTime(read).ok());
+    TEST_ASSERT_EQUAL_UINT8(weekday, read.weekday);
+
+    TEST_ASSERT_TRUE(rtc.startReadTimeSnapshotJob(fake.nowMs).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    RV3032::TimeSnapshot snapshot{};
+    TEST_ASSERT_TRUE(rtc.getReadTimeSnapshotJobResult(snapshot).ok());
+    TEST_ASSERT_TRUE(snapshot.timeValid);
+    TEST_ASSERT_EQUAL_UINT8(weekday, snapshot.time.weekday);
+
+    const RV3032::DateTime requested{2026, 7, 13, 12, 34, 56, weekday};
+    const uint32_t beforeSet = fake.callbackCount;
+    TEST_ASSERT_TRUE(rtc.setTime(requested).ok());
+    TEST_ASSERT_EQUAL_UINT32(beforeSet + 1U, fake.callbackCount);
+    TEST_ASSERT_TRUE(fake.log[fake.logCount - 1U].write);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_SECONDS,
+                           fake.log[fake.logCount - 1U].reg);
+    TEST_ASSERT_EQUAL_HEX8(FakeRv3032::bcd(weekday),
+                           fake.log[fake.logCount - 1U].data[3]);
+
+    TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
+        requested, fake.nowMs, 250).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    RV3032::VerifiedTimeSetReport report{};
+    TEST_ASSERT_TRUE(
+        rtc.getSetTimeAndClearInvalidFlagsVerifiedJobResult(report).ok());
+    TEST_ASSERT_EQUAL_UINT8(weekday, report.requested.weekday);
+    TEST_ASSERT_EQUAL_UINT8(weekday, report.verified.weekday);
+    const size_t calendarWriteIndex = fake.logCount - 6U;
+    TEST_ASSERT_TRUE(fake.log[calendarWriteIndex].write);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_SECONDS,
+                           fake.log[calendarWriteIndex].reg);
+    TEST_ASSERT_EQUAL_HEX8(FakeRv3032::bcd(weekday),
+                           fake.log[calendarWriteIndex].data[3]);
+  }
+
+  FakeRv3032 fake;
+  fake.setCalendar(2026, 7, 13, 12, 34, 56, 1);
+  fake.direct[RV3032::cmd::REG_STATUS] = 0;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+  const RV3032::DateTime invalidWeekday{2026, 7, 13, 12, 34, 56, 7};
+  RV3032::DateTime unchanged{};
+  const uint32_t beforeInvalidSet = fake.callbackCount;
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
+      static_cast<uint8_t>(rtc.setTime(invalidWeekday).code));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
+      static_cast<uint8_t>(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
+          invalidWeekday, fake.nowMs, 250).code));
+  TEST_ASSERT_EQUAL_UINT32(beforeInvalidSet, fake.callbackCount);
+
+  fake.direct[RV3032::cmd::REG_WEEKDAY] = 0x07;
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
+      static_cast<uint8_t>(rtc.readTime(unchanged).code));
+  fake.direct[RV3032::cmd::REG_WEEKDAY] = 0x08;
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
+      static_cast<uint8_t>(rtc.readTime(unchanged).code));
+  fake.direct[RV3032::cmd::REG_WEEKDAY] = 0x0A;
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::INVALID_DATETIME),
+      static_cast<uint8_t>(rtc.readTime(unchanged).code));
 }
 
 void test_status_first_snapshot_job_and_result_contract() {
@@ -423,10 +542,12 @@ void test_status_first_snapshot_job_and_result_contract() {
   TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
   RV3032::TimeSnapshot unchanged{};
   unchanged.statusRaw = 0xA5;
+  unchanged.statusFlags.powerOnReset = true;
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(RV3032::Err::JOB_RESULT_UNAVAILABLE),
       static_cast<uint8_t>(rtc.getReadTimeSnapshotJobResult(unchanged).code));
   TEST_ASSERT_EQUAL_HEX8(0xA5, unchanged.statusRaw);
+  TEST_ASSERT_TRUE(unchanged.statusFlags.powerOnReset);
 
   TEST_ASSERT_TRUE(rtc.startReadTimeSnapshotJob(fake.nowMs).inProgress());
   const uint32_t admittedCallbacks = fake.callbackCount;
@@ -436,10 +557,12 @@ void test_status_first_snapshot_job_and_result_contract() {
   TEST_ASSERT_EQUAL_UINT32(admittedCallbacks, fake.callbackCount);
   RV3032::TimeSnapshot inProgress{};
   inProgress.statusRaw = 0x5A;
+  inProgress.statusFlags.voltageLow = true;
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(RV3032::Err::IN_PROGRESS),
       static_cast<uint8_t>(rtc.getReadTimeSnapshotJobResult(inProgress).code));
   TEST_ASSERT_EQUAL_HEX8(0x5A, inProgress.statusRaw);
+  TEST_ASSERT_TRUE(inProgress.statusFlags.voltageLow);
   uint8_t used = 99;
   TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 0, used).inProgress());
   TEST_ASSERT_EQUAL_UINT8(0, used);
@@ -449,6 +572,8 @@ void test_status_first_snapshot_job_and_result_contract() {
   TEST_ASSERT_TRUE(rtc.getReadTimeSnapshotJobResult(result).ok());
   TEST_ASSERT_TRUE(result.statusValid);
   TEST_ASSERT_FALSE(result.timeValid);
+  TEST_ASSERT_TRUE(result.statusFlags.powerOnReset);
+  TEST_ASSERT_TRUE(result.statusFlags.voltageLow);
   TEST_ASSERT_EQUAL_UINT32(1, fake.callbackCount);
   const uint32_t beforeRejectedStart = fake.callbackCount;
   TEST_ASSERT_EQUAL_UINT8(
@@ -468,6 +593,8 @@ void test_status_first_snapshot_job_and_result_contract() {
   TEST_ASSERT_EQUAL_UINT32(beforeFullSnapshot + 2U, fake.callbackCount);
   TEST_ASSERT_TRUE(rtc.getReadTimeSnapshotJobResult(result).ok());
   TEST_ASSERT_TRUE(result.timeValid);
+  TEST_ASSERT_FALSE(result.statusFlags.powerOnReset);
+  TEST_ASSERT_FALSE(result.statusFlags.voltageLow);
 
   fake.failOrdinal = fake.callbackCount + 2U;
   TEST_ASSERT_TRUE(rtc.startReadTimeSnapshotJob(fake.nowMs).inProgress());
@@ -480,6 +607,8 @@ void test_status_first_snapshot_job_and_result_contract() {
                           static_cast<uint8_t>(partialStatus.code));
   TEST_ASSERT_TRUE(partial.statusValid);
   TEST_ASSERT_FALSE(partial.timeValid);
+  TEST_ASSERT_FALSE(partial.statusFlags.powerOnReset);
+  TEST_ASSERT_FALSE(partial.statusFlags.voltageLow);
 
   fake.failOrdinal = 0;
   TEST_ASSERT_TRUE(rtc.startSetTimerJob(
@@ -510,7 +639,7 @@ void test_status_first_snapshot_rejects_every_invalid_calendar_encoding() {
       {RV3032::cmd::REG_MONTH, 0x13},
       {RV3032::cmd::REG_YEAR, 0xFA},
       {RV3032::cmd::REG_WEEKDAY, 0x07},
-      {RV3032::cmd::REG_WEEKDAY, 0x02},
+      {RV3032::cmd::REG_WEEKDAY, 0x0A},
   };
 
   for (const InvalidEncoding& invalid : cases) {
@@ -535,6 +664,150 @@ void test_status_first_snapshot_rejects_every_invalid_calendar_encoding() {
   }
 }
 
+void test_status_first_snapshot_exposes_typed_invalid_flags() {
+  for (uint8_t raw = 0; raw <= 3; ++raw) {
+    FakeRv3032 fake;
+    fake.setCalendar(2026, 7, 13, 1, 2, 3, 6);
+    fake.direct[RV3032::cmd::REG_STATUS] = raw;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    TEST_ASSERT_TRUE(rtc.startReadTimeSnapshotJob(fake.nowMs).inProgress());
+
+    uint8_t used = 0;
+    const RV3032::Status first = rtc.pollJob(fake.nowMs, 1, used);
+    TEST_ASSERT_EQUAL_UINT8(1, used);
+    const bool porf = (raw & 0x02u) != 0;
+    const bool vlf = (raw & 0x01u) != 0;
+    if (porf || vlf) {
+      TEST_ASSERT_TRUE(first.ok());
+    } else {
+      TEST_ASSERT_TRUE(first.inProgress());
+      TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 1, used).ok());
+      TEST_ASSERT_EQUAL_UINT8(1, used);
+    }
+
+    RV3032::TimeSnapshot result{};
+    TEST_ASSERT_TRUE(rtc.getReadTimeSnapshotJobResult(result).ok());
+    TEST_ASSERT_EQUAL_HEX8(raw, result.statusRaw);
+    TEST_ASSERT_TRUE(result.statusValid);
+    TEST_ASSERT_EQUAL(porf, result.statusFlags.powerOnReset);
+    TEST_ASSERT_EQUAL(vlf, result.statusFlags.voltageLow);
+    TEST_ASSERT_EQUAL(!(porf || vlf), result.timeValid);
+    TEST_ASSERT_EQUAL_UINT32(porf || vlf ? 1U : 2U, fake.callbackCount);
+  }
+
+  FakeRv3032 failedFake;
+  failedFake.failOrdinal = 1;
+  RV3032::RV3032 failedRtc;
+  TEST_ASSERT_TRUE(failedRtc.begin(failedFake.config()).ok());
+  TEST_ASSERT_TRUE(
+      failedRtc.startReadTimeSnapshotJob(failedFake.nowMs).inProgress());
+  uint8_t used = 0;
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::I2C_BUS),
+      static_cast<uint8_t>(
+          failedRtc.pollJob(failedFake.nowMs, 1, used).code));
+  TEST_ASSERT_EQUAL_UINT8(1, used);
+  RV3032::TimeSnapshot failed{};
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::I2C_BUS),
+      static_cast<uint8_t>(
+          failedRtc.getReadTimeSnapshotJobResult(failed).code));
+  TEST_ASSERT_FALSE(failed.statusValid);
+  TEST_ASSERT_FALSE(failed.timeValid);
+  TEST_ASSERT_FALSE(failed.statusFlags.powerOnReset);
+  TEST_ASSERT_FALSE(failed.statusFlags.voltageLow);
+}
+
+void test_verified_calendar_accepts_user_assigned_readback_weekday() {
+  FakeRv3032 fake;
+  fake.direct[RV3032::cmd::REG_STATUS] = 0;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+  const RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 6};
+  TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
+      requested, fake.nowMs, 250).inProgress());
+
+  uint8_t used = 0;
+  TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 1, used).inProgress());
+  TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 1, used).inProgress());
+  fake.setCalendar(2026, 7, 13, 12, 0, 0, 2);
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+
+  RV3032::VerifiedTimeSetReport report{};
+  TEST_ASSERT_TRUE(
+      rtc.getSetTimeAndClearInvalidFlagsVerifiedJobResult(report).ok());
+  TEST_ASSERT_EQUAL_UINT8(6, report.requested.weekday);
+  TEST_ASSERT_EQUAL_UINT8(2, report.verified.weekday);
+  TEST_ASSERT_EQUAL_HEX8(FakeRv3032::bcd(6), fake.log[1].data[3]);
+}
+
+void test_verified_calendar_status_payload_is_fixed_for_every_status() {
+  for (uint16_t raw = 0; raw <= 0xFFu; ++raw) {
+    FakeRv3032 fake;
+    fake.setCalendar(2020, 1, 1, 0, 0, 0, 3);
+    fake.direct[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(raw);
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    const RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 4};
+    TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
+        requested, fake.nowMs, 250).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+
+    TEST_ASSERT_EQUAL_UINT32(7, fake.logCount);
+    TEST_ASSERT_TRUE(fake.log[4].write);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS, fake.log[4].reg);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::STATUS_CLEAR_INVALID_TIME_VALUE,
+                           fake.log[4].data[0]);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(raw) & 0x3Cu,
+                           fake.direct[RV3032::cmd::REG_STATUS]);
+    TEST_ASSERT_EQUAL_UINT32(1,
+        countWritesTo(fake, RV3032::cmd::REG_SECONDS));
+    TEST_ASSERT_EQUAL_UINT32(1,
+        countWritesTo(fake, RV3032::cmd::REG_STATUS));
+  }
+}
+
+void test_verified_calendar_preserves_flags_set_between_read_and_write() {
+  const uint8_t eventBits[] = {
+      static_cast<uint8_t>(1u << RV3032::cmd::STATUS_UF_BIT),
+      static_cast<uint8_t>(1u << RV3032::cmd::STATUS_TF_BIT),
+      static_cast<uint8_t>(1u << RV3032::cmd::STATUS_AF_BIT),
+      static_cast<uint8_t>(1u << RV3032::cmd::STATUS_EVF_BIT),
+  };
+  for (uint8_t eventBit : eventBits) {
+    FakeRv3032 fake;
+    fake.setCalendar(2020, 1, 1, 0, 0, 0, 3);
+    fake.direct[RV3032::cmd::REG_STATUS] = 0x03;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    const RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 5};
+    TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
+        requested, fake.nowMs, 250).inProgress());
+
+    uint8_t used = 0;
+    for (uint8_t callback = 0; callback < 4; ++callback) {
+      TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 1, used).inProgress());
+      TEST_ASSERT_EQUAL_UINT8(1, used);
+    }
+    fake.direct[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(
+        fake.direct[RV3032::cmd::REG_STATUS] | eventBit);
+    TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 1, used).inProgress());
+    TEST_ASSERT_BITS_HIGH(eventBit,
+                          fake.direct[RV3032::cmd::REG_STATUS]);
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    TEST_ASSERT_BITS_HIGH(eventBit,
+                          fake.direct[RV3032::cmd::REG_STATUS]);
+    TEST_ASSERT_BITS_LOW(0x03, fake.direct[RV3032::cmd::REG_STATUS]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::STATUS_CLEAR_INVALID_TIME_VALUE,
+                           fake.log[4].data[0]);
+    TEST_ASSERT_EQUAL_UINT32(1,
+        countWritesTo(fake, RV3032::cmd::REG_SECONDS));
+    TEST_ASSERT_EQUAL_UINT32(1,
+        countWritesTo(fake, RV3032::cmd::REG_STATUS));
+  }
+}
+
 void test_verified_calendar_set_reports_status_side_effects() {
   FakeRv3032 fake;
   fake.setCalendar(2020, 1, 1, 0, 0, 0, 3);
@@ -550,7 +823,7 @@ void test_verified_calendar_set_reports_status_side_effects() {
           rtc.getSetTimeAndClearInvalidFlagsVerifiedJobResult(unavailable).code));
   TEST_ASSERT_EQUAL_HEX8(0xA5, unavailable.statusBefore);
 
-  RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 0xFF};
+  RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 6};
   TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
       requested, fake.nowMs, 250).inProgress());
 
@@ -591,7 +864,8 @@ void test_verified_calendar_set_reports_status_side_effects() {
   TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS, fake.log[3].reg);
   TEST_ASSERT_TRUE(fake.log[4].write);
   TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS, fake.log[4].reg);
-  TEST_ASSERT_EQUAL_HEX8(0x3C, fake.log[4].data[0]);
+  TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::STATUS_CLEAR_INVALID_TIME_VALUE,
+                         fake.log[4].data[0]);
   TEST_ASSERT_FALSE(fake.log[5].write);
   TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::REG_STATUS, fake.log[5].reg);
   TEST_ASSERT_FALSE(fake.log[6].write);
@@ -618,11 +892,8 @@ void test_verified_calendar_set_reports_status_side_effects() {
   TEST_ASSERT_EQUAL_HEX8(0xFF, report.statusBeforeClear);
   TEST_ASSERT_EQUAL_HEX8(0x3C, report.statusAfter);
   TEST_ASSERT_EQUAL_HEX8(0x3C, fake.direct[RV3032::cmd::REG_STATUS]);
-  const RV3032::DateTime normalized{
-      2026, 7, 13, 12, 0, 0,
-      RV3032::RV3032::computeWeekday(2026, 7, 13)};
-  assertDateTimeEquals(normalized, report.requested);
-  assertDateTimeEquals(normalized, report.verified);
+  assertDateTimeEquals(requested, report.requested);
+  assertDateTimeEquals(requested, report.verified);
 
   const RV3032::DateTime rejected{2026, 2, 30, 12, 0, 0, 0};
   const uint32_t beforeRejectedStart = fake.callbackCount;
@@ -634,7 +905,7 @@ void test_verified_calendar_set_reports_status_side_effects() {
   RV3032::VerifiedTimeSetReport retained{};
   TEST_ASSERT_TRUE(
       rtc.getSetTimeAndClearInvalidFlagsVerifiedJobResult(retained).ok());
-  assertDateTimeEquals(normalized, retained.verified);
+  assertDateTimeEquals(requested, retained.verified);
 
   TEST_ASSERT_TRUE(rtc.startSetTimerJob(
       1, RV3032::TimerFrequency::Hz1, false).inProgress());
@@ -705,7 +976,7 @@ void test_calendar_multi_instruction_budget_refreshes_deadlines_and_cutoffs() {
     fake.direct[RV3032::cmd::REG_STATUS] = 0x03;
     RV3032::RV3032 rtc;
     TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
-    const RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 0xFF};
+    const RV3032::DateTime requested{2026, 7, 13, 12, 0, 0, 6};
     TEST_ASSERT_TRUE(rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(
         requested, fake.nowMs, 250).inProgress());
     uint8_t used = 0;
@@ -2309,6 +2580,8 @@ void test_primary_cell_already_correct_is_read_only_and_latched() {
       static_cast<uint8_t>(report.outcome));
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_EQUAL_UINT16(1, fake.readOneAttempts);
+  TEST_ASSERT_FALSE(report.writeDurablyVerified);
+  assertPrimaryTargetEvidence(report, true, true);
   TEST_ASSERT_TRUE(report.cleanupVerified);
   TEST_ASSERT_EQUAL_HEX8(0x2C, report.activeAfter);
   const uint32_t callbacks = fake.callbackCount;
@@ -2339,6 +2612,7 @@ void test_primary_cell_updates_exact_target_once() {
   TEST_ASSERT_EQUAL_UINT16(2, fake.readOneAttempts);
   TEST_ASSERT_EQUAL_UINT32(fake.callbackCount, fake.physicalAttemptCount);
   TEST_ASSERT_TRUE(report.writeDurablyVerified);
+  assertPrimaryTargetEvidence(report, true, true);
   TEST_ASSERT_FALSE(fake.protocolViolation);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
 }
@@ -2379,6 +2653,7 @@ void test_primary_cell_preserves_all_nclke_tcr_and_control1_bits() {
       TEST_ASSERT_EQUAL_UINT16(2, fake.readOneAttempts);
       TEST_ASSERT_TRUE(report.writeDurablyVerified);
       TEST_ASSERT_TRUE(report.cleanupVerified);
+      assertPrimaryTargetEvidence(report, true, true);
       TEST_ASSERT_FALSE(fake.protocolViolation);
       TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
     }
@@ -2399,6 +2674,7 @@ void test_primary_cell_rejects_persistent_c0_bit7_without_target_write() {
       static_cast<uint8_t>(RV3032::PrimaryCellConfigurationOutcome::FAILED),
       static_cast<uint8_t>(report.outcome));
   TEST_ASSERT_FALSE(report.persistentBeforeValid);
+  assertPrimaryTargetEvidence(report, false, false);
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_EQUAL_UINT16(1, fake.readOneAttempts);
   TEST_ASSERT_TRUE(report.cleanupVerified);
@@ -2445,6 +2721,7 @@ void test_primary_cell_repairs_stale_active_from_correct_persistence() {
                 RV3032::cmd::CONTROL1_IMPLEMENTED_MASK);
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_EQUAL_UINT16(1, fake.readOneAttempts);
+  assertPrimaryTargetEvidence(report, true, true);
   TEST_ASSERT_TRUE(report.cleanupVerified);
   TEST_ASSERT_FALSE(fake.protocolViolation);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
@@ -2514,17 +2791,41 @@ void test_primary_cell_ambiguous_write_is_reconciled_without_retry() {
   }
   TEST_ASSERT_NOT_EQUAL(0, commandOrdinal);
 
-  FakeRv3032 fake;
-  fake.persistent[0] = 0;
-  fake.resetFromPersistent();
-  fake.failOrdinal = commandOrdinal;
-  fake.failCommandAfterCommit = true;
-  RV3032::RV3032 rtc;
-  TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
-  RV3032::PrimaryCellConfigurationReport report{};
-  TEST_ASSERT_TRUE(rtc.ensurePrimaryCellConfiguration(report).ok());
-  TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
-  TEST_ASSERT_TRUE(report.writeDurablyVerified);
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = 0;
+    fake.resetFromPersistent();
+    fake.failOrdinal = commandOrdinal;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    RV3032::PrimaryCellConfigurationReport report{};
+    const RV3032::Status status =
+        rtc.ensurePrimaryCellConfiguration(report);
+    TEST_ASSERT_FALSE(status.ok());
+    TEST_ASSERT_TRUE(report.writeCommandAttempted);
+    TEST_ASSERT_FALSE(report.writeDurablyVerified);
+    TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
+    TEST_ASSERT_EQUAL_UINT32(1, countEepromCommands(
+        fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE));
+    assertPrimaryTargetEvidence(report, false, false);
+    TEST_ASSERT_TRUE(report.cleanupVerified);
+    TEST_ASSERT_TRUE(report.autoRefreshHeldDisabledForSafety);
+  }
+
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = 0;
+    fake.resetFromPersistent();
+    fake.failOrdinal = commandOrdinal;
+    fake.failCommandAfterCommit = true;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    RV3032::PrimaryCellConfigurationReport report{};
+    TEST_ASSERT_TRUE(rtc.ensurePrimaryCellConfiguration(report).ok());
+    TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
+    TEST_ASSERT_TRUE(report.writeDurablyVerified);
+    assertPrimaryTargetEvidence(report, true, true);
+  }
 }
 
 void test_typed_controls_use_correct_vendor_bits() {
@@ -2738,6 +3039,7 @@ void test_primary_cell_staging_crossing_cutoff_starts_no_write_one() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::TIMEOUT),
                           static_cast<uint8_t>(report.operationStatus.code));
   TEST_ASSERT_FALSE(report.writeCommandAttempted);
+  assertPrimaryTargetEvidence(report, false, false);
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_EQUAL_UINT32(0, countEepromCommands(
       fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE));
@@ -2799,6 +3101,12 @@ void test_primary_cell_fault_ordinals_never_retry_write_one() {
   TEST_ASSERT_TRUE(
       writeProbeRtc.ensurePrimaryCellConfiguration(writeProbeReport).ok());
   const uint32_t writePathCallbacks = writeProbe.callbackCount;
+  const uint32_t writePersistentProof =
+      findPersistentProofOrdinal(writeProbe, 2);
+  const uint32_t writeActiveProof =
+      findActiveTargetProofOrdinal(writeProbe);
+  TEST_ASSERT_NOT_EQUAL(0, writePersistentProof);
+  TEST_ASSERT_NOT_EQUAL(0, writeActiveProof);
 
   for (uint32_t ordinal = 1; ordinal <= writePathCallbacks; ++ordinal) {
     FakeRv3032 fake;
@@ -2814,7 +3122,9 @@ void test_primary_cell_fault_ordinals_never_retry_write_one() {
     const RV3032::Status status =
         rtc.ensurePrimaryCellConfiguration(report);
     assertPrimaryFaultCleanup(fake, rtc, status, report, ordinal,
-                              initialActive, initialControl1);
+                              initialActive, initialControl1,
+                              ordinal > writePersistentProof,
+                              ordinal > writeActiveProof);
   }
 
   FakeRv3032 correctProbe;
@@ -2826,6 +3136,12 @@ void test_primary_cell_fault_ordinals_never_retry_write_one() {
   TEST_ASSERT_TRUE(
       correctProbeRtc.ensurePrimaryCellConfiguration(correctProbeReport).ok());
   const uint32_t correctPathCallbacks = correctProbe.callbackCount;
+  const uint32_t correctPersistentProof =
+      findPersistentProofOrdinal(correctProbe, 1);
+  const uint32_t correctActiveProof =
+      findActiveTargetProofOrdinal(correctProbe);
+  TEST_ASSERT_NOT_EQUAL(0, correctPersistentProof);
+  TEST_ASSERT_NOT_EQUAL(0, correctActiveProof);
 
   for (uint32_t ordinal = 1; ordinal <= correctPathCallbacks; ++ordinal) {
     FakeRv3032 fake;
@@ -2841,7 +3157,9 @@ void test_primary_cell_fault_ordinals_never_retry_write_one() {
     const RV3032::Status status =
         rtc.ensurePrimaryCellConfiguration(report);
     assertPrimaryFaultCleanup(fake, rtc, status, report, ordinal,
-                              initialActive, initialControl1);
+                              initialActive, initialControl1,
+                              ordinal > correctPersistentProof,
+                              ordinal > correctActiveProof);
   }
 }
 
@@ -2877,7 +3195,7 @@ void test_primary_cell_acked_ignore_and_low_vdd_fail_safely() {
         static_cast<uint8_t>(status.code));
     assertPrimaryFaultCleanup(fake, rtc, status, report,
                               writeCommandOrdinal, initialActive,
-                              initialControl1);
+                              initialControl1, false, false);
     TEST_ASSERT_TRUE(report.writeCommandAttempted);
     TEST_ASSERT_FALSE(report.writeDurablyVerified);
     TEST_ASSERT_TRUE(report.persistentAfterValid);
@@ -2909,7 +3227,7 @@ void test_primary_cell_acked_ignore_and_low_vdd_fail_safely() {
         static_cast<uint8_t>(RV3032::Err::EEPROM_WRITE_FAILED),
         static_cast<uint8_t>(status.code));
     assertPrimaryFaultCleanup(fake, rtc, status, report, 1, initialActive,
-                              initialControl1);
+                              initialControl1, false, false);
     TEST_ASSERT_TRUE(report.writeCommandAttempted);
     TEST_ASSERT_FALSE(report.writeDurablyVerified);
     TEST_ASSERT_TRUE(report.persistentAfterValid);
@@ -2979,6 +3297,7 @@ void test_primary_cell_reconciles_committed_read_one_errors() {
       TEST_ASSERT_TRUE(report.cleanupStatus.ok());
       TEST_ASSERT_TRUE(report.writeDurablyVerified);
       TEST_ASSERT_TRUE(report.cleanupVerified);
+      assertPrimaryTargetEvidence(report, true, true);
       TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
       TEST_ASSERT_EQUAL_UINT16(2, fake.readOneAttempts);
       TEST_ASSERT_EQUAL_UINT32(1, countEepromCommands(
@@ -3002,6 +3321,10 @@ void test_primary_cell_committed_noncommand_errors_never_false_succeed() {
   RV3032::PrimaryCellConfigurationReport probeReport{};
   TEST_ASSERT_TRUE(
       probeRtc.ensurePrimaryCellConfiguration(probeReport).ok());
+  const uint32_t persistentProof = findPersistentProofOrdinal(probe, 2);
+  const uint32_t activeProof = findActiveTargetProofOrdinal(probe);
+  TEST_ASSERT_NOT_EQUAL(0, persistentProof);
+  TEST_ASSERT_NOT_EQUAL(0, activeProof);
 
   uint32_t mutationOrdinals[24] = {};
   uint8_t mutationCount = 0;
@@ -3040,7 +3363,11 @@ void test_primary_cell_committed_noncommand_errors_never_false_succeed() {
 
       assertPrimaryFaultCleanup(fake, rtc, status, report,
                                 mutationOrdinals[mutationIndex],
-                                initialActive, initialControl1);
+                                initialActive, initialControl1,
+                                mutationOrdinals[mutationIndex] >
+                                    persistentProof,
+                                mutationOrdinals[mutationIndex] >
+                                    activeProof);
       TEST_ASSERT_LESS_OR_EQUAL_UINT32(1, countEepromCommands(
           fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE));
       if (report.cleanupStatus.ok()) {
@@ -3108,7 +3435,7 @@ void test_primary_cell_cleanup_busy_and_settle_expiry_are_terminal() {
         static_cast<uint8_t>(status.code));
     assertPrimaryFaultCleanup(fake, rtc, status, report,
                               finalPersistentReadOrdinal, initialActive,
-                              initialControl1);
+                              initialControl1, true, false);
     TEST_ASSERT_TRUE(report.operationStatus.ok());
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<uint8_t>(RV3032::PrimaryCellFailureStage::CLEANUP),
@@ -3149,7 +3476,7 @@ void test_primary_cell_cleanup_busy_and_settle_expiry_are_terminal() {
         static_cast<uint8_t>(status.code));
     assertPrimaryFaultCleanup(fake, rtc, status, report,
                               probe.callbackCount, initialActive,
-                              initialControl1);
+                              initialControl1, true, true);
     TEST_ASSERT_TRUE(report.operationStatus.ok());
     TEST_ASSERT_EQUAL_UINT8(
         static_cast<uint8_t>(RV3032::PrimaryCellFailureStage::CLEANUP),
@@ -3165,6 +3492,35 @@ void test_primary_cell_cleanup_busy_and_settle_expiry_are_terminal() {
     TEST_ASSERT_EQUAL_UINT32(1, countEepromCommands(
         fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE));
     TEST_ASSERT_EQUAL_UINT8(0, rtc.eepromQueueDepth());
+  }
+
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = 0;
+    fake.resetFromPersistent();
+    fake.lateWaitOrdinal = probe.waitCount;
+    fake.lateWaitExtraMs = 1000;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    RV3032::PrimaryCellConfigurationReport report{};
+    const RV3032::Status status =
+        rtc.ensurePrimaryCellConfiguration(report);
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::TIMEOUT),
+                            static_cast<uint8_t>(status.code));
+    TEST_ASSERT_TRUE(report.operationStatus.ok());
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RV3032::PrimaryCellFailureStage::SETTLE),
+        static_cast<uint8_t>(report.failureStage));
+    TEST_ASSERT_FALSE(report.cleanupVerified);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::TIMEOUT),
+                            static_cast<uint8_t>(report.cleanupStatus.code));
+    assertPrimaryTargetEvidence(report, true, true);
+    TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
+    TEST_ASSERT_EQUAL_UINT32(probe.waitCount, fake.waitCount);
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1000, fake.nowMs);
+    TEST_ASSERT_EQUAL_UINT32(1, countEepromCommands(
+        fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE));
   }
 }
 
@@ -4909,9 +5265,14 @@ int main(int, char**) {
   RUN_TEST(test_tick_zero_budget_and_eeprom_end_guards);
   RUN_TEST(test_offline_is_observational);
   RUN_TEST(test_read_time_is_strict_single_transfer);
+  RUN_TEST(test_calendar_weekday_is_user_assigned_and_range_only);
   RUN_TEST(test_status_first_snapshot_job_and_result_contract);
   RUN_TEST(test_status_first_snapshot_rejects_every_invalid_calendar_encoding);
+  RUN_TEST(test_status_first_snapshot_exposes_typed_invalid_flags);
+  RUN_TEST(test_verified_calendar_accepts_user_assigned_readback_weekday);
   RUN_TEST(test_verified_calendar_set_reports_status_side_effects);
+  RUN_TEST(test_verified_calendar_status_payload_is_fixed_for_every_status);
+  RUN_TEST(test_verified_calendar_preserves_flags_set_between_read_and_write);
   RUN_TEST(test_verified_calendar_set_validation_and_wrapped_deadline_are_zero_io);
   RUN_TEST(test_calendar_multi_instruction_budget_refreshes_deadlines_and_cutoffs);
   RUN_TEST(test_verified_calendar_accepts_one_second_rollover);

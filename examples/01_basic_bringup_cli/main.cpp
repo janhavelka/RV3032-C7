@@ -1330,13 +1330,15 @@ static void cmd_primary_cell(const String& args) {
                 report.persistentAfterValid ? "" : "?",
                 report.persistentAfter,
                 report.cleanupVerified ? "verified" : "unverified");
-  Serial.printf("  operation=%s detail=%ld cleanup_status=%s detail=%ld write_attempted=%s durable=%s active_after=0x%02X control1_after=0x%02X auto_refresh_held=%s\n",
+  Serial.printf("  operation=%s detail=%ld cleanup_status=%s detail=%ld write_attempted=%s durable=%s persistent_target_verified=%s active_target_verified=%s active_after=0x%02X control1_after=0x%02X auto_refresh_held=%s\n",
                 errToStr(report.operationStatus.code),
                 static_cast<long>(report.operationStatus.detail),
                 errToStr(report.cleanupStatus.code),
                 static_cast<long>(report.cleanupStatus.detail),
                 log_bool_str(report.writeCommandAttempted),
                 log_bool_str(report.writeDurablyVerified),
+                log_bool_str(report.persistentTargetVerified),
+                log_bool_str(report.activeTargetVerified),
                 report.activeAfter, report.control1After,
                 log_bool_str(report.autoRefreshHeldDisabledForSafety));
 }

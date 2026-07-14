@@ -17,6 +17,11 @@ the repository because they are large generated artifacts.
 | Example timeout | `50` ms |
 | Library version printed | `1.5.0` |
 
+This evidence is historical 1.5.0 coverage. It does not validate the current
+2.0.0 primary-cell protocol, EEPROM voltage/backfeed preconditions,
+power-cycle behavior, or backup retention. Those 2.0.0 physical cases remain
+`NOT RUN` until separately authorized and executed on identified hardware.
+
 Fixture limits:
 
 - No external temperature-low, temperature-high, or EVI timestamp stimulus was

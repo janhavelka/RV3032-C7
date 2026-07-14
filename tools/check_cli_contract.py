@@ -78,6 +78,8 @@ def main() -> int:
         "EEPROM persistence disabled",
         "write_attempted=",
         "cleanup_status=",
+        "persistent_target_verified=",
+        "active_target_verified=",
     ]
     for token in required_contract:
         if token not in text:

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed PORF/VLF evidence in status-first calendar snapshots and semantic
+  persistent-target/active-target proof in primary-cell reports.
+
+### Changed
+
+- Calendar weekday values are user-assigned: every value `0..6` is accepted
+  without Gregorian-date agreement, and setters preserve the supplied value.
+
+### Fixed
+
+- Verified calendar set now writes the fixed Status payload `0xFC`, preserving
+  UF/TF/AF/EVF that assert between its cooperative pre-clear read and write
+  while retaining evidence of the unavoidable THF/TLF clear.
+
 ## [2.0.0] - 2026-07-13
 
 ### Added
@@ -66,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Control 1/2/3, EVI, timer-high, PMU TCR/TCM, CLKOUT, alarm, TEMP_LSB, and
   EEPROM command encodings now match the vendor register tables.
-- Calendar reads reject reserved bits and weekday/date mismatches; offset input
+- Calendar reads reject reserved bits and out-of-range weekdays; offset input
   outside the exact signed six-bit range is rejected instead of clamped.
 - Timer readback rejects reserved high bits; password cleanup deterministically
   loads a credential distinct from both old and new references.
@@ -102,7 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Queued C0..C5 persistence now restores and verifies the requested active
   mirror, including when an earlier active-write callback was acknowledged but
   ignored.
-- Verified calendar writes ignore the caller weekday, retain readback proof for
+- Verified calendar writes preserve the caller weekday, retain readback proof for
   an ambiguous Status write, and expose complete partial-result evidence.
 - Alarm date zero now restores the vendor-deactivated comparator state; all-AE
   every-minute behavior is documented and covered.

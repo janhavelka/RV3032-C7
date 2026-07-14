@@ -84,17 +84,23 @@ thresholds. There is no second asynchronous scheduler.
 ## Calendar contracts
 
 `readTime()` is a strict single burst read. It rejects reserved bits, malformed
-BCD, invalid Gregorian dates, years outside 2000..2099, and weekday mismatch.
+BCD, invalid Gregorian dates, years outside 2000..2099, and weekday values
+outside `0..6`. Weekday is user-assigned and is not required to match the date;
+setters write the caller's validated value unchanged.
 
 `startReadTimeSnapshotJob()` reads Status first. If PORF or VLF is set, the
-typed result records invalid time and the job does not read the calendar.
+typed result exposes decoded `StatusFlags` from that same callback, records
+invalid time, and does not read the calendar.
 
 `startSetTimeAndClearInvalidFlagsVerifiedJob()` writes and reads back the
 calendar, reads Status immediately before clearing PORF/VLF, writes Status, then
-verifies Status and calendar again. Its public name exposes the mutation. Every
-Status-register write also clears THF and TLF in RV3032 silicon; the result
-records whether those flags were set before the write. Possibly committed
-calendar or Status writes are reconciled by readback and are never replayed.
+verifies Status and calendar again. Its public name exposes the mutation. The
+Status write is the fixed value `0xFC`: PORF/VLF are cleared while
+UF/TF/AF/EVF are protected if they assert between the budgeted read and write.
+Every Status-register write also clears THF and TLF in RV3032 silicon; the
+result records whether those flags were set before the write. Possibly
+committed calendar or Status writes are reconciled by readback and are never
+replayed.
 
 The temperature registers have no shadow latch. `readTemperatureC()` remains a
 single-transfer convenience API, while `startReadCoherentTemperatureJob()`
@@ -166,7 +172,10 @@ preserving NCLKE and TCR. If already correct, no persistent write is issued. If
 wrong, exactly one WRITE_ONE is permitted, followed by direct durable proof.
 Bounded cleanup either restores a trusted active target and clears EERD, or
 holds a safe active C0 with automatic refresh disabled when persistence cannot
-be trusted. The report separates operation and cleanup evidence.
+be trusted. The report separates operation and cleanup evidence and exposes
+semantic `persistentTargetVerified` and `activeTargetVerified` fields at their
+direct proof points. Proven target evidence survives later cleanup/settle
+failure; the safe BSM00/TCM00 hold is not active-target proof.
 
 Every normal callback is admitted only when its supplied timeout plus the
 300 ms cleanup reserve fits. Attempt evidence is set immediately before the

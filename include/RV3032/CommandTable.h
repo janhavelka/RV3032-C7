@@ -43,7 +43,7 @@ static constexpr uint8_t REG_MINUTES = 0x02;
 static constexpr uint8_t REG_HOURS = 0x03;
 
 /// @brief Weekday register (0x04, read/write-protectable)
-/// Binary: b7-b3=reserved, b2-b0 = 0..6 (0=Sunday)
+/// BCD: b7-b3=reserved, b2-b0 = user-assigned value 0..6.
 static constexpr uint8_t REG_WEEKDAY = 0x04;
 
 /// @brief Date/Day-of-Month register (0x05, read/write-protectable)
@@ -333,6 +333,9 @@ static constexpr uint8_t STATUS_TLF_BIT = 6;          ///< Temperature Low Flag
 static constexpr uint8_t STATUS_THF_BIT = 7;          ///< Temperature High Flag
 /// Lower six Status flags are write-zero-to-clear; writing one preserves them.
 static constexpr uint8_t STATUS_W0C_PRESERVE_MASK = 0x3F;
+/// Verified calendar-set payload: preserve bits 7:2 and clear PORF/VLF.
+/// THF/TLF still clear unconditionally in silicon on every Status write.
+static constexpr uint8_t STATUS_CLEAR_INVALID_TIME_VALUE = 0xFC;
 
 // Control 1 register bits (REG_CONTROL1, 0x10)
 static constexpr uint8_t CONTROL1_IMPLEMENTED_MASK = 0x3F;
