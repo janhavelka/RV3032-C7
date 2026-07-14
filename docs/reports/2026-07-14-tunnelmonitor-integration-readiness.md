@@ -50,7 +50,7 @@ scheduler was moved into this repository.
 | --- | --- |
 | `python -m platformio test -e native` | PASS — 84/84 tests after remediation |
 | `python -m platformio run -e esp32s3dev` | PASS — RAM 22,624/327,680 bytes; flash 444,098/1,310,720 bytes |
-| `python -m platformio run -e esp32s2dev` | PASS — RAM 37,024/327,680 bytes; flash 433,045/1,310,720 bytes |
+| `python -m platformio run -e esp32s2dev` | PASS — RAM 37,024/327,680 bytes; flash 433,037/1,310,720 bytes |
 | `python scripts/generate_version.py check` | PASS |
 | `python tools/check_core_timing_guard.py` | PASS |
 | `python tools/check_cli_contract.py` | PASS |
@@ -82,7 +82,7 @@ primary-cell or retention evidence.
 - TunnelMonitor native/build/HIL validation remains in the consumer repository
   after dependency pinning and adapter integration.
 
-## Implementation-pass final worktree state
+## Final worktree state (implementation pass)
 
 At the end of this implementation pass, the worktree was intentionally
 uncommitted. It contained the focused library, fake/test, example,
