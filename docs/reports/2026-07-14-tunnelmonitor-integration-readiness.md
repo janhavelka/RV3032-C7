@@ -75,19 +75,22 @@ primary-cell or retention evidence.
 - No TunnelMonitor source or dependency pin was changed. Its later integration
   still requires a reviewed immutable full RV3032 commit hash.
 - No release commit, tag, publication, version bump, upload, or hardware action
-  was performed.
+  was performed during this implementation pass. This is point-in-time
+  evidence, not the current release state.
 - Physical VDD, backfeed, boot write count, reset, power-cycle, and retention
   evidence remains a separately authorized external gate.
 - TunnelMonitor native/build/HIL validation remains in the consumer repository
   after dependency pinning and adapter integration.
 
-## Final worktree state
+## Implementation-pass final worktree state
 
-The ending worktree remains intentionally uncommitted. It contains the focused
-library, fake/test, example, maintained-documentation, guard, and this additive
-report changes, plus the original user-owned untracked Prompt 05 file. Generated
-PlatformIO build output stays under ignored `.pio/`; no package artifact is
-retained. No TunnelMonitor file is modified.
+At the end of this implementation pass, the worktree was intentionally
+uncommitted. It contained the focused library, fake/test, example,
+maintained-documentation, guard, and this additive report changes, plus the
+original user-owned untracked Prompt 05 file. Later release-preparation work
+does not alter this historical snapshot. Generated PlatformIO build output was
+kept under ignored `.pio/`; no package artifact was retained. No TunnelMonitor
+file was modified.
 
 - Ending `HEAD`: `ca06b1dd5f8dc9d3d9c358079515599b0b313082`
   (unchanged).

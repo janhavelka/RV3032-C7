@@ -7,26 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-14
+
 ### Added
 
 - Typed PORF/VLF evidence in status-first calendar snapshots and semantic
   persistent-target/active-target proof in primary-cell reports.
-
-### Changed
-
-- Calendar weekday values are user-assigned: every value `0..6` is accepted
-  without Gregorian-date agreement, and setters preserve the supplied value.
-
-### Fixed
-
-- Verified calendar set now writes the fixed Status payload `0xFC`, preserving
-  UF/TF/AF/EVF that assert between its cooperative pre-clear read and write
-  while retaining evidence of the unavoidable THF/TLF clear.
-
-## [2.0.0] - 2026-07-13
-
-### Added
-
 - Status-first calendar snapshot and verified set/invalid-flag-clear jobs with
   fixed typed result storage, instruction budgets, deadlines, and ambiguous
   write reconciliation.
@@ -49,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Calendar weekday values are user-assigned: every value `0..6` is accepted
+  without Gregorian-date agreement, and setters preserve the supplied value.
 - `begin()` is now passive and performs zero I2C/wait callbacks; `probe()` is
   the explicit raw presence check and `recover()` is one tracked read-only
   health re-probe.
@@ -80,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Verified calendar set now writes the fixed Status payload `0xFC`, preserving
+  UF/TF/AF/EVF that assert between its cooperative pre-clear read and write
+  while retaining evidence of the unavoidable THF/TLF clear.
 - Control 1/2/3, EVI, timer-high, PMU TCR/TCM, CLKOUT, alarm, TEMP_LSB, and
   EEPROM command encodings now match the vendor register tables.
 - Calendar reads reject reserved bits and out-of-range weekdays; offset input
@@ -295,7 +286,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...v1.4.1
