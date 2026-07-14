@@ -86,9 +86,13 @@ than spin or perform I2C.
 
 ## Calendar APIs
 
-`readTime()` and `setTime()` each perform one calendar burst. `readTime()`
+`readTime()` and `setTime()` each perform one calendar burst. `readHundredths()`
+provides a separate strict BCD read of register `0x00`; applications must allow
+for rollover relative to a separate calendar burst. `readTime()`
 strictly rejects reserved bits, invalid BCD/calendar fields, and a weekday that
-does not match the date. These helpers do not inspect or clear Status flags.
+does not match the date. Writing Seconds resets the hundredths counter and the
+4096 Hz through 1 Hz prescalers. These helpers do not inspect or clear Status
+flags.
 
 Applications needing stronger evidence use:
 
@@ -104,7 +108,8 @@ The snapshot reads Status before the calendar and short-circuits when PORF or
 VLF is set. The verified setter writes once, reconciles an ambiguous callback by
 readback, accepts the requested value or exactly one second later, reads fresh
 Status, explicitly clears PORF/VLF, records the unavoidable THF/TLF clearing,
-and verifies final Status/calendar state.
+and verifies final Status/calendar state. Larger polling budgets refresh elapsed
+time between callbacks so no later mutation starts after its cutoff.
 
 ## Persistent APIs
 
@@ -124,7 +129,8 @@ rtc.startWriteUserEepromJob(offset, data, length, nowMs, 4000);
 
 Public user EEPROM offsets are `0..31`; each job is limited to 16 bytes. The
 library copies write input into fixed storage at admission. Reads use an
-adaptive two-read staging proof. Each changed byte is written with at most one
+adaptive two-read staging proof, and a failed multi-byte read reports only the
+number of bytes positively proven. Each changed byte is written with at most one
 `0x21` write-one attempt, reconciled after ambiguous callback failure, and
 directly read back. Generic persistence never uses update-all `0x11` or
 refresh-all `0x12`.
@@ -135,13 +141,30 @@ EEPROM engine is idle, another persistence-producing setter may run even when
 entries are queued; unrelated jobs remain blocked. Capacity is checked before
 active mutation, and an exact request coalesces only with the newest pending
 value for that address, preserving FIFO final-state intent. The application
-advances durable work with `tick()` or `pollEeprom()`. Once a hard operation
-deadline is reached, no further callback
-is started. If access-state cleanup was still required, the terminal error is
+advances durable work with `tick()` or `pollEeprom()`. READ_ONE/WRITE_ONE wait
+intervals start after the command transport callback completes; the generic
+`eepromTimeoutMs` window begins after the mandatory 10 ms WRITE_ONE settle.
+Successful cleanup restores and verifies the queued intended active C0..C5
+mirror as well as the saved safe-access state.
+
+An ordinary queue-item failure is returned at that item boundary. Later items
+remain queued for a subsequent poll, while the first failure remains the batch
+status so a later success cannot hide it. A newly admitted batch resets that
+status. Once a hard operation deadline is reached, no further callback is
+started. If access-state cleanup was still required, the terminal error is
 `EEPROM_CLEANUP_FAILED` so an unproven safe state is never reported as a plain
 timeout. That terminal cleanup failure cancels remaining queued items and does
 not start another EEPROM command; the application must decide when it is safe
 to re-admit persistence work.
+
+The generic queue status/count/depth surfaces do not describe explicit typed
+persistent jobs. Those jobs use `isJobBusy()`, `pollJob()`, and their typed
+result getters.
+
+`getEepromHardwareFlags()` reads the chip's EEbusy and sticky EEF bits; these
+are distinct from the library queue state returned by `isEepromBusy()`.
+`clearEepromErrorFlag()` explicitly acknowledges stale EEF through a guarded
+cooperative W0C operation without claiming that an earlier write was durable.
 
 ## Primary-cell configuration
 
@@ -172,6 +195,14 @@ honors the 10 ms level-switch settle. Untrusted communicable failure holds
 verified BSM00/TCM00 and EERD=1 where possible; that volatile hold is not
 deployment-ready and does not survive POR.
 
+The caller must prove the electrical preconditions; the library cannot measure
+them. Keep VDD stable and at least 1.6 V through any EEPROM write and busy-clear
+phase. A 400 kHz bus requires VDD at least 2.0 V. Before enabling level
+switching, keep VDD safely above the vendor's maximum 2.2 V LSM threshold
+through activation and the complete measured 10 ms settle, and verify the
+board's backup/backfeed topology. Do not deploy a module after a failed ensure
+until an explicit ensure in a later complete lifecycle succeeds.
+
 Application-manual page 141 shows `TCR=00` in black as the unchanged delivery
 value and `TCM=00` in red as the primary-cell safety setting. Charging is
 disabled by TCM, so this helper preserves an existing inactive TCR selection
@@ -191,14 +222,28 @@ primary-cell ensure CONFIRM-PRIMARY-CELL
 
 ## Capability coverage
 
-Typed APIs cover calendar/Unix conversion, alarm/AIE/AF, countdown timer/TIE/TF,
+Typed APIs cover calendar/hundredths/Unix conversion, alarm/AIE/AF, countdown timer/TIE/TF,
 periodic update/UIE/UF, event input/EIE/EVF/timestamps, temperature thresholds
 and events, coherent two-sample temperature reads and THF/TLF handling,
 complete XTAL/HF CLKOUT configuration and typed CLKF read/clear, signed offset
-calibration,
-independent BSM/TCM/TCR, BSIE/BSF, STOP/ESYN/GP bits, Status/reset/validity,
+calibration plus PORIE/VLIE, independent BSM/TCM/TCR, BSIE/BSF,
+STOP/ESYN/CLKDE/GP bits, hardware EEbusy/EEF, Status/reset/validity,
 user RAM, configuration/user EEPROM, password/protection evidence, and passive
 health diagnostics.
+
+Alarm date 0 restores the vendor's AF-never-sets reset state; setting every AE
+bit instead means an event every minute. CLKOUT configuration is staged through
+the cooperative engine: interrupt-controlled output must first be disabled and
+inactive, then direct output is stopped before FD/HFD/OS change. Temperature
+event configuration likewise disables detection while replacing independent
+signed thresholds. The offset API uses the exact 0.238418579 ppm nominal step,
+and CLKOUT register values above 52 MHz are exposed but are outside the vendor's
+guaranteed electrical-characteristic range.
+
+Unless an API explicitly says it queues C0..C5 generic persistence, mutations
+of calendar/alarm/timer/control/Status/EVI/timestamps/thresholds/GP/user RAM are
+active-only. The application decides whether and when persistent configuration
+is written and must advance that opt-in work through `tick()`/`pollEeprom()`.
 
 Raw diagnostics are intentionally narrow. Reads are limited to documented
 direct ranges. Writes are limited to temperature thresholds and volatile user
@@ -251,6 +296,13 @@ execution, voltage/backfeed, power-cycle, and retention work require separate
 authorization. Current task evidence is recorded in
 `docs/reports/2026-07-13-v2.0.0-implementation.md`; historical HIL evidence is
 kept separately and is not a 2.0.0 protocol claim.
+
+After such fresh authorization, `--destructive-setup` additionally requires
+explicit `--authorization-port`, `--authorization-module`,
+`--authorization-primary-cell-chemistry`, `--authorization-power-conditions`,
+`--authorization-c0-write CONFIRM-POSSIBLE-C0-WRITE`, and
+`--authorization-vdd-off-backfeed-scope` values. The runner rejects missing or
+mismatched scope before opening the serial port and records it in HIL results.
 
 ## Versioning
 

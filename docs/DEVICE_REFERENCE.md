@@ -25,10 +25,15 @@ Calendar registers `0x01..0x07` are packed BCD. Seconds, minutes, hours, date,
 month, and year have reserved upper bits that must be zero. Weekday is a
 binary value from 0..6 and must agree with the Gregorian date. Supported years are
 2000..2099.
+Register `0x00` is packed-BCD hundredths. It is read independently by the typed
+API. Writing Seconds or setting STOP resets hundredths and the 4096 Hz through
+1 Hz prescalers.
 
 Alarm registers `0x08..0x0A` contain minute, hour, and date match fields. Their
 AE bits disable individual matches. The reset-state date value `00` is accepted
-only in the documented inactive configuration.
+only with AE_D clear in the documented inactive configuration; the typed alarm
+setter restores that state when passed date 0. Setting all three AE bits does
+not disable the alarm: the vendor truth table defines an event every minute.
 
 ## Timer, event, and timestamps
 
@@ -38,8 +43,11 @@ writes only bits 3:0; reserved bits 7:4 are zero. The readable value is the
 configured preset, not a live remaining-count register. Timer source and enable
 are in Control 1.
 
-External-event edge/filtering and synchronization plus CLKOUT stop-delay enable
-are in EVI Control. Event and low/high-temperature timestamp blocks have
+External-event ET=`00` detects the selected edge only; ET=`01/10/11` also
+samples the selected high/low level at 256/64/8 Hz. EHL selects rising/high or
+falling/low. Synchronization and CLKOUT stop-delay enable are also in EVI
+Control and have typed set/get coverage. ESYN arms one event to reset the
+hundredths/prescaler chain and then self-clears. Event and low/high-temperature timestamp blocks have
 different layouts; the typed source selects the exact burst and decoder.
 Timestamp reset is a cooperative control-register mutation. TLow/THigh reset
 also clears TLF/THF. EVR may read back set, so a repeated EVI reset emits a
@@ -53,15 +61,24 @@ on every Status-register write regardless of the written values. Every driver
 Status writer accounts for that rule. The named verified calendar job is the
 only calendar API that deliberately clears PORF/VLF.
 
+Guarded general Status clearing writes one to every unnamed lower-six W0C flag,
+so a newly asserted UF/TF/AF/EVF/PORF/VLF between its read and write is
+preserved. THF/TLF cannot be protected across that window because silicon
+clears both on every Status write; callers that cannot tolerate that race must
+serialize the producing condition externally.
+
 TEMP_LSB combines the temperature fraction with CLKF, BSF, EEBUSY, and EEF
-support flags. BSF/EEF clearing is guarded so unrelated support state is not
-silently destroyed.
+support flags. Typed hardware inspection distinguishes EEbusy/EEF from library
+queue state. BSF/EEF clearing is guarded so unrelated support state is not
+silently destroyed and the read-only temperature fraction is preserved.
 
 ## Control bit facts
 
 - Control 1 contains EERD, USEL, GP0, timer enable, and timer source.
 - Control 2 AIE is bit 3 and EIE is bit 2; it also contains STOP, CLKIE, UIE,
   TIE, and GP1.
+- STOP also halts the documented calendar/CLKOUT/timer/update/EVI-filter/
+  temperature functions until restart and resets the lower prescalers.
 - Control 3 contains temperature event/interrupt controls and BSIE.
 - EVI Control has no generic enable bit 3.
 - PMU C0 fields are NCLKE, BSM, TCR, and TCM. TCR and TCM are independent.
@@ -74,24 +91,37 @@ The primary-cell target is exactly:
 ```
 
 It preserves NCLKE and TCR, selects BSM level mode, and selects TCM disabled.
+Primary provisioning requires stable VDD: at least 1.6 V for WRITE_ONE, at
+least 2.0 V when the owner uses 400 kHz, and safely above the maximum 2.2 V LSM
+threshold through level-switch activation and the measured 10 ms settle. The
+application must also prove the board's backup/backfeed conditions; the driver
+cannot observe any of these electrical prerequisites.
 
 ## CLKOUT, calibration, and temperature
 
 CLKOUT uses PMU NCLKE plus active C2/C3. C3 OS selects crystal-derived versus
 high-frequency-divider operation. In high-frequency mode the 13-bit divider is
 encoded across C2 and C3 and represents `divider - 1` for a public range of
-1..8192. The legacy enable getter reports direct NCLKE state, not possible
+1..8192. Both FD and HFD remain stored when OS selects the other mode. The
+largest encodings exceed the vendor's guaranteed CLKOUT electrical range;
+applications must keep output at or below 52 MHz when those characteristics
+are required. The legacy enable getter reports direct NCLKE state, not possible
 interrupt-selected activity, and the legacy frequency getter rejects OS=1;
 complete mode inspection uses the typed CLKOUT configuration getter.
 The typed CLKF helpers inspect and cooperatively clear the interrupt-controlled
 clock-output latch while preserving the neighboring EEF and BSF W0C flags.
 
-Offset C1 is a signed six-bit correction with a nominal 0.2384 ppm step. The
+Offset C1 is a signed six-bit measured-error correction with an exact nominal
+step of `1000000 / (32768 * 128)` = 0.238418579 ppm. The
 driver rejects values outside the exact representable range and preserves the
-PORIE/VLIE bits while changing only the six-bit offset field.
+PORIE/VLIE bits while changing only the six-bit offset field. PORIE and VLIE
+also have independent typed set/get APIs.
 
 Temperature is a signed 12-bit value with 1/16 degree C resolution. Thresholds
-are signed bytes. Temperature references are active C4/C5 and can be handed to
+are independent signed bytes and may use either ordering. The cooperative
+configuration job disables detection/interrupts before replacing thresholds,
+then restores interrupts before detection. Temperature references use signed
+1/128 degree C steps in active C4/C5 and can be handed to
 explicit opt-in persistence by their typed cooperative setter. TEMP_LSB and
 TEMP_MSB have no blocking/shadowing; the cooperative coherent-temperature job
 compares two samples and reports `INCOHERENT_DATA` if they differ. Typed flag
@@ -111,12 +141,17 @@ Commands used by the implementation:
 
 EERD must be controlled through Control 1. EEBUSY and EEF are checked before
 mutation and after vendor waits. A READ_ONE requires at least 1 ms settling; a
-WRITE_ONE requires at least 10 ms before completion polling. Safe C0 access and
-cleanup include the documented 10 ms backup-switch settle interval.
+WRITE_ONE requires at least 10 ms before completion polling. Both waits are
+measured from completion of the command transport callback. The configured
+generic EEPROM timeout is an additional bounded busy-poll window after the
+write settle. Safe C0 access and cleanup include the documented 10 ms
+backup-switch settle interval.
 
 A command callback error does not prove the command failed to reach silicon.
 The driver therefore never retries WRITE_ONE blindly. It performs direct
-persistent proof and reports ambiguity or failure.
+persistent proof and reports ambiguity or failure. EEF remains failure
+evidence rather than content evidence, so its observation does not replace the
+post-command direct readback attempt.
 
 ## EEPROM endurance
 

@@ -276,27 +276,21 @@ static constexpr uint8_t REG_USER_RAM_END = 0x4F;
 /// @brief Active PMU mirror (0xC0, read/write-protectable)
 /// Direct access changes active state only; persistent proof uses READ_ONE.
 static constexpr uint8_t REG_ACTIVE_PMU = 0xC0;
-static constexpr uint8_t REG_EEPROM_PMU = REG_ACTIVE_PMU;  ///< Legacy alias
 
 /// @brief Active offset mirror (0xC1, read/write-protectable)
 static constexpr uint8_t REG_ACTIVE_OFFSET = 0xC1;
-static constexpr uint8_t REG_EEPROM_OFFSET = REG_ACTIVE_OFFSET;  ///< Legacy alias
 
 /// @brief Active CLKOUT 1 mirror (0xC2, read/write-protectable)
 static constexpr uint8_t REG_ACTIVE_CLKOUT1 = 0xC2;
-static constexpr uint8_t REG_EEPROM_CLKOUT1 = REG_ACTIVE_CLKOUT1;  ///< Legacy alias
 
 /// @brief Active CLKOUT 2 mirror (0xC3, read/write-protectable)
 static constexpr uint8_t REG_ACTIVE_CLKOUT2 = 0xC3;
-static constexpr uint8_t REG_EEPROM_CLKOUT2 = REG_ACTIVE_CLKOUT2;  ///< Legacy alias
 
 /// @brief Active temperature-reference 0 mirror (0xC4)
 static constexpr uint8_t REG_ACTIVE_TREFERENCE0 = 0xC4;
-static constexpr uint8_t REG_EEPROM_TREFERENCE0 = REG_ACTIVE_TREFERENCE0;  ///< Legacy alias
 
 /// @brief Active temperature-reference 1 mirror (0xC5)
 static constexpr uint8_t REG_ACTIVE_TREFERENCE1 = 0xC5;
-static constexpr uint8_t REG_EEPROM_TREFERENCE1 = REG_ACTIVE_TREFERENCE1;  ///< Legacy alias
 
 /// @brief Active password mirror 0 (0xC6, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD0 = 0xC6;
@@ -337,6 +331,8 @@ static constexpr uint8_t STATUS_TF_BIT = 4;           ///< Timer Flag
 static constexpr uint8_t STATUS_UF_BIT = 5;           ///< Update Flag
 static constexpr uint8_t STATUS_TLF_BIT = 6;          ///< Temperature Low Flag
 static constexpr uint8_t STATUS_THF_BIT = 7;          ///< Temperature High Flag
+/// Lower six Status flags are write-zero-to-clear; writing one preserves them.
+static constexpr uint8_t STATUS_W0C_PRESERVE_MASK = 0x3F;
 
 // Control 1 register bits (REG_CONTROL1, 0x10)
 static constexpr uint8_t CONTROL1_IMPLEMENTED_MASK = 0x3F;
@@ -417,7 +413,7 @@ static constexpr uint8_t OFFSET_PORIE_MASK = 0x80;
 static constexpr uint8_t OFFSET_VLIE_MASK = 0x40;
 static constexpr uint8_t OFFSET_VALUE_MASK = 0x3F;
 
-// EEPROM CLKOUT 2 register bits (REG_EEPROM_CLKOUT2, 0xC3)
+// Active/persistent CLKOUT 2 byte fields (C3)
 static constexpr uint8_t CLKOUT_FREQ_MASK = 0x60;     ///< CLKOUT frequency select mask
 static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit shift
 static constexpr uint8_t CLKOUT_OS_MASK = 0x80;

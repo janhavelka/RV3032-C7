@@ -34,7 +34,24 @@ static bool operation_accepted(const RV3032::Status& st) {
 }
 
 static const char* cooperative_suffix(const RV3032::Status& st) {
-  return st.inProgress() ? " (cooperative job accepted)" : "";
+  return st.inProgress()
+      ? " (cooperative active-only job accepted; EEPROM persistence disabled)"
+      : " (active-only; EEPROM persistence disabled)";
+}
+
+static const char* primary_failure_stage_name(
+    RV3032::PrimaryCellFailureStage stage) {
+  switch (stage) {
+    case RV3032::PrimaryCellFailureStage::NONE: return "NONE";
+    case RV3032::PrimaryCellFailureStage::PRECONDITION: return "PRECONDITION";
+    case RV3032::PrimaryCellFailureStage::PREPARE_ACCESS: return "PREPARE_ACCESS";
+    case RV3032::PrimaryCellFailureStage::READ_PERSISTENT: return "READ_PERSISTENT";
+    case RV3032::PrimaryCellFailureStage::WRITE_PERSISTENT: return "WRITE_PERSISTENT";
+    case RV3032::PrimaryCellFailureStage::VERIFY_PERSISTENT: return "VERIFY_PERSISTENT";
+    case RV3032::PrimaryCellFailureStage::CLEANUP: return "CLEANUP";
+    case RV3032::PrimaryCellFailureStage::SETTLE: return "SETTLE";
+    default: return "UNKNOWN";
+  }
 }
 static bool g_verbose = false;  // Verbose mode - disabled by default for production examples
 
@@ -1144,7 +1161,7 @@ static void cmd_eeprom() {
                 LOG_COLOR_RESULT(eepromSt.ok()),
                 eepromSt.ok() ? "OK" : eepromSt.msg,
                 LOG_COLOR_RESET);
-  Serial.printf("Writes: %lu (failures: %lu)\n",
+  Serial.printf("Generic queue items: %lu succeeded (%lu failed)\n",
                 static_cast<unsigned long>(g_rtc.eepromWriteCount()),
                 static_cast<unsigned long>(g_rtc.eepromWriteFailures()));
   Serial.printf("Queue depth: %u\n", g_rtc.eepromQueueDepth());
@@ -1154,12 +1171,12 @@ static void cmd_eeprom() {
     const char* name;
   };
   static const EepromReg kRegs[] = {
-    {RV3032::cmd::REG_EEPROM_PMU, "PMU"},
-    {RV3032::cmd::REG_EEPROM_OFFSET, "OFFSET"},
-    {RV3032::cmd::REG_EEPROM_CLKOUT1, "CLKOUT1"},
-    {RV3032::cmd::REG_EEPROM_CLKOUT2, "CLKOUT2"},
-    {RV3032::cmd::REG_EEPROM_TREFERENCE0, "TREF0"},
-    {RV3032::cmd::REG_EEPROM_TREFERENCE1, "TREF1"},
+    {RV3032::cmd::REG_ACTIVE_PMU, "PMU"},
+    {RV3032::cmd::REG_ACTIVE_OFFSET, "OFFSET"},
+    {RV3032::cmd::REG_ACTIVE_CLKOUT1, "CLKOUT1"},
+    {RV3032::cmd::REG_ACTIVE_CLKOUT2, "CLKOUT2"},
+    {RV3032::cmd::REG_ACTIVE_TREFERENCE0, "TREF0"},
+    {RV3032::cmd::REG_ACTIVE_TREFERENCE1, "TREF1"},
   };
 
   Serial.println(F("Active configuration mirrors (not persistent EEPROM):"));
@@ -1213,7 +1230,7 @@ static void cmd_backup(const String& args) {
 
   if (modeArg.length() == 0 || modeArg == "status") {
     uint8_t pmu = 0;
-    RV3032::Status st = g_rtc.readRegister(RV3032::cmd::REG_EEPROM_PMU, pmu);
+    RV3032::Status st = g_rtc.readRegister(RV3032::cmd::REG_ACTIVE_PMU, pmu);
     if (!st.ok()) {
       LOGE("readRegister(PMU) failed: %s", st.msg);
       return;
@@ -1285,6 +1302,9 @@ static void cmd_primary_cell(const String& args) {
     return;
   }
 
+  LOGW("Proceed only after proving primary-cell chemistry, stable VDD >=1.6 V, ");
+  LOGW("VDD >=2.0 V at 400 kHz, VDD >2.2 V through level-switch settle, and safe backfeed topology");
+
   RV3032::PrimaryCellConfigurationReport report{};
   const RV3032::Status st = g_rtc.ensurePrimaryCellConfiguration(report);
   const char* outcome = "NOT_ATTEMPTED";
@@ -1301,14 +1321,24 @@ static void cmd_primary_cell(const String& args) {
     default:
       break;
   }
-  Serial.printf("Primary-cell ensure: %s status=%s before=%s0x%02X target=0x%02X after=%s0x%02X cleanup=%s\n",
+  Serial.printf("Primary-cell ensure: %s status=%s stage=%s before=%s0x%02X target=0x%02X after=%s0x%02X cleanup=%s\n",
                 outcome, errToStr(st.code),
+                primary_failure_stage_name(report.failureStage),
                 report.persistentBeforeValid ? "" : "?",
                 report.persistentBefore,
                 report.persistentTarget,
                 report.persistentAfterValid ? "" : "?",
                 report.persistentAfter,
                 report.cleanupVerified ? "verified" : "unverified");
+  Serial.printf("  operation=%s detail=%ld cleanup_status=%s detail=%ld write_attempted=%s durable=%s active_after=0x%02X control1_after=0x%02X auto_refresh_held=%s\n",
+                errToStr(report.operationStatus.code),
+                static_cast<long>(report.operationStatus.detail),
+                errToStr(report.cleanupStatus.code),
+                static_cast<long>(report.cleanupStatus.detail),
+                log_bool_str(report.writeCommandAttempted),
+                log_bool_str(report.writeDurablyVerified),
+                report.activeAfter, report.control1After,
+                log_bool_str(report.autoRefreshHeldDisabledForSafety));
 }
 
 /**
@@ -1384,7 +1414,7 @@ static void cmd_drv() {
                 static_cast<unsigned long>(snap.i2cTimeoutMs),
                 static_cast<unsigned>(snap.offlineThreshold),
                 log_bool_str(snap.hasNowMsHook));
-  Serial.printf("EEPROM: busy=%s writes=%s timeout=%lu queue=%u ok=%lu fail=%lu\n",
+  Serial.printf("EEPROM: busy=%s generic_persistence=%s timeout=%lu queue=%u queue_ok=%lu queue_fail=%lu\n",
                 log_bool_str(snap.eepromBusy),
                 log_bool_str(snap.enableEepromWrites),
                 static_cast<unsigned long>(snap.eepromTimeoutMs),

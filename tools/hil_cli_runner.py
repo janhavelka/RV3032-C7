@@ -462,6 +462,36 @@ def run_parser_self_test() -> int:
         if got != want:
             print(f"parser-self-test {name}: got {got}, expected {want}")
             failed += 1
+    missing_authorization = argparse.Namespace(
+        destructive_setup=True,
+        port="COM99",
+        authorization_port=None,
+        authorization_module=None,
+        authorization_primary_cell_chemistry=None,
+        authorization_power_conditions=None,
+        authorization_c0_write=None,
+        authorization_vdd_off_backfeed_scope=None,
+    )
+    try:
+        destructive_authorization_record(missing_authorization)
+        print("parser-self-test authorization-missing: unexpectedly accepted")
+        failed += 1
+    except SystemExit:
+        pass
+    valid_authorization = argparse.Namespace(
+        destructive_setup=True,
+        port="COM99",
+        authorization_port="COM99",
+        authorization_module="fixture-a",
+        authorization_primary_cell_chemistry="non-rechargeable Li-MnO2",
+        authorization_power_conditions="VDD 3.3 V, VBACKUP measured",
+        authorization_c0_write="CONFIRM-POSSIBLE-C0-WRITE",
+        authorization_vdd_off_backfeed_scope="no VDD-off step authorized",
+    )
+    record = destructive_authorization_record(valid_authorization)
+    if "possible_c0_write=authorized" not in record or "port=COM99" not in record:
+        print("parser-self-test authorization-valid: evidence record incomplete")
+        failed += 1
     if failed:
         return 1
     print("parser-self-test PASSED")
@@ -472,6 +502,10 @@ def dry_run(args: argparse.Namespace) -> int:
     steps = list(SAFE_FUNCTIONAL_STEPS)
     if args.destructive_setup:
         steps.extend(INTENSIVE_SETUP_STEPS)
+        print(
+            "Destructive hardware execution additionally requires the full "
+            "fresh --authorization-* scope; dry-run opens no serial port."
+        )
     if args.include_stress:
         steps.extend(STRESS_STEPS)
     print(f"Dry run: {len(steps)} planned functional step(s)")
@@ -597,8 +631,59 @@ def write_artifacts(
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def destructive_authorization_record(args: argparse.Namespace) -> str:
+    if not args.destructive_setup:
+        return ""
+    required = {
+        "--authorization-port": args.authorization_port,
+        "--authorization-module": args.authorization_module,
+        "--authorization-primary-cell-chemistry":
+            args.authorization_primary_cell_chemistry,
+        "--authorization-power-conditions": args.authorization_power_conditions,
+        "--authorization-c0-write": args.authorization_c0_write,
+        "--authorization-vdd-off-backfeed-scope":
+            args.authorization_vdd_off_backfeed_scope,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise SystemExit(
+            "destructive setup requires fresh authorization fields: "
+            + ", ".join(missing)
+        )
+    if args.authorization_port != args.port:
+        raise SystemExit(
+            "--authorization-port must exactly match the selected --port"
+        )
+    if args.authorization_c0_write != "CONFIRM-POSSIBLE-C0-WRITE":
+        raise SystemExit(
+            "destructive setup requires "
+            "--authorization-c0-write CONFIRM-POSSIBLE-C0-WRITE"
+        )
+    return (
+        f"port={args.authorization_port}; module={args.authorization_module}; "
+        f"primary_cell_chemistry={args.authorization_primary_cell_chemistry}; "
+        f"power_conditions={args.authorization_power_conditions}; "
+        "possible_c0_write=authorized; "
+        f"vdd_off_backfeed_scope={args.authorization_vdd_off_backfeed_scope}"
+    )
+
+
 def run_hardware(args: argparse.Namespace) -> int:
+    authorization = destructive_authorization_record(args)
     results: list[Result] = []
+    if authorization:
+        results.append(
+            Result(
+                "HIL-AUTH",
+                "authorization",
+                "operator authorization",
+                "fresh destructive scope captured",
+                authorization,
+                0.0,
+                "PASS",
+                "Required before opening the selected serial port.",
+            )
+        )
     soak_stats: SoakStats | None = None
     with HilSession(
         args.port,
@@ -684,6 +769,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--command-gap-ms", type=int, default=100)
     parser.add_argument("--include-stress", action="store_true")
     parser.add_argument("--destructive-setup", action="store_true")
+    parser.add_argument("--authorization-port")
+    parser.add_argument("--authorization-module")
+    parser.add_argument("--authorization-primary-cell-chemistry")
+    parser.add_argument("--authorization-power-conditions")
+    parser.add_argument("--authorization-c0-write")
+    parser.add_argument("--authorization-vdd-off-backfeed-scope")
     parser.add_argument("--intensive-soak", action="store_true")
     parser.add_argument("--soak-duration-s", type=float, default=0.0)
     parser.add_argument("--progress-interval-s", type=float, default=60.0)

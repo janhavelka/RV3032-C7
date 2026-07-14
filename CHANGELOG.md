@@ -23,10 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete CLKOUT, independent trickle-mode/resistance, STOP, synchronization,
   and general-purpose-bit coverage.
 - Typed clock-output interrupt flag inspection and cooperative W0C-safe clear.
+- Typed hundredths, PORIE/VLIE, EVI synchronization/CLKOUT-delay readback, and
+  hardware EEbusy/EEF inspection plus guarded stale-EEF clearing.
 - Two-sample cooperative temperature reads with explicit incoherence errors,
   plus typed THF/TLF inspection and combined clearing.
 - Protocol-faithful native fake with separate active and persistent state,
-  EEPROM command timing, W0C semantics, transfer logs, and fault injection.
+  EEPROM command timing, W0C semantics, read/status/ambiguity transfer evidence,
+  owner-side read-retry timing, bounded logs, and fault injection.
 
 ### Changed
 
@@ -39,13 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller budgets of `0`, `1`, or `N` are honored.
 - Generic persistence now uses safe PMU/EERD access, compare-before-write,
   write-one only, adaptive direct-read proof, durable verification, minimum
-  waits, verified cleanup, and hard-deadline cleanup-failure evidence.
+  waits measured after callback completion, intended-active-mirror restoration,
+  verified cleanup, and hard-deadline cleanup-failure evidence.
   Cleanup failure cancels later queued entries; update-all/refresh-all are not
   used.
+- Ordinary generic-persistence item failures now remain the observable batch
+  status while later queued entries can be advanced; a new batch resets it.
 - Raw register access is restricted to reviewed direct read/write allowlists.
+- Misleading `REG_EEPROM_*` aliases for active C0-C5 mirrors were removed;
+  active-only register names are now explicit.
 - The CLI example starts with passive begin plus explicit probe, keeps generic
   persistence disabled, and requires the exact command
   `primary-cell ensure CONFIRM-PRIMARY-CELL` for provisioning.
+- Destructive HIL execution now requires and records fresh port/module,
+  primary-cell chemistry, power, possible-C0-write, and backfeed scope.
 
 ### Removed
 
@@ -72,6 +82,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newest pending value so a later revert is not silently discarded.
 - Primary-cell cleanup reports retain the specific `SETTLE` failure stage
   instead of flattening a level-switch settle timeout to generic cleanup.
+- Primary READ_ONE/WRITE_ONE completion deadlines now include their mandatory
+  1/10 ms waits, and direct persistent-read failures report the correct stage.
+- Primary-cell callback admission now preserves the full cleanup reserve,
+  records command attempts only at dispatch, stops after late callbacks,
+  classifies prepare/READ_ONE/EEF failures exactly, and readback-classifies an
+  ambiguous active-PMU write before any safety cleanup mutation.
+- Trusted level-switch settling is measured from verified target-C0 readback;
+  guarded Status clearing preserves unnamed lower-six flags that assert between
+  its cooperative read and write callbacks.
+- The native fake preserves the read-only TEMP_LSB temperature fraction and
+  ignores EECMD presented while EEbusy, matching the vendor behavior.
+- Cooperative hard deadlines now remain active when their wrap-safe value is
+  exactly zero and are refreshed between callbacks in larger-budget polls.
+- Generic EEPROM polling now refreshes elapsed time between callbacks, keeps
+  the minimum accepted busy-poll window usable after the mandatory 10 ms wait,
+  reconciles post-write EEF through direct readback, and reports only proven
+  bytes after a partial persistent read.
+- Queued C0..C5 persistence now restores and verifies the requested active
+  mirror, including when an earlier active-write callback was acknowledged but
+  ignored.
+- Verified calendar writes ignore the caller weekday, retain readback proof for
+  an ambiguous Status write, and expose complete partial-result evidence.
+- Alarm date zero now restores the vendor-deactivated comparator state; all-AE
+  every-minute behavior is documented and covered.
+- CLKOUT reconfiguration now retains FD/HFD, stops direct output before changing
+  frequency/mode, and rejects enabled/active interrupt-controlled output before
+  mutation. Temperature configuration stages detection around independent
+  threshold changes, and offset conversion uses the exact nominal step.
 
 ## [1.6.0] - 2026-06-29
 

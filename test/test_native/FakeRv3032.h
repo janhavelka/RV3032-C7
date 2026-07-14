@@ -15,6 +15,11 @@ struct Transfer {
   uint8_t data[16] = {};
   uint8_t length = 0;
   uint32_t timeoutMs = 0;
+  RV3032::Err statusCode = RV3032::Err::OK;
+  int32_t statusDetail = 0;
+  uint8_t physicalAttempts = 1;
+  bool recoveryUsed = false;
+  bool mayHaveCommitted = false;
 };
 
 struct FakeRv3032 {
@@ -26,6 +31,7 @@ struct FakeRv3032 {
   uint8_t persistent[0x2B] = {};
   uint32_t nowMs = 0;
   uint32_t callbackCount = 0;
+  uint32_t nowCallCount = 0;
   uint32_t physicalAttemptCount = 0;
   uint32_t waitCount = 0;
   uint32_t waitedMs = 0;
@@ -43,6 +49,12 @@ struct FakeRv3032 {
   uint32_t callbackDurationMs = 0;
   uint32_t lateCallbackOrdinal = 0;
   uint32_t lateCallbackExtraMs = 0;
+  uint32_t advanceNowOnCall = 0;
+  uint32_t advanceNowByMs = 0;
+  uint32_t readOneDispatchNowCall = 0;
+  uint32_t writeOneDispatchNowCall = 0;
+  uint32_t readRecoveryRetryOrdinal = 0;
+  uint32_t readRecoveryDelayMs = 0;
   uint32_t forceBusyAfterCallbackOrdinal = 0;
   uint32_t forcedBusyDurationMs = 0;
   bool lowVdd = false;
@@ -229,11 +241,14 @@ struct FakeRv3032 {
       return;
     }
     if (reg == RV3032::cmd::REG_TEMP_LSB) {
+      const uint8_t preserveTemperature = static_cast<uint8_t>(
+          direct[reg] & 0xF0u);
       const uint8_t preserveBusy = static_cast<uint8_t>(
           direct[reg] & RV3032::cmd::EEPROM_BUSY_MASK);
       uint8_t flags = static_cast<uint8_t>(direct[reg] & 0x0Bu);
       flags = static_cast<uint8_t>(flags & value);
-      direct[reg] = static_cast<uint8_t>(preserveBusy | flags);
+      direct[reg] = static_cast<uint8_t>(
+          preserveTemperature | preserveBusy | flags);
       return;
     }
     if (reg == RV3032::cmd::REG_CONTROL1) {
@@ -251,6 +266,9 @@ struct FakeRv3032 {
     if (reg == RV3032::cmd::REG_CONTROL2) {
       direct[reg] = static_cast<uint8_t>(value &
           RV3032::cmd::CONTROL2_IMPLEMENTED_MASK);
+      if ((direct[reg] & (1u << RV3032::cmd::CTRL2_STOP_BIT)) != 0) {
+        direct[RV3032::cmd::REG_100TH_SECONDS] = 0;
+      }
       return;
     }
     if (reg == RV3032::cmd::REG_CONTROL3) {
@@ -300,10 +318,13 @@ struct FakeRv3032 {
       }
       if ((direct[RV3032::cmd::REG_CONTROL1] &
            RV3032::cmd::CONTROL1_EERD_MASK) == 0 ||
-          (bsm != 0 && bsm != RV3032::cmd::PMU_BSM_DISABLED_ALT) ||
-          (direct[RV3032::cmd::REG_TEMP_LSB] &
-           RV3032::cmd::EEPROM_BUSY_MASK) != 0) {
+          (bsm != 0 && bsm != RV3032::cmd::PMU_BSM_DISABLED_ALT)) {
         protocolViolation = true;
+        return;
+      }
+      if ((direct[RV3032::cmd::REG_TEMP_LSB] &
+           RV3032::cmd::EEPROM_BUSY_MASK) != 0) {
+        // The vendor defines commands presented while EEbusy as ignored.
         return;
       }
       if (ignoreNextCommandAcked) {
@@ -345,6 +366,9 @@ struct FakeRv3032 {
       return;
     }
     if (reg < sizeof(direct)) {
+      if (reg == RV3032::cmd::REG_SECONDS) {
+        direct[RV3032::cmd::REG_100TH_SECONDS] = 0;
+      }
       direct[reg] = value;
       return;
     }
@@ -388,11 +412,11 @@ struct FakeRv3032 {
     }
   }
 
-  void record(bool write, uint8_t reg, const uint8_t* data, size_t len,
-              uint32_t timeoutMs) {
+  Transfer* record(bool write, uint8_t reg, const uint8_t* data, size_t len,
+                   uint32_t timeoutMs) {
     if (logCount >= LOG_CAPACITY) {
       logOverflow = true;
-      return;
+      return nullptr;
     }
     Transfer& item = log[logCount++];
     item.write = write;
@@ -403,6 +427,7 @@ struct FakeRv3032 {
     if (data != nullptr && item.length > 0) {
       memcpy(item.data, data, item.length);
     }
+    return &item;
   }
 
   void advanceCallbackClock(uint32_t timeoutMs) {
@@ -424,23 +449,44 @@ struct FakeRv3032 {
     if (address != RV3032::cmd::I2C_ADDR_7BIT || data == nullptr || len < 2) {
       return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "bad fake write");
     }
-    fake.record(true, data[0], &data[1], len - 1, timeoutMs);
+    Transfer* transfer = fake.record(true, data[0], &data[1], len - 1,
+                                     timeoutMs);
     const bool fail = fake.failOrdinal != 0 &&
                       fake.callbackCount == fake.failOrdinal;
     const bool ignore = fake.ignoreWriteOrdinal != 0 &&
                         fake.callbackCount == fake.ignoreWriteOrdinal;
     const bool command = data[0] == RV3032::cmd::REG_EE_COMMAND;
+    if (command && len == 2) {
+      if (data[1] == RV3032::cmd::EEPROM_CMD_READ_ONE) {
+        fake.readOneDispatchNowCall = fake.nowCallCount;
+      } else if (data[1] == RV3032::cmd::EEPROM_CMD_WRITE_ONE) {
+        fake.writeOneDispatchNowCall = fake.nowCallCount;
+      }
+    }
     const bool commitAfterFailure = command
         ? fake.failCommandAfterCommit
         : fake.failWriteAfterCommit;
-    if (!ignore && (!fail || commitAfterFailure)) {
+    const bool applyWrite = !ignore && (!fail || commitAfterFailure);
+    if (applyWrite && !command) {
       for (size_t i = 1; i < len; ++i) {
         fake.writeByte(static_cast<uint8_t>(data[0] + i - 1U), data[i]);
       }
     }
     fake.advanceCallbackClock(timeoutMs);
+    // EECMD is presented at the end of the transport callback. This makes the
+    // fake enforce vendor waits from command completion, not callback entry.
+    if (applyWrite && command) {
+      for (size_t i = 1; i < len; ++i) {
+        fake.writeByte(static_cast<uint8_t>(data[0] + i - 1U), data[i]);
+      }
+    }
     fake.applyPostCallbackFault();
     if (fail) {
+      if (transfer != nullptr) {
+        transfer->statusCode = fake.failError;
+        transfer->statusDetail = static_cast<int32_t>(fake.callbackCount);
+        transfer->mayHaveCommitted = commitAfterFailure;
+      }
       return RV3032::Status::Error(fake.failError,
                                    "injected callback failure",
                                    static_cast<int32_t>(fake.callbackCount));
@@ -458,10 +504,23 @@ struct FakeRv3032 {
         rx == nullptr || rxLen == 0) {
       return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "bad fake read");
     }
-    fake.record(false, tx[0], nullptr, rxLen, timeoutMs);
+    Transfer* transfer = fake.record(false, tx[0], nullptr, rxLen, timeoutMs);
+    if (fake.readRecoveryRetryOrdinal != 0 &&
+        fake.callbackCount == fake.readRecoveryRetryOrdinal) {
+      ++fake.physicalAttemptCount;
+      fake.nowMs += fake.readRecoveryDelayMs;
+      if (transfer != nullptr) {
+        transfer->physicalAttempts = 2;
+        transfer->recoveryUsed = true;
+      }
+    }
     fake.advanceCallbackClock(timeoutMs);
     if (fake.failOrdinal != 0 && fake.callbackCount == fake.failOrdinal) {
       fake.applyPostCallbackFault();
+      if (transfer != nullptr) {
+        transfer->statusCode = fake.failError;
+        transfer->statusDetail = static_cast<int32_t>(fake.callbackCount);
+      }
       return RV3032::Status::Error(fake.failError,
                                    "injected callback failure",
                                    static_cast<int32_t>(fake.callbackCount));
@@ -469,12 +528,23 @@ struct FakeRv3032 {
     for (size_t i = 0; i < rxLen; ++i) {
       rx[i] = fake.readByte(static_cast<uint8_t>(tx[0] + i));
     }
+    if (transfer != nullptr) {
+      transfer->length = static_cast<uint8_t>(
+          rxLen > sizeof(transfer->data) ? sizeof(transfer->data) : rxLen);
+      memcpy(transfer->data, rx, transfer->length);
+    }
     fake.applyPostCallbackFault();
     return RV3032::Status::Ok();
   }
 
   static uint32_t nowCallback(void* user) {
-    return static_cast<FakeRv3032*>(user)->nowMs;
+    FakeRv3032& fake = *static_cast<FakeRv3032*>(user);
+    ++fake.nowCallCount;
+    if (fake.advanceNowOnCall != 0 &&
+        fake.nowCallCount == fake.advanceNowOnCall) {
+      fake.nowMs += fake.advanceNowByMs;
+    }
+    return fake.nowMs;
   }
 
   static void waitCallback(uint32_t delayMs, void* user) {

@@ -36,6 +36,9 @@ Each transport callback is one physical attempt from the driver's point of
 view. The driver never retries, resets, or recovers the bus. A read-only
 application adapter may implement its separately documented bounded recovery
 and at most one read retry; mutating callbacks must never be replayed.
+For `ensurePrimaryCellConfiguration()`, the owner must temporarily use scoped
+single-attempt mode for both read and write callbacks; the ordinary read-only
+recovery exception is disabled for the complete synchronous call.
 
 Every callback receives a finite timeout. `i2cTimeoutMs` is constrained to
 1..100 ms. `nowMs` provides wrap-safe health and operation time. `waitMs` is a
@@ -58,6 +61,9 @@ A budget of zero performs no callback. A resource owner can pass one so that
 one owner poll performs at most one transport callback. Wait states consume no
 instruction. Jobs have fixed storage, fixed callback/check caps, and either a
 derived transfer bound or wrap-safe phase and whole-operation deadlines.
+When a larger budget is used, the engine refreshes the optional monotonic clock
+between instructions; without that hook it conservatively charges each prior
+callback its configured timeout before deciding whether another may start.
 
 At a hard persistence deadline, no new callback is started. If cleanup remains
 unverified, the terminal result is `EEPROM_CLEANUP_FAILED`; queued persistence
@@ -69,8 +75,11 @@ that boundary before cleanup proof, it terminates with
 as unknown and apply its own later admission/recovery policy.
 
 Control register read-modify-write operations, flag clears, timer programming,
-calendar composites, large RAM writes, and all indirect persistence use this
-engine. There is no second asynchronous scheduler.
+calendar composites, staged CLKOUT/temperature configuration, large RAM writes,
+and all indirect persistence use this engine. CLKOUT reconfiguration first
+proves interrupt-controlled output inactive and stops direct output before
+changing FD/HFD/OS. Temperature configuration disables detection while changing
+thresholds. There is no second asynchronous scheduler.
 
 ## Calendar contracts
 
@@ -115,16 +124,26 @@ The shared persistence protocol:
 4. skips wear if the byte already matches;
 5. clears stale EEF, stages and verifies EEADDR/EEDATA, and issues at most one
    WRITE_ONE (`0x21`);
-6. waits for vendor settle time, checks busy/EEF, and directly proves the
-   persistent byte again;
-7. restores and verifies active C0 and the exact original Control 1 value, then
-   observes the BSM settle interval.
+6. waits from command-callback completion, checks busy/EEF, and directly proves
+   the persistent byte again even when EEF reports a write failure;
+7. restores and verifies the queued intended active C0..C5 mirror, active C0
+   access state, and the exact original Control 1 value, then observes the BSM
+   settle interval.
 
 Callback failure after a command write is ambiguous, so the engine continues
 with direct proof and never retries the wear-limited command. Generic paths do
 not dispatch UPDATE_ALL (`0x11`) or REFRESH_ALL (`0x12`). User EEPROM writes are
 bounded to 16 bytes per job and stop at the first failed byte with a partial
-typed report.
+typed report. A persistent-read result length likewise counts only positively
+proven bytes.
+
+Every budgeted queue loop refreshes elapsed time between callbacks (or charges
+the configured callback bound when no clock hook exists), so a larger budget
+cannot cross a mutation cutoff and start WRITE_ONE. The configured EEPROM
+timeout is the busy-poll window after the mandatory 10 ms write settle. An
+ordinary item failure pauses at its boundary and remains the first batch error
+while later queued items can be advanced; cleanup failure instead cancels the
+remaining queue because safe access state is unproven.
 
 ## Primary-cell provisioning boundary
 
@@ -149,11 +168,25 @@ Bounded cleanup either restores a trusted active target and clears EERD, or
 holds a safe active C0 with automatic refresh disabled when persistence cannot
 be trusted. The report separates operation and cleanup evidence.
 
+Every normal callback is admitted only when its supplied timeout plus the
+300 ms cleanup reserve fits. Attempt evidence is set immediately before the
+physical callback, late returns stop normal forward progress, and ambiguous
+non-command mutations are read back before any safety cleanup write. The final
+10 ms level-switch settle is measured from exact target-C0 readback, not from a
+later Control 1 callback. Electrical qualification remains application-owned:
+stable write-capable VDD (at least 1.6 V), the 2.0 V minimum for 400 kHz, VDD
+safely above the maximum 2.2 V LSM threshold through activation/settle, and
+board backup/backfeed evidence cannot be inferred by the driver.
+
 ## Status and raw access
 
 All fallible APIs return `Status`; errors are never logged or hidden. Status
 flags are explicit. The guarded Status clear refuses a write that would
-silently erase an active THF/TLF flag not named by the caller.
+silently erase a THF/TLF flag observed by its guard read and writes ones for
+every unnamed lower-six W0C flag, including flags that assert between the read
+and write callbacks. Silicon unconditionally clears THF/TLF on every Status
+write, so a THF/TLF assertion in that same cooperative race window remains an
+unavoidable hardware limitation.
 
 Raw access is intentionally narrow. Reads cover ordinary active registers,
 user RAM, and active configuration mirrors. Writes cover temperature

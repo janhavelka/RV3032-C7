@@ -74,6 +74,9 @@ artifacts, not a persistent RTC or driver failure.
 
 The HIL runner lives at [`tools/hil_cli_runner.py`](../../tools/hil_cli_runner.py).
 It is a host-side test tool and is not compiled into production firmware.
+Its destructive setup path now rejects execution before opening the port unless
+fresh authorization fields record the exact port/module, primary-cell
+chemistry, power conditions, possible C0 write, and VDD-off/backfeed scope.
 
 After the 48-hour run, the runner was tightened to send one final bounded blank
 line resync before declaring a command hard-timeout. A short intensive

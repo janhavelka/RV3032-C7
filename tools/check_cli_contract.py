@@ -46,9 +46,11 @@ def ensure_missing(path: pathlib.Path, label: str) -> None:
 def main() -> int:
     common_dir = ROOT / "examples" / "common"
     bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+    hil_runner = ROOT / "tools" / "hil_cli_runner.py"
 
     ensure_exists(common_dir, "common example directory")
     ensure_exists(bringup_main, "bringup CLI example")
+    ensure_exists(hil_runner, "HIL runner")
 
     ensure_missing(ROOT / "examples" / "00_smoke_boot", "deprecated example 00_smoke_boot")
     ensure_missing(
@@ -73,6 +75,9 @@ def main() -> int:
         "cfg.enableEepromWrites = false",
         "cfg.waitMs = rtc_wait_ms",
         "g_rtc.probe()",
+        "EEPROM persistence disabled",
+        "write_attempted=",
+        "cleanup_status=",
     ]
     for token in required_contract:
         if token not in text:
@@ -87,6 +92,19 @@ def main() -> int:
     for token in forbidden_contract:
         if token in text:
             fail(f"unsafe legacy provisioning token remains: {token!r}")
+
+    hil_text = hil_runner.read_text(encoding="utf-8", errors="replace")
+    for token in (
+        "--authorization-port",
+        "--authorization-module",
+        "--authorization-primary-cell-chemistry",
+        "--authorization-power-conditions",
+        "CONFIRM-POSSIBLE-C0-WRITE",
+        "--authorization-vdd-off-backfeed-scope",
+        "destructive_authorization_record(args)",
+    ):
+        if token not in hil_text:
+            fail(f"destructive HIL authorization token missing: {token!r}")
 
     print("CLI contract PASSED")
     return 0
