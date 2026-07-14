@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GitHub Actions CI now runs for version-tag pushes as well as `main` pushes,
+  so each release tag receives checks against its exact commit.
 - Verified calendar set now writes the fixed Status payload `0xFC`, preserving
   UF/TF/AF/EVF that assert between its cooperative pre-clear read and write
   while retaining evidence of the unavoidable THF/TLF clear.
