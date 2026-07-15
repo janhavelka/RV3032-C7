@@ -2,11 +2,9 @@
  * @file I2cTransport.h
  * @brief Wire-based I2C transport adapter for RV3032 examples.
  *
- * This file provides Wire-compatible I2C callbacks that can be
- * used with the RV3032 driver. The library does not depend on Wire
- * directly; this adapter bridges them.
- *
- * NOT part of the library API. Example-only.
+ * This example-only adapter keeps Wire ownership in the application. The
+ * caller must serialize the shared bus and keep the Wire mutex uncontended for
+ * the complete synchronous callback. Buffers are borrowed only until return.
  */
 
 #pragma once
@@ -14,157 +12,256 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include <limits.h>
+
 #include "RV3032/Status.h"
 
 namespace transport {
 
-/**
- * @brief Wire-based I2C write implementation.
- *
- * Pass to Config::i2cWrite, and pass &Wire (or custom TwoWire*) to i2cUser.
- * The application owns the actual Wire timeout configuration; `timeoutMs` is
- * advisory and should be set in initWire().
- *
- * @param addr I2C 7-bit address
- * @param data Data buffer to send
- * @param len Number of bytes
- * @param timeoutMs Advisory timeout requested by the driver
- * @param user Pointer to TwoWire instance
- * @return Status OK on success, I2C error on failure
- */
-inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
-                                uint32_t timeoutMs, void* user) {
-  TwoWire* wire = static_cast<TwoWire*>(user);
-  if (wire == nullptr) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_CONFIG, "Wire instance is null");
-  }
-  if (!data || len == 0) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "Invalid I2C write params");
+static constexpr int32_t I2C_DETAIL_INVALID_ARGUMENT = -1;
+static constexpr int32_t I2C_DETAIL_INVALID_TIMEOUT = -2;
+static constexpr int32_t I2C_DETAIL_SHORT_STAGING = -3;
+
+class ScopedWireTimeout {
+ public:
+  inline ScopedWireTimeout(TwoWire& wire, uint16_t timeoutMs)
+      : _wire(wire), _previousTimeoutMs(wire.getTimeOut()) {
+    _wire.setTimeOut(timeoutMs);
   }
 
-  // Check for oversized writes (ESP32 Wire buffer is 128 bytes)
-  if (len > 128) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "Write exceeds I2C buffer",
-                                 static_cast<int32_t>(len));
+  inline ~ScopedWireTimeout() {
+    _wire.setTimeOut(_previousTimeoutMs);
   }
 
-  (void)timeoutMs;
+  ScopedWireTimeout(const ScopedWireTimeout&) = delete;
+  ScopedWireTimeout& operator=(const ScopedWireTimeout&) = delete;
 
-  wire->beginTransmission(addr);
-  size_t written = wire->write(data, len);
-  if (written != len) {
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C write incomplete",
-                                 static_cast<int32_t>(written));
-  }
+ private:
+  TwoWire& _wire;
+  uint16_t _previousTimeoutMs;
+};
 
-  uint8_t result = wire->endTransmission(true);  // Send STOP
+inline bool remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
+                            uint32_t& remainingMs) {
+  remainingMs = deadlineMs - nowMs;
+  return remainingMs != 0U && remainingMs < 0x80000000UL;
+}
+
+inline uint16_t boundedWireTimeout(uint32_t remainingMs) {
+  return static_cast<uint16_t>(
+      remainingMs > UINT16_MAX ? UINT16_MAX : remainingMs);
+}
+
+inline RV3032::Status callbackTimeoutStatus() {
+  return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT,
+                               "I2C callback deadline exceeded");
+}
+
+inline RV3032::Status mapWireResult(uint8_t result) {
   switch (result) {
     case 0:
       return RV3032::Status::Ok();
     case 1:
-      return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C data too long", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                   "I2C data too long", result);
     case 2:
-      return RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR, "I2C address NACK", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR,
+                                   "I2C address NACK", result);
     case 3:
-      return RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA, "I2C data NACK", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA,
+                                   "I2C data NACK", result);
     case 4:
-      return RV3032::Status::Error(RV3032::Err::I2C_BUS, "I2C bus error", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_BUS,
+                                   "I2C bus error", result);
     case 5:
-      return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT, "I2C timeout", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT,
+                                   "I2C timeout", result);
     default:
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C unknown error", result);
+      return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                   "I2C unknown error", result);
   }
 }
 
-/**
- * @brief Wire-based I2C write-read implementation.
- *
- * Pass to Config::i2cWriteRead, and pass &Wire (or custom TwoWire*) to i2cUser.
- * The application owns the actual Wire timeout configuration; `timeoutMs` is
- * advisory and should be set in initWire().
- *
- * @param addr I2C 7-bit address
- * @param tx TX buffer to send
- * @param txLen TX length
- * @param rx RX buffer for readback
- * @param rxLen RX length
- * @param timeoutMs Advisory timeout requested by the driver
- * @param user Pointer to TwoWire instance
- * @return Status OK on success, I2C error on failure
- */
-inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx, size_t txLen,
-                                    uint8_t* rx, size_t rxLen, uint32_t timeoutMs,
-                                    void* user) {
+inline bool deadlineCrossed(uint32_t deadlineMs) {
+  uint32_t remainingMs = 0;
+  return !remainingBefore(millis(), deadlineMs, remainingMs);
+}
+
+/** Close a transaction already opened by beginTransmission(). */
+inline bool releaseStartedTransaction(TwoWire& wire, uint32_t deadlineMs) {
+  uint32_t remainingMs = 0;
+  const bool timeRemains = remainingBefore(millis(), deadlineMs, remainingMs);
+  const uint16_t releaseTimeoutMs =
+      timeRemains ? boundedWireTimeout(remainingMs) : uint16_t{1};
+  {
+    ScopedWireTimeout timeout(wire, releaseTimeoutMs);
+    (void)wire.endTransmission(true);
+  }
+  return deadlineCrossed(deadlineMs);
+}
+
+inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
+                                uint32_t timeoutMs, void* user) {
   TwoWire* wire = static_cast<TwoWire*>(user);
-  if (wire == nullptr) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_CONFIG, "Wire instance is null");
+  if (wire == nullptr || data == nullptr || len == 0U || len > 128U) {
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "Invalid I2C callback argument",
+                                 I2C_DETAIL_INVALID_ARGUMENT);
   }
-  if ((txLen > 0 && tx == nullptr) || (rxLen > 0 && rx == nullptr)) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "Invalid I2C read params");
-  }
-  if (txLen == 0 || rxLen == 0) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C read length invalid");
-  }
-  if (txLen > 128 || rxLen > 128) {
-    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C read exceeds buffer");
+  if (timeoutMs == 0U || timeoutMs > UINT16_MAX) {
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "Invalid I2C callback timeout",
+                                 I2C_DETAIL_INVALID_TIMEOUT);
   }
 
-  (void)timeoutMs;
-
-  wire->beginTransmission(addr);
-  size_t written = wire->write(tx, txLen);
-  if (written != txLen) {
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C write incomplete",
-                                 static_cast<int32_t>(written));
+  const uint32_t deadlineMs = millis() + timeoutMs;
+  uint32_t remainingMs = 0;
+  if (!remainingBefore(millis(), deadlineMs, remainingMs) ||
+      remainingMs <= 1U) {
+    return callbackTimeoutStatus();
   }
 
-  uint8_t result = wire->endTransmission(false);  // Repeated start
-  if (result != 0) {
-    switch (result) {
-      case 1:
-        return RV3032::Status::Error(RV3032::Err::INVALID_PARAM, "I2C data too long", result);
-      case 2:
-        return RV3032::Status::Error(RV3032::Err::I2C_NACK_ADDR, "I2C address NACK", result);
-      case 3:
-        return RV3032::Status::Error(RV3032::Err::I2C_NACK_DATA, "I2C data NACK", result);
-      case 4:
-        return RV3032::Status::Error(RV3032::Err::I2C_BUS, "I2C bus error", result);
-      case 5:
-        return RV3032::Status::Error(RV3032::Err::I2C_TIMEOUT, "I2C timeout", result);
-      default:
-        return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C write failed", result);
+  {
+    ScopedWireTimeout timeout(*wire, boundedWireTimeout(remainingMs - 1U));
+    wire->beginTransmission(addr);
+  }
+  if (deadlineCrossed(deadlineMs)) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+
+  const size_t written = wire->write(data, len);
+  if (written != len) {
+    if (releaseStartedTransaction(*wire, deadlineMs)) {
+      return callbackTimeoutStatus();
     }
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "I2C write staging incomplete",
+                                 I2C_DETAIL_SHORT_STAGING);
   }
 
-  size_t read = wire->requestFrom(addr, static_cast<uint8_t>(rxLen));
+  if (!remainingBefore(millis(), deadlineMs, remainingMs) ||
+      remainingMs <= 1U) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+
+  uint8_t result = 0;
+  {
+    ScopedWireTimeout timeout(*wire, boundedWireTimeout(remainingMs - 1U));
+    result = wire->endTransmission(true);
+  }
+  if (deadlineCrossed(deadlineMs)) {
+    return callbackTimeoutStatus();
+  }
+  return mapWireResult(result);
+}
+
+inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
+                                    size_t txLen, uint8_t* rx, size_t rxLen,
+                                    uint32_t timeoutMs, void* user) {
+  TwoWire* wire = static_cast<TwoWire*>(user);
+  if (wire == nullptr || tx == nullptr || rx == nullptr || txLen == 0U ||
+      rxLen == 0U || txLen > 128U || rxLen > 128U) {
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "Invalid I2C callback argument",
+                                 I2C_DETAIL_INVALID_ARGUMENT);
+  }
+  if (timeoutMs == 0U || timeoutMs > UINT16_MAX) {
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "Invalid I2C callback timeout",
+                                 I2C_DETAIL_INVALID_TIMEOUT);
+  }
+
+  const uint32_t deadlineMs = millis() + timeoutMs;
+  uint32_t remainingMs = 0;
+  if (!remainingBefore(millis(), deadlineMs, remainingMs) ||
+      remainingMs <= 1U) {
+    return callbackTimeoutStatus();
+  }
+
+  {
+    ScopedWireTimeout timeout(*wire, boundedWireTimeout(remainingMs - 1U));
+    wire->beginTransmission(addr);
+  }
+  if (deadlineCrossed(deadlineMs)) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+
+  const size_t written = wire->write(tx, txLen);
+  if (written != txLen) {
+    if (releaseStartedTransaction(*wire, deadlineMs)) {
+      return callbackTimeoutStatus();
+    }
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "I2C write staging incomplete",
+                                 I2C_DETAIL_SHORT_STAGING);
+  }
+
+  if (!remainingBefore(millis(), deadlineMs, remainingMs) ||
+      remainingMs <= 1U) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+
+  uint8_t result = 0;
+  {
+    ScopedWireTimeout timeout(*wire, boundedWireTimeout(remainingMs - 1U));
+    result = wire->endTransmission(false);
+  }
+  if (deadlineCrossed(deadlineMs)) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+  if (result != 0U) {
+    if (releaseStartedTransaction(*wire, deadlineMs)) {
+      return callbackTimeoutStatus();
+    }
+    return mapWireResult(result);
+  }
+
+  if (!remainingBefore(millis(), deadlineMs, remainingMs) ||
+      remainingMs <= 1U) {
+    (void)releaseStartedTransaction(*wire, deadlineMs);
+    return callbackTimeoutStatus();
+  }
+
+  size_t read = 0;
+  {
+    ScopedWireTimeout timeout(*wire, boundedWireTimeout(remainingMs - 1U));
+    read = wire->requestFrom(addr, rxLen, true);
+  }
+  if (deadlineCrossed(deadlineMs)) {
+    return callbackTimeoutStatus();
+  }
   if (read != rxLen) {
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C read length mismatch",
+    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                 "I2C read length mismatch",
                                  static_cast<int32_t>(read));
   }
 
   for (size_t i = 0; i < rxLen; ++i) {
-    if (wire->available()) {
-      rx[i] = static_cast<uint8_t>(wire->read());
-    } else {
-      return RV3032::Status::Error(RV3032::Err::I2C_ERROR, "I2C data not available");
+    if (wire->available() <= 0) {
+      return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                   "I2C data not available");
     }
+    const int value = wire->read();
+    if (value < 0) {
+      return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
+                                   "I2C read failed");
+    }
+    rx[i] = static_cast<uint8_t>(value);
   }
 
-  return RV3032::Status::Ok();
+  return deadlineCrossed(deadlineMs) ? callbackTimeoutStatus()
+                                      : RV3032::Status::Ok();
 }
 
-/**
- * @brief Initialize Wire with default pins and frequency.
- *
- * @param sda SDA pin number
- * @param scl SCL pin number
- * @param freq I2C clock frequency in Hz (default 400kHz)
- * @param timeoutMs I2C timeout in milliseconds (default 50ms)
- * @return true on success
- */
-inline bool initWire(int sda, int scl, uint32_t freq = 400000, uint16_t timeoutMs = 50) {
+inline bool initWire(int sda, int scl, uint32_t freq = 400000,
+                     uint16_t timeoutMs = 50) {
 #if defined(ARDUINO_ARCH_ESP32)
-  // Toggle SCL to release any stuck slave
+  // Optional application-owned recovery before the bus is initialized.
   pinMode(scl, OUTPUT);
   pinMode(sda, INPUT_PULLUP);
   for (int i = 0; i < 9; i++) {
@@ -173,7 +270,6 @@ inline bool initWire(int sda, int scl, uint32_t freq = 400000, uint16_t timeoutM
     digitalWrite(scl, HIGH);
     delayMicroseconds(5);
   }
-  // Generate STOP condition
   pinMode(sda, OUTPUT);
   digitalWrite(sda, LOW);
   delayMicroseconds(5);
@@ -183,13 +279,13 @@ inline bool initWire(int sda, int scl, uint32_t freq = 400000, uint16_t timeoutM
   delayMicroseconds(5);
 #endif
 
-  Wire.begin(sda, scl);
-  Wire.setClock(freq);
-#if defined(ARDUINO_ARCH_ESP32)
+  if (!Wire.begin(sda, scl)) {
+    return false;
+  }
+  if (!Wire.setClock(freq)) {
+    return false;
+  }
   Wire.setTimeOut(timeoutMs);
-#else
-  (void)timeoutMs;
-#endif
   return true;
 }
 

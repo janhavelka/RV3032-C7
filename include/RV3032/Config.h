@@ -25,6 +25,14 @@ enum class BackupSwitchMode : uint8_t {
 };
 
 /// @brief I2C write callback signature.
+/// @note Invocation is synchronous. The buffer is borrowed only for the
+///       callback duration and Status::msg must have static storage. Legal
+///       return codes are OK, I2C_ERROR, I2C_NACK_ADDR, I2C_NACK_DATA,
+///       I2C_TIMEOUT, and I2C_BUS.
+/// @note timeoutMs is a hard, exclusive bound for the complete callback,
+///       including application serialization and every physical bus phase.
+///       The application owner must ensure its shared-bus mutex is uncontended
+///       before dispatch.
 /// @warning One invocation is exactly one physical write attempt. The callback
 ///          must not retry, recover the bus, or replay a possibly mutating
 ///          transfer. Ambiguous outcomes are reconciled by later driver reads.
@@ -32,8 +40,18 @@ using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
                               uint32_t timeoutMs, void* user);
 
 /// @brief I2C write-read callback signature.
+/// @note Invocation is synchronous. All buffers are borrowed only for the
+///       callback duration and Status::msg must have static storage. Legal
+///       return codes are OK, I2C_ERROR, I2C_NACK_ADDR, I2C_NACK_DATA,
+///       I2C_TIMEOUT, and I2C_BUS.
+/// @note timeoutMs is a hard, exclusive bound for the complete callback,
+///       including application serialization, recovery when permitted, and
+///       every physical bus phase. The application owner must ensure its
+///       shared-bus mutex is uncontended before dispatch.
 /// @note For ordinary read-only operations, an application owner may document
 ///       bounded recovery plus at most one read retry inside this callback.
+///       Both physical attempts together must finish within the supplied
+///       timeout; the driver counts them as one callback and one instruction.
 /// @warning While ensurePrimaryCellConfiguration() is active, the application
 ///          must switch this callback to a scoped single-attempt mode: every
 ///          read is one physical attempt with no recovery or retry.
@@ -69,7 +87,10 @@ struct Config {
   void* i2cUser = nullptr;
 
   /// @brief Monotonic millisecond source callback (optional).
-  /// @note If null, health timestamps remain 0. EEPROM deadlines are driven by tick(nowMs).
+  /// @note If null, health timestamps remain 0 and caller-supplied poll/tick
+  ///       times drive cooperative deadlines. Each invoked cooperative
+  ///       transport callback is then conservatively charged its exact
+  ///       supplied timeout before another instruction can be dispatched.
   NowMsFn nowMs = nullptr;
 
   /// @brief Sleeping/yielding wait source (optional for cooperative use).
@@ -84,14 +105,18 @@ struct Config {
   uint8_t i2cAddress = 0x51;
 
   /// @brief I2C transaction timeout in milliseconds (default: 50ms)
-  /// @note Passed to the transport callback. The library never configures the bus.
+  /// @note The library never configures the bus. Cooperative transfers clip
+  ///       this value to the earliest exclusive deadline minus one
+  ///       millisecond. The complete application callback must finish within
+  ///       the supplied clipped timeout; exceeding it reports I2C_TIMEOUT.
   ///       Valid range is 1..100 ms.
   uint32_t i2cTimeoutMs = 50;
 
   /// @brief Enable explicit generic EEPROM persistence (default: false)
-  /// @note When true, EEPROM-backed config changes (backup PMU, clock output,
-  ///       offset/POR/VL interrupt enables, and temperature reference) may
-  ///       queue persistence after an explicit typed setter.
+  /// @note This authorizes only configuration EEPROM C0..C5 and typed user
+  ///       EEPROM CB..EA. It never grants password-register authority. When
+  ///       true, supported EEPROM-backed config changes may queue persistence
+  ///       after an explicit typed setter.
   ///       begin() never reads or mutates the device and never queues work.
   ///       When false, config is RAM-only (faster, saves EEPROM wear).
   ///       Typed setters that need read-modify-write return IN_PROGRESS and must

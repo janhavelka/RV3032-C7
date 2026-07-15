@@ -21,11 +21,12 @@ mirror read proves durable state.
 
 ## Calendar and alarm
 
-Calendar registers `0x01..0x07` are packed BCD. Seconds, minutes, hours, date,
-month, and year have reserved upper bits that must be zero. Weekday is a
-user-assigned BCD value from 0..6 and is not required to agree with the
-Gregorian date. Setters preserve a valid supplied weekday. Supported years are
-2000..2099.
+Seconds, minutes, hours, date, month, and year in calendar registers
+`0x01..0x07` are packed BCD. Weekday `0x04` is a user-assigned three-bit
+binary value from 0..6 and is not required to agree with the Gregorian date.
+It is not BCD.
+Reserved upper bits must be zero. Setters preserve a valid supplied weekday.
+Supported years are 2000..2099.
 Register `0x00` is packed-BCD hundredths. It is read independently by the typed
 API. Writing Seconds or setting STOP resets hundredths and the 4096 Hz through
 1 Hz prescalers.
@@ -54,6 +55,16 @@ Timestamp reset is a cooperative control-register mutation. TLow/THigh reset
 also clears TLF/THF. EVR may read back set, so a repeated EVI reset emits a
 preserved 0-to-1 EVR sequence; it does not clear EVF.
 
+Live reconfiguration follows the vendor interrupt-quiescence sequence:
+`disable interrupt -> consume/clear flag if appropriate -> configure ->
+enable`. Timer configuration requires TIE=0, alarm register changes AIE=0,
+EVI changes and EVI timestamp reset EIE=0, and backup-mode changes BSIE=0.
+A set guard returns `BUSY` before mutation. EIE=0 suppresses signaling but does
+not stop timestamp capture, so an external edge may still occur during EVI
+configuration. This is vendor-recommended hardening, not proof against a
+physically reproduced concurrent event. CLKDE is intentionally not EIE-guarded;
+it controls CLKOUT delay after I2C STOP rather than capture.
+
 ## Status side effects
 
 Status contains THF, TLF, UF, TF, AF, EVF, PORF, and VLF. Status bits use
@@ -67,14 +78,20 @@ their immediately-preceding values are retained as typed report evidence.
 
 Guarded general Status clearing writes one to every unnamed lower-six W0C flag,
 so a newly asserted UF/TF/AF/EVF/PORF/VLF between its read and write is
-preserved. THF/TLF cannot be protected across that window because silicon
-clears both on every Status write; callers that cannot tolerate that race must
-serialize the producing condition externally.
+preserved. The simple AF, TF, UF, EVF, PORF, and VLF clearers also enforce this
+rule: any Status-register write clears THF and TLF in silicon. If either
+omitted flag is already set at the guard read, the operation returns
+`INVALID_PARAM` without writing. An assertion after the guard read cannot be
+preserved. The verified calendar-set job is separate: it promises PORF/VLF
+clearing and captures pre-clear THF/TLF evidence instead of taking the simple
+clearer's `INVALID_PARAM` exit.
 
 TEMP_LSB combines the temperature fraction with CLKF, BSF, EEBUSY, and EEF
 support flags. Typed hardware inspection distinguishes EEbusy/EEF from library
-queue state. BSF/EEF clearing is guarded so unrelated support state is not
-silently destroyed and the read-only temperature fraction is preserved.
+queue state. EEF/CLKF/BSF are sticky W0C flags; EEbusy is separate and read-only.
+Each typed clear reads only target/busy evidence and then writes a fixed payload
+that preserves the temperature fraction and any neighboring flag that asserts
+between cooperative polls.
 
 ## Control bit facts
 
@@ -87,6 +104,21 @@ silently destroyed and the read-only temperature fraction is preserved.
 - EVI Control has no generic enable bit 3.
 - PMU C0 fields are NCLKE, BSM, TCR, and TCM. TCR and TCM are independent.
 - TCM `00` disables the trickle charger. BSM `10` selects level switching.
+
+UIE is update-event enable rather than an interrupt-only gate. UIE=0 suppresses
+both new UF generation and the corresponding INT event; there is no
+UF-polling-only mode. Changing periodic configuration does not clear a UF that
+was already latched.
+
+The public backup enum is encoded explicitly: Off=`00`, Direct=`01`, and
+Level=`10`; raw `11` is also interpreted as disabled. A cooperative backup
+change preserves non-BSM implemented PMU bits, performs at most one write, and
+uses readback-only reconciliation within four callbacks. A disabled-to-Direct
+transition has a 2 ms activation not-before boundary; disabled-to-Level has a
+10 ms boundary, both measured from write callback completion. Admission uses
+the exclusive minimum `4 * i2cTimeoutMs + activationMs + 1` and a 1000 ms
+maximum. Register proof and fake timing do not prove real retention,
+backup-source voltage/topology safety, or electrical activation timing.
 
 The primary-cell target is exactly:
 
@@ -138,6 +170,16 @@ compares two samples and reports `INCOHERENT_DATA` if they differ. Typed flag
 helpers inspect THF/TLF and clear both together, matching the Status-write side
 effect.
 
+Staged timer, periodic, CLKOUT, and temperature jobs prove the exact requested
+implemented bits before reporting success. After an ambiguous post-mutation
+failure they never replay the requested write; they instead prove a bounded
+safe gate: TE=0, UIE=0, preserved PMU with NCLKE=1, or
+THE/TLE/THIE/TLIE=0. Their success/worst-case callback caps are 6/9, 5/8, 5/8,
+and 7/10. Public reports distinguish unchanged, requested verified, safe
+disabled verified, and unknown terminal state, and retain forward and cleanup
+failure evidence separately. Persistence is admitted only after requested
+state proof.
+
 ## Indirect EEPROM commands and timing
 
 Commands used by the implementation:
@@ -157,6 +199,12 @@ generic EEPROM timeout is an additional bounded busy-poll window after the
 write settle. Safe C0 access and cleanup include the documented 10 ms
 backup-switch settle interval.
 
+Persistent content proof and access-state cleanup proof are independent.
+Typed reports retain the first forward status, first cleanup status, durable
+proof, and partial byte counts even if later C0/Control 1 restoration fails.
+Generic queue batches retain those two first causes separately; cleanup failure
+has semantic `EEPROM_CLEANUP_FAILED` precedence and cancels remaining entries.
+
 A command callback error does not prove the command failed to reach silicon.
 The driver therefore never retries WRITE_ONE blindly. It performs direct
 persistent proof and reports ambiguity or failure. EEF remains failure
@@ -174,11 +222,12 @@ for a product-level write-frequency policy.
 ## Password protection
 
 Active password inputs are write-only/read-zero. Persistent password bytes and
-the enable byte are accessed only through the typed cooperative protection job.
-Enabling protection first persists disabled state, then password bytes, then
-the enable byte, each with WRITE_ONE and direct proof. Callback success while
-loading an active credential is not by itself authentication evidence. Public
-status is redacted and never returns credential bytes. After the durable job,
-the active mirrors are applied in the safe disabled-password state and an
-input credential that differs byte-for-byte from both old and new references
-is written to relock protected registers.
+the enable byte remain in the command table as silicon-reference facts, but the
+library does not implement password management. Direct and block access to
+`0x39..0x3C` and `0xC6..0xCA` is denied before transport. EEADDR, EEDATA, and
+EECMD at `0x3D..0x3F` remain available to the managed EEPROM engine.
+
+Password protection must be disabled for supported operation. A module
+protected by other firmware is unsupported and requires out-of-band service.
+Transport success cannot prove a write changed protected silicon; supported
+typed multi-transfer operations rely on readback.

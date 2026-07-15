@@ -21,20 +21,24 @@ constexpr uint32_t EEPROM_READY_TIMEOUT_MS = 250;
 constexpr uint32_t EEPROM_READ_TIMEOUT_MS = 25;
 constexpr uint32_t EEPROM_WRITE_TIMEOUT_MS = 100;
 constexpr uint32_t EEPROM_CLEANUP_READY_TIMEOUT_MS = 250;
+constexpr uint32_t GENERIC_EEPROM_OPERATION_TIMEOUT_MS = 4000;
 constexpr uint32_t PRIMARY_CELL_OPERATION_TIMEOUT_MS = 1000;
 constexpr uint32_t PRIMARY_CELL_WRITE_START_CUTOFF_MS = 500;
 constexpr uint32_t PRIMARY_CELL_MIN_CLEANUP_RESERVE_MS = 300;
 constexpr uint32_t PRIMARY_CELL_TRANSFER_TIMEOUT_MS = 5;
 constexpr uint8_t PRIMARY_CELL_WRITE_COMMAND_CAP = 1;
+constexpr uint32_t TWO_TRANSFER_JOB_CALLBACK_CAP = 2;
+constexpr uint32_t VERIFIED_SET_JOB_CALLBACK_CAP = 7;
+constexpr uint32_t VERIFIED_SET_STATUS_WRITE_PREFIX_CAP = 4;
 constexpr uint16_t EEPROM_READY_CHECK_CAP = 256;
 constexpr uint16_t EEPROM_READ_CHECK_CAP = 32;
 constexpr uint16_t EEPROM_WRITE_CHECK_CAP = 101;
 constexpr uint16_t EEPROM_CLEANUP_CHECK_CAP = 256;
-constexpr uint8_t kMaxBackupSwitchMode = static_cast<uint8_t>(BackupSwitchMode::Direct);
 constexpr uint8_t kMaxTimerFrequency = static_cast<uint8_t>(TimerFrequency::Hz1_60);
 constexpr uint8_t kMaxClkoutFrequency = static_cast<uint8_t>(ClkoutFrequency::Hz1);
 constexpr uint8_t kMaxEviDebounce = static_cast<uint8_t>(EviDebounce::Hz8);
 constexpr uint32_t kEpoch2000 = 946684800UL;  // 2000-01-01 00:00:00 UTC
+constexpr uint32_t kEndOf2099 = 4102444799UL; // 2099-12-31 23:59:59 UTC
 constexpr float kOffsetPpmPerStep =
     1000000.0f / (32768.0f * 128.0f);
 constexpr uint8_t kUserRamSize =
@@ -59,18 +63,6 @@ Status mapPresenceError(const Status& st) {
     return Status::Error(Err::DEVICE_NOT_FOUND, "RTC not responding", st.detail);
   }
   return st;
-}
-
-bool shouldTrackHealth(const Status& st) {
-  switch (st.code) {
-    case Err::INVALID_CONFIG:
-    case Err::INVALID_PARAM:
-    case Err::NOT_INITIALIZED:
-    case Err::INVALID_DATETIME:
-      return false;
-    default:
-      return true;
-  }
 }
 
 bool isKnownRegisterAddress(uint8_t reg) {
@@ -166,6 +158,14 @@ Status RV3032::begin(const Config& config) {
   if (config.offlineThreshold < 1) {
     return Status::Error(Err::INVALID_CONFIG, "Offline threshold must be at least 1");
   }
+  const uint32_t cleanupReserveMs =
+      EEPROM_CLEANUP_READY_TIMEOUT_MS +
+      6U * config.i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS;
+  if (GENERIC_EEPROM_OPERATION_TIMEOUT_MS <
+      cleanupReserveMs + config.i2cTimeoutMs + 1U) {
+    return Status::Error(Err::INVALID_CONFIG,
+                         "I2C timeout leaves no EEPROM cleanup reserve");
+  }
 
   _resetRuntimeState();
   _config = config;
@@ -175,30 +175,30 @@ Status RV3032::begin(const Config& config) {
   return Status::Ok();
 }
 
-void RV3032::tick(uint32_t now_ms) {
-  if (!_initialized) {
-    return;
-  }
+Status RV3032::tick(uint32_t nowMs) {
   uint8_t instructionsUsed = 0;
-  (void)pollEeprom(now_ms, 1, instructionsUsed);
+  return pollEeprom(nowMs, 1, instructionsUsed);
 }
 
 void RV3032::end() {
-  if (isEepromBusy() || isJobBusy()) {
-    return;
-  }
   _resetRuntimeState();
 }
 
 bool RV3032::isEepromBusy() const {
-  return _eeprom.state != EepromState::Idle || _eeprom.queueCount > 0;
+  return _eeprom.state != EepromState::IDLE || _eeprom.queueCount > 0;
 }
 
 Status RV3032::getEepromStatus() const {
   if (isEepromBusy()) {
     return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
   }
-  return _eepromLastStatus;
+  if (!_eepromCleanupStatus.ok()) {
+    return Status::Error(Err::EEPROM_CLEANUP_FAILED,
+                         "EEPROM cleanup could not be verified",
+                         _eepromCleanupStatus.detail);
+  }
+  if (!_eepromOperationStatus.ok()) return _eepromOperationStatus;
+  return Status::Ok();
 }
 
 Status RV3032::pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed) {
@@ -206,14 +206,14 @@ Status RV3032::pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& ins
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
-  if (isJobBusy() && _job.activeKind != JobKind::None) {
+  if (isJobBusy() && _job.activeKind != JobKind::NONE) {
     return Status::Error(Err::BUSY, "Cooperative job owns the device");
   }
   return processEeprom(now_ms, maxInstructions, instructionsUsed);
 }
 
 bool RV3032::isJobBusy() const {
-  return _job.state != JobState::Idle;
+  return _job.state != JobState::IDLE;
 }
 
 Status RV3032::getJobStatus() const {
@@ -221,6 +221,74 @@ Status RV3032::getJobStatus() const {
     return Status::Error(Err::IN_PROGRESS, "Job in progress");
   }
   return _job.lastStatus;
+}
+
+Status RV3032::getSetTimerJobResult(ConfigurationJobReport& out) const {
+  if (_job.activeKind == JobKind::SET_TIMER) {
+    return Status::Error(Err::IN_PROGRESS, "Timer configuration in progress");
+  }
+  if (_job.completedKind != JobKind::SET_TIMER) {
+    return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
+                         "Timer configuration result unavailable");
+  }
+  out = _job.configurationReport;
+  return _job.completedStatus;
+}
+
+Status RV3032::getSetPeriodicUpdateJobResult(
+    ConfigurationJobReport& out) const {
+  if (_job.activeKind == JobKind::SET_PERIODIC_UPDATE) {
+    return Status::Error(Err::IN_PROGRESS,
+                         "Periodic update configuration in progress");
+  }
+  if (_job.completedKind != JobKind::SET_PERIODIC_UPDATE) {
+    return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
+                         "Periodic update result unavailable");
+  }
+  out = _job.configurationReport;
+  return _job.completedStatus;
+}
+
+Status RV3032::getSetBackupSwitchModeJobResult(
+    ConfigurationJobReport& out) const {
+  if (_job.activeKind == JobKind::SET_BACKUP_SWITCH_MODE) {
+    return Status::Error(Err::IN_PROGRESS,
+                         "Backup configuration in progress");
+  }
+  if (_job.completedKind != JobKind::SET_BACKUP_SWITCH_MODE) {
+    return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
+                         "Backup configuration result unavailable");
+  }
+  out = _job.configurationReport;
+  return _job.completedStatus;
+}
+
+Status RV3032::getSetClkoutConfigJobResult(
+    ConfigurationJobReport& out) const {
+  if (_job.activeKind == JobKind::SET_CLKOUT_CONFIG) {
+    return Status::Error(Err::IN_PROGRESS,
+                         "CLKOUT configuration in progress");
+  }
+  if (_job.completedKind != JobKind::SET_CLKOUT_CONFIG) {
+    return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
+                         "CLKOUT configuration result unavailable");
+  }
+  out = _job.configurationReport;
+  return _job.completedStatus;
+}
+
+Status RV3032::getSetTemperatureEventConfigJobResult(
+    ConfigurationJobReport& out) const {
+  if (_job.activeKind == JobKind::SET_TEMPERATURE_EVENT_CONFIG) {
+    return Status::Error(Err::IN_PROGRESS,
+                         "Temperature configuration in progress");
+  }
+  if (_job.completedKind != JobKind::SET_TEMPERATURE_EVENT_CONFIG) {
+    return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
+                         "Temperature configuration result unavailable");
+  }
+  out = _job.configurationReport;
+  return _job.completedStatus;
 }
 
 Status RV3032::startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable) {
@@ -239,12 +307,16 @@ Status RV3032::startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable
   }
 
   _job = JobOp{};
-  _job.timerTicks = ticks;
-  _job.timerFreq = freq;
-  _job.timerEnable = enable;
-  _job.activeKind = JobKind::SetTimer;
+  _job.timerTargetPreset[0] = static_cast<uint8_t>(ticks & 0xFFu);
+  _job.timerTargetPreset[1] = static_cast<uint8_t>((ticks >> 8) & 0x0Fu);
+  _job.timerTargetControl1 = static_cast<uint8_t>(freqRaw & cmd::CTRL1_TD_MASK);
+  if (enable) {
+    _job.timerTargetControl1 = static_cast<uint8_t>(
+        _job.timerTargetControl1 | (1u << cmd::CTRL1_TE_BIT));
+  }
+  _job.activeKind = JobKind::SET_TIMER;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
-  _job.state = JobState::SetTimerReadControl1;
+  _job.state = JobState::TIMER_READ_CONTROL2_GUARD;
   return _job.lastStatus;
 }
 
@@ -264,9 +336,9 @@ Status RV3032::startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t se
   _job.registerUpdateImplementedMask = 0xFF;
   _job.registerUpdateClearMask = clearMask;
   _job.registerUpdateSetMask = setMask;
-  _job.activeKind = JobKind::RegisterUpdate;
+  _job.activeKind = JobKind::REGISTER_UPDATE;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
-  _job.state = JobState::RegisterUpdateRead;
+  _job.state = JobState::REGISTER_UPDATE_READ;
   return _job.lastStatus;
 }
 
@@ -289,9 +361,9 @@ Status RV3032::startWriteUserRamJob(uint8_t offset, const uint8_t* buf, size_t l
   _job.userRamOffset = offset;
   _job.userRamLen = static_cast<uint8_t>(len);
   std::memcpy(_job.userRamBuf, buf, len);
-  _job.activeKind = JobKind::WriteUserRam;
+  _job.activeKind = JobKind::WRITE_USER_RAM;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
-  _job.state = JobState::WriteUserRamChunk;
+  _job.state = JobState::WRITE_USER_RAM_CHUNK;
   return _job.lastStatus;
 }
 
@@ -300,122 +372,645 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
-  if (_eeprom.state != EepromState::Idle &&
-      _job.activeKind == JobKind::None && _job.state != JobState::Idle) {
+  if (_eeprom.state != EepromState::IDLE &&
+      _job.activeKind == JobKind::NONE && _job.state != JobState::IDLE) {
     return Status::Error(Err::BUSY, "EEPROM queue owns the shared engine");
   }
+  const auto isConfigurationKind = [&](JobKind kind) -> bool {
+    return kind == JobKind::SET_TIMER ||
+           kind == JobKind::SET_PERIODIC_UPDATE ||
+           kind == JobKind::SET_BACKUP_SWITCH_MODE ||
+           kind == JobKind::SET_CLKOUT_CONFIG ||
+           kind == JobKind::SET_TEMPERATURE_EVENT_CONFIG;
+  };
+  const auto configurationCleanupState = [&](JobKind kind) -> JobState {
+    switch (kind) {
+      case JobKind::SET_TIMER:
+        return JobState::TIMER_CLEANUP_READ;
+      case JobKind::SET_PERIODIC_UPDATE:
+        return JobState::PERIODIC_CLEANUP_READ;
+      case JobKind::SET_BACKUP_SWITCH_MODE:
+        return JobState::BACKUP_VERIFY_PMU;
+      case JobKind::SET_CLKOUT_CONFIG:
+        return JobState::CLKOUT_CLEANUP_READ;
+      case JobKind::SET_TEMPERATURE_EVENT_CONFIG:
+        return JobState::TEMPERATURE_CLEANUP_READ;
+      default:
+        return JobState::IDLE;
+    }
+  };
   if (!isJobBusy()) {
-    return _job.lastStatus;
+    if (_job.activeKind != JobKind::NONE) {
+      const Status internal = Status::Error(
+          Err::INTERNAL_STATE_ERROR, "Active job has idle state",
+          static_cast<int32_t>(_job.activeKind));
+      if (isConfigurationKind(_job.activeKind)) {
+        if (!_job.configurationReport.mutationAttempted) {
+          if (_job.configurationReport.operationStatus.ok()) {
+            _job.configurationReport.operationStatus = internal;
+          }
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::UNCHANGED;
+          finishJob(_job.configurationReport.operationStatus);
+          return _job.completedStatus;
+        }
+        if (_job.activeKind == JobKind::SET_BACKUP_SWITCH_MODE &&
+            _job.configurationReport.finalState ==
+                ConfigurationFinalState::REQUESTED_VERIFIED) {
+          if (_job.configurationReport.operationStatus.ok()) {
+            _job.configurationReport.operationStatus = internal;
+          }
+          finishJob(_job.configurationReport.operationStatus);
+          return _job.completedStatus;
+        }
+        const bool cleanupAlreadyEntered =
+            !_job.configurationReport.operationStatus.ok() ||
+            _job.configurationCleanupWriteAttempted;
+        if (cleanupAlreadyEntered) {
+          if (_job.configurationReport.cleanupStatus.ok()) {
+            _job.configurationReport.cleanupStatus = internal;
+          }
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::UNKNOWN;
+          const Status terminal = Status::Error(
+              Err::CONFIGURATION_CLEANUP_FAILED,
+              "Impossible state during configuration cleanup");
+          finishJob(terminal);
+          return terminal;
+        }
+        _job.configurationReport.operationStatus = internal;
+        _job.state = configurationCleanupState(_job.activeKind);
+      } else if ((_job.activeKind == JobKind::PERSISTENT_READ ||
+                  _job.activeKind == JobKind::USER_EEPROM_WRITE) &&
+                 _job.persistentCleanupRequired) {
+        if (_job.persistentOperationStatus.ok()) {
+          _job.persistentOperationStatus = internal;
+        }
+        _job.state = JobState::PERSISTENT;
+      } else {
+        finishJob(internal);
+        return internal;
+      }
+    } else {
+      return _job.lastStatus;
+    }
   }
   if (maxInstructions == 0) {
     return Status::Error(Err::IN_PROGRESS, "Job in progress");
   }
 
+  uint32_t currentNowMs = now_ms;
   while (isJobBusy() && instructionsUsed < maxInstructions) {
-    uint32_t currentNowMs = now_ms;
     if (_config.nowMs != nullptr) {
       const uint32_t observedNowMs = _nowMs();
       if (static_cast<int32_t>(observedNowMs - currentNowMs) > 0) {
         currentNowMs = observedNowMs;
       }
-    } else if (instructionsUsed != 0) {
-      // Without a clock hook, conservatively account for each callback's full
-      // configured bound before allowing another instruction in this poll.
-      currentNowMs += static_cast<uint32_t>(instructionsUsed) *
-                      _config.i2cTimeoutMs;
     }
     if (_job.deadlineActive &&
         hasDeadlinePassed(currentNowMs, _job.deadlineMs)) {
       Status terminal = Status::Error(Err::TIMEOUT, "Job deadline expired");
-      if (_job.state == JobState::Persistent &&
-          (_job.persistentCleanupRequired ||
-           _job.passwordAuthorizationMayBeActive)) {
+      if (_job.activeKind == JobKind::SET_BACKUP_SWITCH_MODE) {
+        if (_job.configurationReport.operationStatus.ok()) {
+          _job.configurationReport.operationStatus = terminal;
+        }
+        if (!_job.configurationReport.mutationAttempted) {
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::UNCHANGED;
+          finishJob(_job.configurationReport.operationStatus);
+          return _job.completedStatus;
+        }
+        if (_job.configurationReport.finalState ==
+            ConfigurationFinalState::REQUESTED_VERIFIED) {
+          finishJob(_job.configurationReport.operationStatus);
+          return _job.completedStatus;
+        }
+        if (_job.configurationReport.cleanupStatus.ok()) {
+          _job.configurationReport.cleanupStatus = terminal;
+        }
+        _job.configurationReport.finalState = ConfigurationFinalState::UNKNOWN;
+        terminal = Status::Error(
+            Err::CONFIGURATION_CLEANUP_FAILED,
+            "Backup deadline expired before PMU reconciliation");
+        finishJob(terminal);
+        return terminal;
+      }
+      if (_job.state == JobState::PERSISTENT &&
+          _job.persistentCleanupRequired) {
+        if (_job.persistentCleanupStatus.ok()) {
+          _job.persistentCleanupStatus = Status::Error(
+              Err::TIMEOUT,
+              "Persistent hard deadline expired before cleanup proof");
+        }
         terminal = Status::Error(
             Err::EEPROM_CLEANUP_FAILED,
             "Persistent hard deadline expired before cleanup proof");
-        _job.persistentCleanupStatus = terminal;
         _job.persistentRead.cleanupVerified = false;
         _job.userEepromWrite.cleanupVerified = false;
-        if (_job.activeKind == JobKind::PasswordProtection) {
-          _passwordStatus = PasswordProtectionStatus{};
-        }
+      } else if (_job.state == JobState::PERSISTENT &&
+                 _job.persistentOperationStatus.ok()) {
+        _job.persistentOperationStatus = terminal;
+      }
+      if (_job.state == JobState::PERSISTENT) {
+        _job.persistentRead.operationStatus =
+            _job.persistentOperationStatus;
+        _job.persistentRead.cleanupStatus =
+            _job.persistentCleanupStatus;
+        _job.userEepromWrite.operationStatus =
+            _job.persistentOperationStatus;
+        _job.userEepromWrite.cleanupStatus =
+            _job.persistentCleanupStatus;
       }
       finishJob(terminal);
       return terminal;
     }
 
+    auto callbackBoundary = [&]() -> uint32_t {
+      return _job.deadlineActive
+          ? _job.deadlineMs
+          : currentNowMs + _config.i2cTimeoutMs + 1U;
+    };
+    auto readJob = [&](uint8_t reg, uint8_t* data, size_t len) -> Status {
+      const TimedTransferResult result =
+          readRegsBefore(reg, data, len, currentNowMs, callbackBoundary());
+      if (result.callbackInvoked) ++instructionsUsed;
+      return result.status;
+    };
+    auto writeJob = [&](uint8_t reg, const uint8_t* data,
+                        size_t len) -> Status {
+      const TimedTransferResult result =
+          writeRegsBefore(reg, data, len, currentNowMs, callbackBoundary());
+      if (result.callbackInvoked) ++instructionsUsed;
+      return result.status;
+    };
+    auto writeConfigurationForward = [&](uint8_t reg, const uint8_t* data,
+                                         size_t len) -> Status {
+      const TimedTransferResult result =
+          writeRegsBefore(reg, data, len, currentNowMs, callbackBoundary());
+      if (result.callbackInvoked) {
+        ++instructionsUsed;
+        _job.configurationReport.mutationAttempted = true;
+      }
+      return result.status;
+    };
+    auto writeConfigurationCleanup = [&](uint8_t reg, const uint8_t* data,
+                                         size_t len) -> Status {
+      const TimedTransferResult result =
+          writeRegsBefore(reg, data, len, currentNowMs, callbackBoundary());
+      if (result.callbackInvoked) {
+        ++instructionsUsed;
+        _job.configurationCleanupWriteAttempted = true;
+      }
+      return result.status;
+    };
+    const Status configurationInProgress = Status::Error(
+        Err::IN_PROGRESS, "Configuration cleanup in progress");
+    auto rememberConfigurationOperationFailure = [&](const Status& failure) {
+      if (_job.configurationReport.operationStatus.ok()) {
+        _job.configurationReport.operationStatus = failure;
+      }
+    };
+    auto rememberConfigurationCleanupFailure = [&](const Status& failure) {
+      if (_job.configurationReport.cleanupStatus.ok()) {
+        _job.configurationReport.cleanupStatus = failure;
+      }
+    };
+    auto failConfiguration = [&](const Status& failure,
+                                 JobState cleanupRead) -> Status {
+      rememberConfigurationOperationFailure(failure);
+      if (!_job.configurationReport.mutationAttempted) {
+        _job.configurationReport.finalState =
+            ConfigurationFinalState::UNCHANGED;
+        finishJob(_job.configurationReport.operationStatus);
+        return _job.completedStatus;
+      }
+      _job.state = cleanupRead;
+      return configurationInProgress;
+    };
+    auto markConfigurationRequested = [&]() {
+      _job.configurationReport.finalState =
+          ConfigurationFinalState::REQUESTED_VERIFIED;
+    };
+    auto finishConfigurationSuccess = [&]() -> Status {
+      markConfigurationRequested();
+      finishJob(_job.configurationReport.operationStatus);
+      return _job.completedStatus;
+    };
+    auto finishConfigurationCleanup = [&](bool safeVerified) -> Status {
+      if (safeVerified) {
+        _job.configurationReport.finalState =
+            ConfigurationFinalState::SAFE_DISABLED_VERIFIED;
+        finishJob(_job.configurationReport.operationStatus);
+        return _job.completedStatus;
+      }
+      _job.configurationReport.finalState = ConfigurationFinalState::UNKNOWN;
+      const Status terminal = Status::Error(
+          Err::CONFIGURATION_CLEANUP_FAILED,
+          "Configuration safe state could not be proven");
+      finishJob(terminal);
+      return terminal;
+    };
+    auto finishBackupRequested = [&]() -> Status {
+      _job.configurationReport.finalState =
+          ConfigurationFinalState::REQUESTED_VERIFIED;
+      if (_job.configurationReport.operationStatus.ok() &&
+          _job.persistRegisterUpdate &&
+          !eepromQueuePush(cmd::REG_ACTIVE_PMU, _job.backupTargetPmu)) {
+        rememberConfigurationOperationFailure(Status::Error(
+            Err::QUEUE_FULL, "Backup persistence queue full"));
+      }
+      finishJob(_job.configurationReport.operationStatus);
+      return _job.completedStatus;
+    };
+
     Status st = Status::Ok();
     switch (_job.state) {
-      case JobState::SetTimerReadControl1: {
-        st = readRegs(cmd::REG_CONTROL1, &_job.timerControl1, 1);
-        ++instructionsUsed;
+      case JobState::TIMER_READ_CONTROL2_GUARD: {
+        uint8_t control2 = 0;
+        st = readJob(cmd::REG_CONTROL2, &control2, 1);
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
         }
-        const uint8_t freqRaw = static_cast<uint8_t>(_job.timerFreq);
-        const uint8_t timerEnableMask = static_cast<uint8_t>(1u << cmd::CTRL1_TE_BIT);
-        _job.timerControl1 = static_cast<uint8_t>(
-            (_job.timerControl1 & cmd::CONTROL1_IMPLEMENTED_MASK) &
-            ~(cmd::CTRL1_TD_MASK | timerEnableMask));
-        _job.timerControl1 = static_cast<uint8_t>(_job.timerControl1 | (freqRaw & cmd::CTRL1_TD_MASK));
-        _job.timerFinalControl1 = _job.timerControl1;
-        if (_job.timerEnable) {
-          _job.timerFinalControl1 = static_cast<uint8_t>(_job.timerFinalControl1 | timerEnableMask);
+        if ((control2 & (1u << cmd::CTRL2_TIE_BIT)) != 0) {
+          st = Status::Error(
+              Err::BUSY, "Disable timer interrupt before configuration");
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
         }
-        _job.timerHigh = static_cast<uint8_t>((_job.timerTicks >> 8) & 0x0Fu);
-        _job.state = JobState::SetTimerWriteControl1;
+        _job.state = JobState::TIMER_READ_CONTROL1;
         break;
       }
-      case JobState::SetTimerReadTimerHigh:
-        _job.state = JobState::SetTimerWriteControl1;
-        break;
-      case JobState::SetTimerWriteControl1:
-        st = writeRegs(cmd::REG_CONTROL1, &_job.timerControl1, 1);
-        ++instructionsUsed;
+      case JobState::TIMER_READ_CONTROL1: {
+        st = readJob(cmd::REG_CONTROL1, &_job.timerOriginalControl1, 1);
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
         }
-        _job.state = JobState::SetTimerWriteLow;
-        break;
-      case JobState::SetTimerWriteLow:
-      {
-        const uint8_t value = static_cast<uint8_t>(_job.timerTicks & 0xFFu);
-        st = writeRegs(cmd::REG_TIMER_LOW, &value, 1);
-        ++instructionsUsed;
-        if (!st.ok()) {
-          finishJob(st);
-          return st;
-        }
-        _job.state = JobState::SetTimerWriteHigh;
+        const uint8_t timerMask = static_cast<uint8_t>(
+            cmd::CTRL1_TD_MASK | (1u << cmd::CTRL1_TE_BIT));
+        _job.timerOriginalControl1 = static_cast<uint8_t>(
+            _job.timerOriginalControl1 & cmd::CONTROL1_IMPLEMENTED_MASK);
+        _job.timerSafeControl1 = static_cast<uint8_t>(
+            _job.timerOriginalControl1 & ~(1u << cmd::CTRL1_TE_BIT));
+        _job.timerTargetControl1 = static_cast<uint8_t>(
+            (_job.timerOriginalControl1 & ~timerMask) |
+            (_job.timerTargetControl1 & timerMask));
+        _job.state = JobState::TIMER_WRITE_SAFE_CONTROL1;
         break;
       }
-      case JobState::SetTimerWriteHigh:
-        st = writeRegs(cmd::REG_TIMER_HIGH, &_job.timerHigh, 1);
-        ++instructionsUsed;
+      case JobState::TIMER_WRITE_SAFE_CONTROL1:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL1, &_job.timerSafeControl1, 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
+        }
+        _job.state = JobState::TIMER_WRITE_PRESET;
+        break;
+      case JobState::TIMER_WRITE_PRESET:
+        st = writeConfigurationForward(
+            cmd::REG_TIMER_LOW, _job.timerTargetPreset,
+            sizeof(_job.timerTargetPreset));
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
+        }
+        _job.state = JobState::TIMER_WRITE_FINAL_CONTROL1;
+        break;
+      case JobState::TIMER_WRITE_FINAL_CONTROL1:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL1, &_job.timerTargetControl1, 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
+        }
+        _job.state = JobState::TIMER_VERIFY;
+        break;
+      case JobState::TIMER_VERIFY: {
+        uint8_t observed[6] = {};
+        st = readJob(cmd::REG_TIMER_LOW, observed, sizeof(observed));
+        const bool matches = st.ok() &&
+            (observed[1] & 0xF0u) == 0 &&
+            observed[0] == _job.timerTargetPreset[0] &&
+            observed[1] == _job.timerTargetPreset[1] &&
+            (observed[5] & cmd::CONTROL1_IMPLEMENTED_MASK) ==
+                _job.timerTargetControl1;
+        if (!matches) {
+          if (st.ok()) {
+            st = Status::Error(
+                Err::REGISTER_WRITE_FAILED, "Timer verification failed",
+                registerMismatchDetail(_job.timerTargetControl1,
+                    static_cast<uint8_t>(observed[5] &
+                                         cmd::CONTROL1_IMPLEMENTED_MASK)));
+          }
+          return failConfiguration(st, JobState::TIMER_CLEANUP_READ);
+        }
+        return finishConfigurationSuccess();
+      }
+      case JobState::TIMER_CLEANUP_READ: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL1, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL1_IMPLEMENTED_MASK);
+        if (observed == _job.timerSafeControl1) {
+          return finishConfigurationCleanup(true);
+        }
+        _job.state = JobState::TIMER_CLEANUP_WRITE;
+        break;
+      }
+      case JobState::TIMER_CLEANUP_WRITE:
+        st = writeConfigurationCleanup(
+            cmd::REG_CONTROL1, &_job.timerSafeControl1, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+        }
+        _job.state = JobState::TIMER_CLEANUP_VERIFY;
+        break;
+      case JobState::TIMER_CLEANUP_VERIFY: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL1, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL1_IMPLEMENTED_MASK);
+        if (observed != _job.timerSafeControl1) {
+          rememberConfigurationCleanupFailure(Status::Error(
+              Err::REGISTER_WRITE_FAILED,
+              "Configuration safe-state verification failed",
+              registerMismatchDetail(_job.timerSafeControl1, observed)));
+          return finishConfigurationCleanup(false);
+        }
+        return finishConfigurationCleanup(true);
+      }
+      case JobState::PERIODIC_READ_CONTROLS:
+        st = readJob(cmd::REG_CONTROL1, _job.periodicOriginal,
+                     sizeof(_job.periodicOriginal));
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::PERIODIC_CLEANUP_READ);
+        }
+        _job.periodicOriginal[0] = static_cast<uint8_t>(
+            _job.periodicOriginal[0] & cmd::CONTROL1_IMPLEMENTED_MASK);
+        _job.periodicOriginal[1] = static_cast<uint8_t>(
+            _job.periodicOriginal[1] & cmd::CONTROL2_IMPLEMENTED_MASK);
+        _job.periodicSafeControl2 = static_cast<uint8_t>(
+            _job.periodicOriginal[1] & ~(1u << cmd::CTRL2_UIE_BIT));
+        _job.periodicTarget[0] = static_cast<uint8_t>(
+            (_job.periodicOriginal[0] & ~(1u << cmd::CTRL1_USEL_BIT)) |
+            _job.periodicTarget[0]);
+        _job.periodicTarget[1] = static_cast<uint8_t>(
+            (_job.periodicOriginal[1] & ~(1u << cmd::CTRL2_UIE_BIT)) |
+            _job.periodicTarget[1]);
+        _job.state = JobState::PERIODIC_WRITE_SAFE_CONTROL2;
+        break;
+      case JobState::PERIODIC_WRITE_SAFE_CONTROL2:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL2, &_job.periodicSafeControl2, 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::PERIODIC_CLEANUP_READ);
+        }
+        _job.state = JobState::PERIODIC_WRITE_USEL;
+        break;
+      case JobState::PERIODIC_WRITE_USEL:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL1, &_job.periodicTarget[0], 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::PERIODIC_CLEANUP_READ);
+        }
+        _job.state = JobState::PERIODIC_WRITE_FINAL_CONTROL2;
+        break;
+      case JobState::PERIODIC_WRITE_FINAL_CONTROL2:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL2, &_job.periodicTarget[1], 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::PERIODIC_CLEANUP_READ);
+        }
+        _job.state = JobState::PERIODIC_VERIFY;
+        break;
+      case JobState::PERIODIC_VERIFY: {
+        uint8_t observed[2] = {};
+        st = readJob(cmd::REG_CONTROL1, observed, sizeof(observed));
+        const uint8_t observedControl1 = static_cast<uint8_t>(
+            observed[0] & cmd::CONTROL1_IMPLEMENTED_MASK);
+        const uint8_t observedControl2 = static_cast<uint8_t>(
+            observed[1] & cmd::CONTROL2_IMPLEMENTED_MASK);
+        if (!st.ok() || observedControl1 != _job.periodicTarget[0] ||
+            observedControl2 != _job.periodicTarget[1]) {
+          if (st.ok()) {
+            const bool control1Mismatch =
+                observedControl1 != _job.periodicTarget[0];
+            st = Status::Error(
+                Err::REGISTER_WRITE_FAILED,
+                "Periodic update verification failed",
+                registerMismatchDetail(
+                    control1Mismatch ? _job.periodicTarget[0]
+                                     : _job.periodicTarget[1],
+                    control1Mismatch ? observedControl1 : observedControl2));
+          }
+          return failConfiguration(st, JobState::PERIODIC_CLEANUP_READ);
+        }
+        return finishConfigurationSuccess();
+      }
+      case JobState::PERIODIC_CLEANUP_READ: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL2, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL2_IMPLEMENTED_MASK);
+        if (observed == _job.periodicSafeControl2) {
+          return finishConfigurationCleanup(true);
+        }
+        _job.state = JobState::PERIODIC_CLEANUP_WRITE;
+        break;
+      }
+      case JobState::PERIODIC_CLEANUP_WRITE:
+        st = writeConfigurationCleanup(
+            cmd::REG_CONTROL2, &_job.periodicSafeControl2, 1);
+        if (!st.ok()) rememberConfigurationCleanupFailure(st);
+        _job.state = JobState::PERIODIC_CLEANUP_VERIFY;
+        break;
+      case JobState::PERIODIC_CLEANUP_VERIFY: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL2, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL2_IMPLEMENTED_MASK);
+        if (observed != _job.periodicSafeControl2) {
+          rememberConfigurationCleanupFailure(Status::Error(
+              Err::REGISTER_WRITE_FAILED,
+              "Configuration safe-state verification failed",
+              registerMismatchDetail(_job.periodicSafeControl2, observed)));
+          return finishConfigurationCleanup(false);
+        }
+        return finishConfigurationCleanup(true);
+      }
+      case JobState::BACKUP_READ_CONTROL3: {
+        uint8_t control3 = 0;
+        st = readJob(cmd::REG_CONTROL3, &control3, 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::BACKUP_VERIFY_PMU);
+        }
+        if ((control3 & (1u << cmd::CTRL3_BSIE_BIT)) != 0) {
+          st = Status::Error(
+              Err::BUSY, "Disable backup interrupt before configuration");
+          return failConfiguration(st, JobState::BACKUP_VERIFY_PMU);
+        }
+        _job.state = JobState::BACKUP_READ_PMU;
+        break;
+      }
+      case JobState::BACKUP_READ_PMU: {
+        st = readJob(cmd::REG_ACTIVE_PMU, &_job.backupOriginalPmu, 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::BACKUP_VERIFY_PMU);
+        }
+        _job.backupOriginalPmu = static_cast<uint8_t>(
+            _job.backupOriginalPmu & cmd::PMU_IMPLEMENTED_MASK);
+        const uint8_t requestedBsm = static_cast<uint8_t>(
+            _job.backupTargetPmu & cmd::PMU_BSM_MASK);
+        _job.backupTargetPmu = static_cast<uint8_t>(
+            (_job.backupOriginalPmu & ~cmd::PMU_BSM_MASK) | requestedBsm);
+        const uint8_t observedBsm = static_cast<uint8_t>(
+            _job.backupOriginalPmu & cmd::PMU_BSM_MASK);
+        const bool requestedOff = requestedBsm == cmd::PMU_BSM_DISABLED;
+        const bool alreadyRequested = requestedOff
+            ? (observedBsm == cmd::PMU_BSM_DISABLED ||
+               observedBsm == cmd::PMU_BSM_DISABLED_ALT)
+            : observedBsm == requestedBsm;
+        if (alreadyRequested) {
+          _job.backupTargetPmu = _job.backupOriginalPmu;
+        }
+        if (_job.persistRegisterUpdate &&
+            !eepromQueueContains(cmd::REG_ACTIVE_PMU,
+                                 _job.backupTargetPmu) &&
+            _eeprom.queueCount >= kEepromQueueSize) {
+          st = Status::Error(Err::QUEUE_FULL,
+                             "Backup persistence queue full");
+          return failConfiguration(st, JobState::BACKUP_VERIFY_PMU);
+        }
+        if (alreadyRequested) return finishBackupRequested();
+        _job.backupActivationRequired =
+            (observedBsm == cmd::PMU_BSM_DISABLED ||
+             observedBsm == cmd::PMU_BSM_DISABLED_ALT) &&
+            (requestedBsm == cmd::PMU_BSM_DIRECT ||
+             requestedBsm == cmd::PMU_BSM_LEVEL);
+        _job.state = JobState::BACKUP_WRITE_PMU;
+        break;
+      }
+      case JobState::BACKUP_WRITE_PMU: {
+        const uint8_t requestedBsm = static_cast<uint8_t>(
+            _job.backupTargetPmu & cmd::PMU_BSM_MASK);
+        const uint32_t activationMs = requestedBsm == cmd::PMU_BSM_DIRECT
+            ? 2U : requestedBsm == cmd::PMU_BSM_LEVEL ? 10U : 0U;
+        const uint32_t boundary = earlierDeadline(
+            currentNowMs, callbackBoundary(), _job.mutationCutoffMs);
+        const TimedTransferResult transfer = writeRegsBefore(
+            cmd::REG_ACTIVE_PMU, &_job.backupTargetPmu, 1,
+            currentNowMs, boundary);
+        if (transfer.callbackInvoked) {
+          ++instructionsUsed;
+          _job.configurationReport.mutationAttempted = true;
+          _job.backupWriteCompletedMs = transfer.completedAtMs;
+          _job.backupActivationNotBeforeMs =
+              _job.backupWriteCompletedMs + activationMs;
+        }
+        if (!transfer.status.ok()) {
+          rememberConfigurationOperationFailure(transfer.status);
+        }
+        if (!transfer.callbackInvoked) {
+          return failConfiguration(transfer.status,
+                                   JobState::BACKUP_VERIFY_PMU);
+        }
+        _job.state = JobState::BACKUP_VERIFY_PMU;
+        break;
+      }
+      case JobState::BACKUP_VERIFY_PMU: {
+        if (!_job.configurationReport.mutationAttempted) {
+          return failConfiguration(Status::Error(
+              Err::INTERNAL_STATE_ERROR,
+              "Backup verification has no mutation evidence"),
+              JobState::BACKUP_VERIFY_PMU);
+        }
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_ACTIVE_PMU, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::UNKNOWN;
+          const Status terminal = Status::Error(
+              Err::CONFIGURATION_CLEANUP_FAILED,
+              "Backup PMU reconciliation failed");
+          finishJob(terminal);
+          return terminal;
+        }
+        observed = static_cast<uint8_t>(observed & cmd::PMU_IMPLEMENTED_MASK);
+        if (observed == _job.backupTargetPmu) {
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::REQUESTED_VERIFIED;
+          if (_job.backupActivationRequired) {
+            _job.state = JobState::BACKUP_WAIT_ACTIVATION;
+            return configurationInProgress;
+          }
+          return finishBackupRequested();
+        }
+        if (observed == _job.backupOriginalPmu) {
+          if (_job.configurationReport.operationStatus.ok()) {
+            rememberConfigurationOperationFailure(Status::Error(
+                Err::REGISTER_WRITE_FAILED,
+                "Backup PMU verification failed",
+                registerMismatchDetail(_job.backupTargetPmu, observed)));
+          }
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::UNCHANGED;
+          finishJob(_job.configurationReport.operationStatus);
+          return _job.completedStatus;
+        }
+        if (_job.configurationReport.operationStatus.ok()) {
+          rememberConfigurationOperationFailure(Status::Error(
+              Err::REGISTER_WRITE_FAILED,
+              "Backup PMU verification failed",
+              registerMismatchDetail(_job.backupTargetPmu, observed)));
+        }
+        rememberConfigurationCleanupFailure(Status::Error(
+            Err::REGISTER_WRITE_FAILED,
+            "Backup PMU reconciliation inconclusive",
+            registerMismatchDetail(_job.backupTargetPmu, observed)));
+        _job.configurationReport.finalState = ConfigurationFinalState::UNKNOWN;
+        const Status terminal = Status::Error(
+            Err::CONFIGURATION_CLEANUP_FAILED,
+            "Backup PMU reconciliation inconclusive");
+        finishJob(terminal);
+        return terminal;
+      }
+      case JobState::BACKUP_WAIT_ACTIVATION:
+        if (!hasDeadlinePassed(currentNowMs,
+                               _job.backupActivationNotBeforeMs)) {
+          return configurationInProgress;
+        }
+        return finishBackupRequested();
+      case JobState::REGISTER_UPDATE_READ_QUIESCENCE: {
+        uint8_t guard = 0;
+        st = readJob(_job.quiescenceGuard.reg, &guard, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
         }
-        if (_job.timerFinalControl1 != _job.timerControl1) {
-          _job.state = JobState::SetTimerWriteFinalControl1;
-          break;
-        }
-        finishJob(Status::Ok());
-        return Status::Ok();
-      case JobState::SetTimerWriteFinalControl1:
-        st = writeRegs(cmd::REG_CONTROL1, &_job.timerFinalControl1, 1);
-        ++instructionsUsed;
-        if (!st.ok()) {
+        if ((guard & _job.quiescenceGuard.forbiddenMask) != 0) {
+          st = Status::Error(
+              Err::BUSY, "Disable interrupt before reconfiguration");
           finishJob(st);
           return st;
         }
-        finishJob(Status::Ok());
-        return Status::Ok();
-      case JobState::RegisterUpdateRead:
-        st = readRegs(_job.registerUpdateReg, &_job.registerUpdateValue, 1);
-        ++instructionsUsed;
+        _job.state = _job.quiescenceNextState;
+        break;
+      }
+      case JobState::REGISTER_UPDATE_READ:
+        st = readJob(_job.registerUpdateReg, &_job.registerUpdateValue, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -455,11 +1050,10 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           finishJob(st);
           return st;
         }
-        _job.state = JobState::RegisterUpdateWrite;
+        _job.state = JobState::REGISTER_UPDATE_WRITE;
         break;
-      case JobState::RegisterUpdateWrite:
-        st = writeRegs(_job.registerUpdateReg, &_job.registerUpdateValue, 1);
-        ++instructionsUsed;
+      case JobState::REGISTER_UPDATE_WRITE:
+        st = writeJob(_job.registerUpdateReg, &_job.registerUpdateValue, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -474,9 +1068,33 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         }
         finishJob(Status::Ok());
         return Status::Ok();
-      case JobState::EviResetRead: {
-        st = readRegs(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
-        ++instructionsUsed;
+      case JobState::TEMP_LSB_CLEAR_READ: {
+        uint8_t value = 0;
+        st = readJob(cmd::REG_TEMP_LSB, &value, 1);
+        if (!st.ok()) {
+          finishJob(st);
+          return st;
+        }
+        if ((value & _job.tempLsbClearMask) == 0) {
+          finishJob(Status::Ok());
+          return Status::Ok();
+        }
+        if ((value & cmd::EEPROM_BUSY_MASK) != 0) {
+          st = Status::Error(Err::BUSY, "EEPROM engine is busy");
+          finishJob(st);
+          return st;
+        }
+        _job.registerUpdateValue = static_cast<uint8_t>(
+            cmd::TEMP_LSB_W0C_MASK & ~_job.tempLsbClearMask);
+        _job.state = JobState::TEMP_LSB_CLEAR_WRITE;
+        break;
+      }
+      case JobState::TEMP_LSB_CLEAR_WRITE:
+        st = writeJob(cmd::REG_TEMP_LSB, &_job.registerUpdateValue, 1);
+        finishJob(st);
+        return st;
+      case JobState::EVI_RESET_READ: {
+        st = readJob(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -488,17 +1106,16 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         _job.registerUpdateValue = static_cast<uint8_t>(
             _job.registerUpdateValue & cmd::TS_CONTROL_OVERWRITE_MASK);
         if (resetAlreadySet) {
-          _job.state = JobState::EviResetWriteClear;
+          _job.state = JobState::EVI_RESET_WRITE_CLEAR;
         } else {
           _job.registerUpdateValue = static_cast<uint8_t>(
               _job.registerUpdateValue | resetMask);
-          _job.state = JobState::EviResetWriteSet;
+          _job.state = JobState::EVI_RESET_WRITE_SET;
         }
         break;
       }
-      case JobState::EviResetWriteClear:
-        st = writeRegs(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
-        ++instructionsUsed;
+      case JobState::EVI_RESET_WRITE_CLEAR:
+        st = writeJob(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -506,21 +1123,19 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         _job.registerUpdateValue = static_cast<uint8_t>(
             _job.registerUpdateValue |
             (1u << cmd::TS_EVI_RESET_BIT));
-        _job.state = JobState::EviResetWriteSet;
+        _job.state = JobState::EVI_RESET_WRITE_SET;
         break;
-      case JobState::EviResetWriteSet:
-        st = writeRegs(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
-        ++instructionsUsed;
+      case JobState::EVI_RESET_WRITE_SET:
+        st = writeJob(cmd::REG_TS_CONTROL, &_job.registerUpdateValue, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
         }
         finishJob(Status::Ok());
         return Status::Ok();
-      case JobState::RegisterBlockUpdateRead:
-        st = readRegs(_job.registerBlockReg, _job.registerBlockValues,
+      case JobState::REGISTER_BLOCK_UPDATE_READ:
+        st = readJob(_job.registerBlockReg, _job.registerBlockValues,
                       _job.registerBlockLen);
-        ++instructionsUsed;
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -550,12 +1165,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
             return st;
           }
         }
-        _job.state = JobState::RegisterBlockUpdateWrite;
+        _job.state = JobState::REGISTER_BLOCK_UPDATE_WRITE;
         break;
-      case JobState::RegisterBlockUpdateWrite:
-        st = writeRegs(_job.registerBlockReg, _job.registerBlockValues,
+      case JobState::REGISTER_BLOCK_UPDATE_WRITE:
+        st = writeJob(_job.registerBlockReg, _job.registerBlockValues,
                        _job.registerBlockLen);
-        ++instructionsUsed;
         if (st.ok() && _job.persistRegisterUpdate) {
           for (uint8_t i = 0; i < _job.registerBlockLen; ++i) {
             if (!eepromQueuePush(
@@ -569,46 +1183,38 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         }
         finishJob(st);
         return st;
-      case JobState::ClkoutReadActive: {
-        st = readRegs(cmd::REG_ACTIVE_PMU, _job.registerBlockValues, 4);
-        ++instructionsUsed;
+      case JobState::CLKOUT_READ_ACTIVE: {
+        st = readJob(cmd::REG_ACTIVE_PMU, _job.clkoutOriginal,
+                     sizeof(_job.clkoutOriginal));
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
         }
         if (_job.clkoutLegacyFrequency) {
-          _job.clkoutConfig.enabled =
-              (_job.registerBlockValues[0] & cmd::PMU_NCLKE_MASK) == 0;
-          _job.clkoutConfig.highFrequencyMode = false;
-          const uint16_t existingHfd = static_cast<uint16_t>(
-              _job.registerBlockValues[2]) |
-              (static_cast<uint16_t>(_job.registerBlockValues[3] &
-                                     cmd::CLKOUT_HFD_HIGH_MASK) << 8);
-          _job.clkoutConfig.highFrequencyDivider =
-              static_cast<uint16_t>(existingHfd + 1U);
+          _job.clkoutTarget[0] = static_cast<uint8_t>(
+              _job.clkoutOriginal[0] & cmd::PMU_NCLKE_MASK);
+          _job.clkoutTarget[2] = _job.clkoutOriginal[2];
+          _job.clkoutTarget[3] = static_cast<uint8_t>(
+              (_job.clkoutTarget[3] & cmd::CLKOUT_FREQ_MASK) |
+              (_job.clkoutOriginal[3] & cmd::CLKOUT_HFD_HIGH_MASK));
         }
-        const uint16_t hfd = static_cast<uint16_t>(
-            _job.clkoutConfig.highFrequencyDivider - 1U);
-        _job.registerBlockValues[0] = static_cast<uint8_t>(
-            (_job.registerBlockValues[0] & cmd::PMU_IMPLEMENTED_MASK &
+        _job.clkoutOriginal[0] = static_cast<uint8_t>(
+            _job.clkoutOriginal[0] & cmd::PMU_IMPLEMENTED_MASK);
+        _job.clkoutTarget[0] = static_cast<uint8_t>(
+            (_job.clkoutOriginal[0] &
              static_cast<uint8_t>(~cmd::PMU_NCLKE_MASK)) |
-            (_job.clkoutConfig.enabled ? 0 : cmd::PMU_NCLKE_MASK));
-        _job.registerBlockValues[1] = static_cast<uint8_t>(
-            _job.registerBlockValues[1] &
+            (_job.clkoutTarget[0] & cmd::PMU_NCLKE_MASK));
+        _job.clkoutTarget[1] = static_cast<uint8_t>(
+            _job.clkoutOriginal[1] &
             cmd::OFFSET_REGISTER_IMPLEMENTED_MASK);
-        _job.registerBlockValues[2] = static_cast<uint8_t>(hfd & 0xFFu);
-        _job.registerBlockValues[3] = static_cast<uint8_t>(
-            (_job.clkoutConfig.highFrequencyMode ? cmd::CLKOUT_OS_MASK : 0) |
-            ((static_cast<uint8_t>(_job.clkoutConfig.xtalFrequency)
-              << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK) |
-            ((hfd >> 8) & cmd::CLKOUT_HFD_HIGH_MASK));
+        _job.clkoutSafePmu = static_cast<uint8_t>(
+            _job.clkoutOriginal[0] | cmd::PMU_NCLKE_MASK);
         if (_job.persistRegisterUpdate) {
           const uint8_t indexes[3] = {0, 2, 3};
           uint8_t requiredCapacity = 0;
           for (uint8_t index : indexes) {
             if (!eepromQueueContains(
                     static_cast<uint8_t>(cmd::REG_ACTIVE_PMU + index),
-                    _job.registerBlockValues[index])) {
+                    _job.clkoutTarget[index])) {
               ++requiredCapacity;
             }
           }
@@ -617,153 +1223,287 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
             st = Status::Error(
                 Err::QUEUE_FULL,
                 "CLKOUT persistence queue lacks capacity");
-            finishJob(st);
-            return st;
+            return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
           }
         }
-        _job.state = JobState::ClkoutReadGuards;
+        _job.state = JobState::CLKOUT_READ_GUARDS;
         break;
       }
-      case JobState::ClkoutReadGuards:
-        st = readRegs(cmd::REG_TEMP_LSB, _job.clkoutGuard,
-                      sizeof(_job.clkoutGuard));
-        ++instructionsUsed;
+      case JobState::CLKOUT_READ_GUARDS: {
+        uint8_t guard[4] = {};
+        st = readJob(cmd::REG_TEMP_LSB, guard, sizeof(guard));
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
         }
-        if ((_job.clkoutGuard[0] & cmd::TEMP_CLKF_MASK) != 0 ||
-            (_job.clkoutGuard[3] & (1u << cmd::CTRL2_CLKIE_BIT)) != 0) {
+        if ((guard[0] & cmd::TEMP_CLKF_MASK) != 0 ||
+            (guard[3] & (1u << cmd::CTRL2_CLKIE_BIT)) != 0) {
           st = Status::Error(
               Err::BUSY,
               "Disable interrupt-controlled CLKOUT before reconfiguration");
-          finishJob(st);
-          return st;
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
         }
-        _job.state = JobState::ClkoutWriteStoppedConfig;
-        break;
-      case JobState::ClkoutWriteStoppedConfig: {
-        uint8_t stopped[4] = {
-            static_cast<uint8_t>(_job.registerBlockValues[0] |
-                                 cmd::PMU_NCLKE_MASK),
-            _job.registerBlockValues[1],
-            _job.registerBlockValues[2],
-            _job.registerBlockValues[3]};
-        st = writeRegs(cmd::REG_ACTIVE_PMU, stopped, sizeof(stopped));
-        ++instructionsUsed;
-        if (!st.ok()) {
-          finishJob(st);
-          return st;
-        }
-        _job.state = JobState::ClkoutWriteFinalPmu;
+        _job.state = JobState::CLKOUT_WRITE_SAFE_CONFIG;
         break;
       }
-      case JobState::ClkoutWriteFinalPmu: {
-        if ((_job.registerBlockValues[0] & cmd::PMU_NCLKE_MASK) == 0) {
-          st = writeRegs(cmd::REG_ACTIVE_PMU,
-                         &_job.registerBlockValues[0], 1);
-          ++instructionsUsed;
-          if (!st.ok()) {
-            finishJob(st);
-            return st;
-          }
+      case JobState::CLKOUT_WRITE_SAFE_CONFIG: {
+        uint8_t safeTarget[4] = {
+            _job.clkoutSafePmu, _job.clkoutTarget[1],
+            _job.clkoutTarget[2], _job.clkoutTarget[3]};
+        st = writeConfigurationForward(
+            cmd::REG_ACTIVE_PMU, safeTarget, sizeof(safeTarget));
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
         }
-        if (_job.persistRegisterUpdate) {
+        _job.state = JobState::CLKOUT_WRITE_FINAL_PMU;
+        break;
+      }
+      case JobState::CLKOUT_WRITE_FINAL_PMU:
+        st = writeConfigurationForward(
+            cmd::REG_ACTIVE_PMU, &_job.clkoutTarget[0], 1);
+        if (!st.ok()) {
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
+        }
+        _job.state = JobState::CLKOUT_VERIFY;
+        break;
+      case JobState::CLKOUT_VERIFY: {
+        uint8_t observed[4] = {};
+        st = readJob(cmd::REG_ACTIVE_PMU, observed, sizeof(observed));
+        observed[0] = static_cast<uint8_t>(
+            observed[0] & cmd::PMU_IMPLEMENTED_MASK);
+        if (!st.ok() || std::memcmp(observed, _job.clkoutTarget,
+                                    sizeof(observed)) != 0) {
+          if (st.ok()) {
+            uint8_t mismatch = 0;
+            while (mismatch < sizeof(observed) &&
+                   observed[mismatch] == _job.clkoutTarget[mismatch]) {
+              ++mismatch;
+            }
+            st = Status::Error(
+                Err::REGISTER_WRITE_FAILED, "CLKOUT verification failed",
+                registerMismatchDetail(_job.clkoutTarget[mismatch],
+                                       observed[mismatch]));
+          }
+          return failConfiguration(st, JobState::CLKOUT_CLEANUP_READ);
+        }
+        markConfigurationRequested();
+        if (_job.persistRegisterUpdate &&
+            _job.configurationReport.operationStatus.ok()) {
           const uint8_t indexes[3] = {0, 2, 3};
           for (uint8_t index : indexes) {
             if (!eepromQueuePush(
                     static_cast<uint8_t>(cmd::REG_ACTIVE_PMU + index),
-                    _job.registerBlockValues[index])) {
+                    _job.clkoutTarget[index])) {
               st = Status::Error(Err::QUEUE_FULL,
                                  "CLKOUT persistence queue full");
-              finishJob(st);
-              return st;
+              rememberConfigurationOperationFailure(st);
+              _job.configurationReport.finalState =
+                  ConfigurationFinalState::REQUESTED_VERIFIED;
+              finishJob(_job.configurationReport.operationStatus);
+              return _job.completedStatus;
             }
           }
         }
-        finishJob(Status::Ok());
-        return Status::Ok();
+        finishJob(_job.configurationReport.operationStatus);
+        return _job.completedStatus;
       }
-      case JobState::TemperatureConfigRead:
-        st = readRegs(cmd::REG_CONTROL3, _job.registerBlockValues, 6);
-        ++instructionsUsed;
+      case JobState::CLKOUT_CLEANUP_READ: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_ACTIVE_PMU, &observed, 1);
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
         }
-        for (uint8_t i = 0; i < 6; ++i) {
-          _job.registerBlockValues[i] = static_cast<uint8_t>(
-              ((_job.registerBlockValues[i] &
-                _job.registerBlockImplemented[i]) &
-               ~_job.registerBlockClear[i]) |
-              _job.registerBlockSet[i]);
+        observed = static_cast<uint8_t>(observed & cmd::PMU_IMPLEMENTED_MASK);
+        if (observed == _job.clkoutSafePmu) {
+          return finishConfigurationCleanup(true);
         }
-        _job.state = JobState::TemperatureConfigWriteDisabled;
-        break;
-      case JobState::TemperatureConfigWriteDisabled: {
-        const uint8_t controlMask = static_cast<uint8_t>(
-            (1u << cmd::CTRL3_THE_BIT) | (1u << cmd::CTRL3_TLE_BIT) |
-            (1u << cmd::CTRL3_THIE_BIT) | (1u << cmd::CTRL3_TLIE_BIT));
-        const uint8_t disabled = static_cast<uint8_t>(
-            _job.registerBlockValues[0] & ~controlMask);
-        st = writeRegs(cmd::REG_CONTROL3, &disabled, 1);
-        ++instructionsUsed;
-        if (!st.ok()) {
-          finishJob(st);
-          return st;
-        }
-        _job.state = JobState::TemperatureConfigWriteTimestampControl;
+        _job.state = JobState::CLKOUT_CLEANUP_WRITE;
         break;
       }
-      case JobState::TemperatureConfigWriteTimestampControl:
-        st = writeRegs(cmd::REG_TS_CONTROL,
-                       &_job.registerBlockValues[1], 1);
-        ++instructionsUsed;
-        if (!st.ok()) {
-          finishJob(st);
-          return st;
-        }
-        _job.state = JobState::TemperatureConfigWriteThresholds;
+      case JobState::CLKOUT_CLEANUP_WRITE:
+        st = writeConfigurationCleanup(
+            cmd::REG_ACTIVE_PMU, &_job.clkoutSafePmu, 1);
+        if (!st.ok()) rememberConfigurationCleanupFailure(st);
+        _job.state = JobState::CLKOUT_CLEANUP_VERIFY;
         break;
-      case JobState::TemperatureConfigWriteThresholds:
-        st = writeRegs(cmd::REG_TLOW_THRESHOLD,
-                       &_job.registerBlockValues[4], 2);
-        ++instructionsUsed;
+      case JobState::CLKOUT_CLEANUP_VERIFY: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_ACTIVE_PMU, &observed, 1);
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
         }
-        _job.state = JobState::TemperatureConfigWriteInterrupts;
+        observed = static_cast<uint8_t>(observed & cmd::PMU_IMPLEMENTED_MASK);
+        if (observed != _job.clkoutSafePmu) {
+          rememberConfigurationCleanupFailure(Status::Error(
+              Err::REGISTER_WRITE_FAILED,
+              "Configuration safe-state verification failed",
+              registerMismatchDetail(_job.clkoutSafePmu, observed)));
+          return finishConfigurationCleanup(false);
+        }
+        return finishConfigurationCleanup(true);
+      }
+      case JobState::TEMPERATURE_READ_CONFIG:
+        st = readJob(cmd::REG_CONTROL3, _job.temperatureOriginal,
+                     sizeof(_job.temperatureOriginal));
+        if (!st.ok()) {
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        _job.temperatureOriginal[0] = static_cast<uint8_t>(
+            _job.temperatureOriginal[0] & cmd::CONTROL3_IMPLEMENTED_MASK);
+        _job.temperatureOriginal[1] = static_cast<uint8_t>(
+            _job.temperatureOriginal[1] & cmd::TS_CONTROL_READBACK_MASK);
+        {
+          const uint8_t requestedControl3 = _job.temperatureTarget[0];
+          const uint8_t requestedOverwrite = _job.temperatureTarget[1];
+          const uint8_t requestedLowThreshold = _job.temperatureTarget[4];
+          const uint8_t requestedHighThreshold = _job.temperatureTarget[5];
+          const uint8_t controlMask = static_cast<uint8_t>(
+              (1u << cmd::CTRL3_THE_BIT) | (1u << cmd::CTRL3_TLE_BIT) |
+              (1u << cmd::CTRL3_THIE_BIT) | (1u << cmd::CTRL3_TLIE_BIT));
+          const uint8_t overwriteMask = static_cast<uint8_t>(
+              (1u << cmd::TS_TLOW_OVERWRITE_BIT) |
+              (1u << cmd::TS_THIGH_OVERWRITE_BIT));
+          std::memcpy(_job.temperatureTarget, _job.temperatureOriginal,
+                      sizeof(_job.temperatureTarget));
+          _job.temperatureTarget[0] = static_cast<uint8_t>(
+              (_job.temperatureOriginal[0] & ~controlMask) |
+              (requestedControl3 & controlMask));
+          _job.temperatureTarget[1] = static_cast<uint8_t>(
+              (_job.temperatureOriginal[1] & ~overwriteMask) |
+              (requestedOverwrite & overwriteMask));
+          _job.temperatureTarget[4] = requestedLowThreshold;
+          _job.temperatureTarget[5] = requestedHighThreshold;
+          _job.temperatureSafeControl3 = static_cast<uint8_t>(
+              _job.temperatureOriginal[0] & ~controlMask);
+        }
+        _job.state = JobState::TEMPERATURE_WRITE_SAFE_CONTROL3;
         break;
-      case JobState::TemperatureConfigWriteInterrupts: {
+      case JobState::TEMPERATURE_WRITE_SAFE_CONTROL3:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL3, &_job.temperatureSafeControl3, 1);
+        if (!st.ok()) {
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        _job.state = JobState::TEMPERATURE_WRITE_TIMESTAMP_CONTROL;
+        break;
+      case JobState::TEMPERATURE_WRITE_TIMESTAMP_CONTROL:
+        st = writeConfigurationForward(
+            cmd::REG_TS_CONTROL, &_job.temperatureTarget[1], 1);
+        if (!st.ok()) {
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        _job.state = JobState::TEMPERATURE_WRITE_THRESHOLDS;
+        break;
+      case JobState::TEMPERATURE_WRITE_THRESHOLDS:
+        st = writeConfigurationForward(
+            cmd::REG_TLOW_THRESHOLD, &_job.temperatureTarget[4], 2);
+        if (!st.ok()) {
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        _job.state = JobState::TEMPERATURE_WRITE_INTERRUPTS;
+        break;
+      case JobState::TEMPERATURE_WRITE_INTERRUPTS: {
         const uint8_t detectionMask = static_cast<uint8_t>(
             (1u << cmd::CTRL3_THE_BIT) | (1u << cmd::CTRL3_TLE_BIT));
         const uint8_t interruptsOnly = static_cast<uint8_t>(
-            _job.registerBlockValues[0] & ~detectionMask);
-        st = writeRegs(cmd::REG_CONTROL3, &interruptsOnly, 1);
-        ++instructionsUsed;
+            _job.temperatureTarget[0] & ~detectionMask);
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL3, &interruptsOnly, 1);
         if (!st.ok()) {
-          finishJob(st);
-          return st;
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
         }
-        _job.state = JobState::TemperatureConfigWriteDetection;
+        _job.state = JobState::TEMPERATURE_WRITE_DETECTION;
         break;
       }
-      case JobState::TemperatureConfigWriteDetection:
-        st = writeRegs(cmd::REG_CONTROL3,
-                       &_job.registerBlockValues[0], 1);
-        ++instructionsUsed;
-        finishJob(st);
-        return st;
-      case JobState::WriteUserRamChunk: {
+      case JobState::TEMPERATURE_WRITE_DETECTION:
+        st = writeConfigurationForward(
+            cmd::REG_CONTROL3, &_job.temperatureTarget[0], 1);
+        if (!st.ok()) {
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        _job.state = JobState::TEMPERATURE_VERIFY;
+        break;
+      case JobState::TEMPERATURE_VERIFY: {
+        uint8_t observed[6] = {};
+        st = readJob(cmd::REG_CONTROL3, observed, sizeof(observed));
+        const uint8_t overwriteMask = static_cast<uint8_t>(
+            (1u << cmd::TS_TLOW_OVERWRITE_BIT) |
+            (1u << cmd::TS_THIGH_OVERWRITE_BIT));
+        const bool matches = st.ok() &&
+            (observed[0] & cmd::CONTROL3_IMPLEMENTED_MASK) ==
+                _job.temperatureTarget[0] &&
+            (observed[1] & overwriteMask) ==
+                (_job.temperatureTarget[1] & overwriteMask) &&
+            observed[4] == _job.temperatureTarget[4] &&
+            observed[5] == _job.temperatureTarget[5];
+        if (!matches) {
+          if (st.ok()) {
+            st = Status::Error(
+                Err::REGISTER_WRITE_FAILED,
+                "Temperature configuration verification failed",
+                registerMismatchDetail(_job.temperatureTarget[0],
+                    static_cast<uint8_t>(observed[0] &
+                                         cmd::CONTROL3_IMPLEMENTED_MASK)));
+          }
+          return failConfiguration(st,
+                                   JobState::TEMPERATURE_CLEANUP_READ);
+        }
+        return finishConfigurationSuccess();
+      }
+      case JobState::TEMPERATURE_CLEANUP_READ: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL3, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL3_IMPLEMENTED_MASK);
+        if (observed == _job.temperatureSafeControl3) {
+          return finishConfigurationCleanup(true);
+        }
+        _job.state = JobState::TEMPERATURE_CLEANUP_WRITE;
+        break;
+      }
+      case JobState::TEMPERATURE_CLEANUP_WRITE:
+        st = writeConfigurationCleanup(
+            cmd::REG_CONTROL3, &_job.temperatureSafeControl3, 1);
+        if (!st.ok()) rememberConfigurationCleanupFailure(st);
+        _job.state = JobState::TEMPERATURE_CLEANUP_VERIFY;
+        break;
+      case JobState::TEMPERATURE_CLEANUP_VERIFY: {
+        uint8_t observed = 0;
+        st = readJob(cmd::REG_CONTROL3, &observed, 1);
+        if (!st.ok()) {
+          rememberConfigurationCleanupFailure(st);
+          return finishConfigurationCleanup(false);
+        }
+        observed = static_cast<uint8_t>(
+            observed & cmd::CONTROL3_IMPLEMENTED_MASK);
+        if (observed != _job.temperatureSafeControl3) {
+          rememberConfigurationCleanupFailure(Status::Error(
+              Err::REGISTER_WRITE_FAILED,
+              "Configuration safe-state verification failed",
+              registerMismatchDetail(_job.temperatureSafeControl3, observed)));
+          return finishConfigurationCleanup(false);
+        }
+        return finishConfigurationCleanup(true);
+      }
+      case JobState::WRITE_USER_RAM_CHUNK: {
         const uint8_t remaining = static_cast<uint8_t>(_job.userRamLen - _job.userRamWritten);
         const uint8_t chunk = (remaining > 15U) ? 15U : remaining;
-        st = writeRegs(static_cast<uint8_t>(cmd::REG_USER_RAM_START +
+        st = writeJob(static_cast<uint8_t>(cmd::REG_USER_RAM_START +
                                             _job.userRamOffset +
                                             _job.userRamWritten),
                        &_job.userRamBuf[_job.userRamWritten],
                        chunk);
-        ++instructionsUsed;
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -775,20 +1515,18 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         }
         break;
       }
-      case JobState::ReadTemperatureFirst:
-        st = readRegs(cmd::REG_TEMP_LSB, _job.firstTemperature,
+      case JobState::READ_TEMPERATURE_FIRST:
+        st = readJob(cmd::REG_TEMP_LSB, _job.firstTemperature,
                       sizeof(_job.firstTemperature));
-        ++instructionsUsed;
         if (!st.ok()) {
           finishJob(st);
           return st;
         }
-        _job.state = JobState::ReadTemperatureSecond;
+        _job.state = JobState::READ_TEMPERATURE_SECOND;
         break;
-      case JobState::ReadTemperatureSecond: {
+      case JobState::READ_TEMPERATURE_SECOND: {
         uint8_t second[2] = {};
-        st = readRegs(cmd::REG_TEMP_LSB, second, sizeof(second));
-        ++instructionsUsed;
+        st = readJob(cmd::REG_TEMP_LSB, second, sizeof(second));
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -806,9 +1544,8 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         finishJob(Status::Ok());
         return Status::Ok();
       }
-      case JobState::ReadTimeStatus:
-        st = readRegs(cmd::REG_STATUS, &_job.timeSnapshot.statusRaw, 1);
-        ++instructionsUsed;
+      case JobState::READ_TIME_STATUS:
+        st = readJob(cmd::REG_STATUS, &_job.timeSnapshot.statusRaw, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -821,11 +1558,10 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           finishJob(Status::Ok());
           return Status::Ok();
         }
-        _job.state = JobState::ReadTimeCalendar;
+        _job.state = JobState::READ_TIME_CALENDAR;
         break;
-      case JobState::ReadTimeCalendar:
-        st = readRegs(cmd::REG_SECONDS, _job.calendarBuf, sizeof(_job.calendarBuf));
-        ++instructionsUsed;
+      case JobState::READ_TIME_CALENDAR:
+        st = readJob(cmd::REG_SECONDS, _job.calendarBuf, sizeof(_job.calendarBuf));
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -838,33 +1574,38 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         _job.timeSnapshot.timeValid = true;
         finishJob(Status::Ok());
         return Status::Ok();
-      case JobState::SetTimeReadStatusBefore:
-        st = readRegs(cmd::REG_STATUS, &_job.verifiedSet.statusBefore, 1);
-        ++instructionsUsed;
+      case JobState::SET_TIME_READ_STATUS_BEFORE:
+        st = readJob(cmd::REG_STATUS, &_job.verifiedSet.statusBefore, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
         }
         _job.verifiedSet.statusBeforeValid = true;
-        _job.state = JobState::SetTimeWriteCalendar;
+        _job.state = JobState::SET_TIME_WRITE_CALENDAR;
         break;
-      case JobState::SetTimeWriteCalendar:
-        if (hasDeadlinePassed(currentNowMs, _job.mutationCutoffMs)) {
-          st = Status::Error(Err::TIMEOUT, "Calendar mutation cutoff expired");
+      case JobState::SET_TIME_WRITE_CALENDAR: {
+        const uint32_t boundary = earlierDeadline(
+            currentNowMs, callbackBoundary(), _job.mutationCutoffMs);
+        const TimedTransferResult transfer = writeRegsBefore(
+            cmd::REG_SECONDS, _job.calendarBuf, sizeof(_job.calendarBuf),
+            currentNowMs, boundary);
+        _job.verifiedSet.calendarWriteAttempted = transfer.callbackInvoked;
+        if (transfer.callbackInvoked) ++instructionsUsed;
+        st = transfer.status;
+        if (transfer.callbackInvoked) {
+          _job.verifiedSet.calendarWriteStatus = transfer.callbackStatus;
+        }
+        if (!transfer.callbackInvoked) {
           finishJob(st);
           return st;
         }
-        _job.verifiedSet.calendarWriteAttempted = true;
-        st = writeRegs(cmd::REG_SECONDS, _job.calendarBuf, sizeof(_job.calendarBuf));
-        ++instructionsUsed;
-        _job.verifiedSet.calendarWriteStatus = st;
         _job.verifiedSet.calendarWriteAmbiguous = !st.ok();
-        _job.state = JobState::SetTimeVerifyCalendar;
+        _job.state = JobState::SET_TIME_VERIFY_CALENDAR;
         break;
-      case JobState::SetTimeVerifyCalendar: {
+      }
+      case JobState::SET_TIME_VERIFY_CALENDAR: {
         uint8_t observed[7] = {};
-        st = readRegs(cmd::REG_SECONDS, observed, sizeof(observed));
-        ++instructionsUsed;
+        st = readJob(cmd::REG_SECONDS, observed, sizeof(observed));
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -883,12 +1624,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         if (_job.verifiedSet.calendarWriteAmbiguous) {
           _job.verifiedSet.verifiedAfterAmbiguousWrite = true;
         }
-        _job.state = JobState::SetTimeReadStatusBeforeClear;
+        _job.state = JobState::SET_TIME_READ_STATUS_BEFORE_CLEAR;
         break;
       }
-      case JobState::SetTimeReadStatusBeforeClear:
-        st = readRegs(cmd::REG_STATUS, &_job.verifiedSet.statusBeforeClear, 1);
-        ++instructionsUsed;
+      case JobState::SET_TIME_READ_STATUS_BEFORE_CLEAR:
+        st = readJob(cmd::REG_STATUS, &_job.verifiedSet.statusBeforeClear, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -898,26 +1638,30 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
             (_job.verifiedSet.statusBeforeClear & 0x80u) != 0;
         _job.verifiedSet.temperatureLowWasSetBeforeClear =
             (_job.verifiedSet.statusBeforeClear & 0x40u) != 0;
-        _job.state = JobState::SetTimeWriteStatus;
+        _job.state = JobState::SET_TIME_WRITE_STATUS;
         break;
-      case JobState::SetTimeWriteStatus: {
-        if (hasDeadlinePassed(currentNowMs, _job.mutationCutoffMs)) {
-          st = Status::Error(Err::TIMEOUT, "Status mutation cutoff expired");
+      case JobState::SET_TIME_WRITE_STATUS: {
+        const uint8_t value = cmd::STATUS_CLEAR_INVALID_TIME_VALUE;
+        const uint32_t boundary = earlierDeadline(
+            currentNowMs, callbackBoundary(), _job.mutationCutoffMs);
+        const TimedTransferResult transfer = writeRegsBefore(
+            cmd::REG_STATUS, &value, 1, currentNowMs, boundary);
+        _job.verifiedSet.statusWriteAttempted = transfer.callbackInvoked;
+        if (transfer.callbackInvoked) ++instructionsUsed;
+        st = transfer.status;
+        if (transfer.callbackInvoked) {
+          _job.verifiedSet.statusWriteStatus = transfer.callbackStatus;
+        }
+        if (!transfer.callbackInvoked) {
           finishJob(st);
           return st;
         }
-        const uint8_t value = cmd::STATUS_CLEAR_INVALID_TIME_VALUE;
-        _job.verifiedSet.statusWriteAttempted = true;
-        st = writeRegs(cmd::REG_STATUS, &value, 1);
-        ++instructionsUsed;
-        _job.verifiedSet.statusWriteStatus = st;
         _job.verifiedSet.statusWriteAmbiguous = !st.ok();
-        _job.state = JobState::SetTimeReadStatusAfter;
+        _job.state = JobState::SET_TIME_READ_STATUS_AFTER;
         break;
       }
-      case JobState::SetTimeReadStatusAfter:
-        st = readRegs(cmd::REG_STATUS, &_job.verifiedSet.statusAfter, 1);
-        ++instructionsUsed;
+      case JobState::SET_TIME_READ_STATUS_AFTER:
+        st = readJob(cmd::REG_STATUS, &_job.verifiedSet.statusAfter, 1);
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -931,12 +1675,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         if (_job.verifiedSet.statusWriteAmbiguous) {
           _job.verifiedSet.verifiedAfterAmbiguousWrite = true;
         }
-        _job.state = JobState::SetTimeReadFinalCalendar;
+        _job.state = JobState::SET_TIME_READ_FINAL_CALENDAR;
         break;
-      case JobState::SetTimeReadFinalCalendar: {
+      case JobState::SET_TIME_READ_FINAL_CALENDAR: {
         uint8_t observed[7] = {};
-        st = readRegs(cmd::REG_SECONDS, observed, sizeof(observed));
-        ++instructionsUsed;
+        st = readJob(cmd::REG_SECONDS, observed, sizeof(observed));
         if (!st.ok()) {
           finishJob(st);
           return st;
@@ -950,8 +1693,8 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         }
         uint32_t firstUnix = 0;
         uint32_t finalUnix = 0;
-        if (!dateTimeToUnix(_job.firstVerified, firstUnix) ||
-            !dateTimeToUnix(decoded, finalUnix) || finalUnix < firstUnix) {
+        if (!dateTimeToUnix(_job.firstVerified, firstUnix).ok() ||
+            !dateTimeToUnix(decoded, finalUnix).ok() || finalUnix < firstUnix) {
           st = Status::Error(Err::EEPROM_VERIFY_FAILED, "Final calendar moved backward");
           finishJob(st);
           return st;
@@ -963,11 +1706,40 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         finishJob(Status::Ok());
         return Status::Ok();
       }
-      case JobState::Persistent: {
+      case JobState::PERSISTENT: {
         bool callbackUsed = false;
         st = processPersistentJob(currentNowMs, callbackUsed);
-        if (callbackUsed) {
-          ++instructionsUsed;
+        if (callbackUsed) ++instructionsUsed;
+        if (_job.deadlineActive &&
+            hasDeadlinePassed(currentNowMs, _job.deadlineMs)) {
+          if (_job.persistentCleanupRequired) {
+            if (_job.persistentCleanupStatus.ok()) {
+              _job.persistentCleanupStatus = st.ok() || st.inProgress()
+                  ? Status::Error(
+                        Err::TIMEOUT,
+                        "Persistent callback crossed deadline before cleanup proof")
+                  : st;
+            }
+            st = Status::Error(
+                Err::EEPROM_CLEANUP_FAILED,
+                "Persistent callback crossed deadline before cleanup proof");
+          } else if (st.ok() || st.inProgress()) {
+            st = Status::Error(
+                Err::TIMEOUT, "Persistent callback crossed deadline");
+            if (_job.persistentOperationStatus.ok()) {
+              _job.persistentOperationStatus = st;
+            }
+          }
+          _job.persistentRead.operationStatus =
+              _job.persistentOperationStatus;
+          _job.persistentRead.cleanupStatus =
+              _job.persistentCleanupStatus;
+          _job.userEepromWrite.operationStatus =
+              _job.persistentOperationStatus;
+          _job.userEepromWrite.cleanupStatus =
+              _job.persistentCleanupStatus;
+          finishJob(st);
+          return st;
         }
         if (st.inProgress()) {
           if (!callbackUsed) {
@@ -978,10 +1750,39 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         finishJob(st);
         return st;
       }
-      case JobState::Idle:
+      case JobState::IDLE:
       default:
-        finishJob(Status::Ok());
-        return Status::Ok();
+        st = Status::Error(
+            Err::INTERNAL_STATE_ERROR, "Impossible cooperative job state",
+            static_cast<int32_t>(_job.state));
+        if (isConfigurationKind(_job.activeKind)) {
+          const bool cleanupAlreadyEntered =
+              !_job.configurationReport.operationStatus.ok() ||
+              _job.configurationCleanupWriteAttempted;
+          if (!_job.configurationReport.mutationAttempted) {
+            rememberConfigurationOperationFailure(st);
+            _job.configurationReport.finalState =
+                ConfigurationFinalState::UNCHANGED;
+            finishJob(_job.configurationReport.operationStatus);
+            return _job.completedStatus;
+          }
+          if (_job.activeKind == JobKind::SET_BACKUP_SWITCH_MODE &&
+              _job.configurationReport.finalState ==
+                  ConfigurationFinalState::REQUESTED_VERIFIED) {
+            rememberConfigurationOperationFailure(st);
+            finishJob(_job.configurationReport.operationStatus);
+            return _job.completedStatus;
+          }
+          if (cleanupAlreadyEntered) {
+            rememberConfigurationCleanupFailure(st);
+            return finishConfigurationCleanup(false);
+          }
+          rememberConfigurationOperationFailure(st);
+          _job.state = configurationCleanupState(_job.activeKind);
+          return configurationInProgress;
+        }
+        finishJob(st);
+        return st;
     }
   }
 
@@ -992,23 +1793,17 @@ void RV3032::finishJob(const Status& status) {
   _job.lastStatus = status;
   _job.completedStatus = status;
   _job.completedKind = _job.activeKind;
-  _job.activeKind = JobKind::None;
-  _job.state = JobState::Idle;
-  if (_job.completedKind == JobKind::PasswordProtection) {
-    std::memset(_job.currentCredential.bytes, 0,
-                sizeof(_job.currentCredential.bytes));
-    std::memset(_job.newCredential.bytes, 0,
-                sizeof(_job.newCredential.bytes));
-    std::memset(_job.userRamBuf, 0, sizeof(_job.userRamBuf));
-  }
+  _job.activeKind = JobKind::NONE;
+  _job.state = JobState::IDLE;
 }
 
 bool RV3032::workIdle() const {
   return !isJobBusy() && !isEepromBusy();
 }
 
-Status RV3032::updateRegisterSingle(uint8_t reg, uint8_t implementedMask,
-                                    uint8_t clearMask, uint8_t setMask) {
+Status RV3032::updateRegisterSingle(
+    uint8_t reg, uint8_t implementedMask, uint8_t clearMask, uint8_t setMask,
+    const QuiescenceGuard& quiescenceGuard) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
@@ -1019,26 +1814,53 @@ Status RV3032::updateRegisterSingle(uint8_t reg, uint8_t implementedMask,
   const bool persist =
       _config.enableEepromWrites && reg >= cmd::REG_ACTIVE_PMU &&
       reg <= cmd::REG_ACTIVE_TREFERENCE1;
-  if (isJobBusy() || _eeprom.state != EepromState::Idle ||
+  if (isJobBusy() || _eeprom.state != EepromState::IDLE ||
       (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
+  _job.activeKind = JobKind::REGISTER_UPDATE;
   _job.registerUpdateReg = reg;
   _job.registerUpdateImplementedMask = implementedMask;
   _job.registerUpdateClearMask = clearMask;
   _job.registerUpdateSetMask = setMask;
   _job.persistRegisterUpdate = persist;
+  _job.quiescenceGuard = quiescenceGuard;
+  _job.quiescenceNextState = JobState::REGISTER_UPDATE_READ;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Control update in progress");
-  _job.state = JobState::RegisterUpdateRead;
+  _job.state = quiescenceGuard.forbiddenMask == 0
+      ? JobState::REGISTER_UPDATE_READ
+      : JobState::REGISTER_UPDATE_READ_QUIESCENCE;
+  return _job.lastStatus;
+}
+
+Status RV3032::startTempLsbFlagClear(uint8_t targetMask) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
+  if (targetMask != cmd::EEPROM_EEF_MASK &&
+      targetMask != cmd::TEMP_CLKF_MASK &&
+      targetMask != cmd::TEMP_BSF_MASK) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "TEMP_LSB clear target is invalid");
+  }
+  if (!workIdle()) {
+    return Status::Error(Err::BUSY, "Driver work already in progress");
+  }
+  _job = JobOp{};
+  _job.activeKind = JobKind::TEMP_LSB_FLAG_CLEAR;
+  _job.state = JobState::TEMP_LSB_CLEAR_READ;
+  _job.tempLsbClearMask = targetMask;
+  _job.lastStatus = Status::Error(Err::IN_PROGRESS,
+                                  "TEMP_LSB flag clear in progress");
   return _job.lastStatus;
 }
 
 Status RV3032::updateRegisterBlock(uint8_t reg, uint8_t length,
                                    const uint8_t* implementedMasks,
                                    const uint8_t* clearMasks,
-                                   const uint8_t* setMasks) {
+                                   const uint8_t* setMasks,
+                                   const QuiescenceGuard& quiescenceGuard) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
@@ -1057,21 +1879,25 @@ Status RV3032::updateRegisterBlock(uint8_t reg, uint8_t length,
       _config.enableEepromWrites && reg >= cmd::REG_ACTIVE_PMU &&
       static_cast<uint16_t>(reg) + length - 1U <=
           cmd::REG_ACTIVE_TREFERENCE1;
-  if (isJobBusy() || _eeprom.state != EepromState::Idle ||
+  if (isJobBusy() || _eeprom.state != EepromState::IDLE ||
       (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
+  _job.activeKind = JobKind::REGISTER_UPDATE;
   _job.registerBlockReg = reg;
   _job.registerBlockLen = length;
   std::memcpy(_job.registerBlockImplemented, implementedMasks, length);
   std::memcpy(_job.registerBlockClear, clearMasks, length);
   std::memcpy(_job.registerBlockSet, setMasks, length);
   _job.persistRegisterUpdate = persist;
+  _job.quiescenceGuard = quiescenceGuard;
+  _job.quiescenceNextState = JobState::REGISTER_BLOCK_UPDATE_READ;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS,
                                   "Control block update in progress");
-  _job.state = JobState::RegisterBlockUpdateRead;
+  _job.state = quiescenceGuard.forbiddenMask == 0
+      ? JobState::REGISTER_BLOCK_UPDATE_READ
+      : JobState::REGISTER_UPDATE_READ_QUIESCENCE;
   return _job.lastStatus;
 }
 
@@ -1083,23 +1909,33 @@ Status RV3032::startReadTimeSnapshotJob(uint32_t nowMs,
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
-  if (operationTimeoutMs == 0 || operationTimeoutMs > 1000) {
-    return Status::Error(Err::INVALID_PARAM, "Read-time timeout must be 1..1000 ms");
+  uint32_t minimumTimeoutMs = 2U;
+  if (_config.nowMs == nullptr) {
+    const uint32_t fullTransferBound =
+        TWO_TRANSFER_JOB_CALLBACK_CAP * _config.i2cTimeoutMs;
+    const uint32_t twoDispatchMinimum = _config.i2cTimeoutMs + 2U;
+    minimumTimeoutMs = fullTransferBound > twoDispatchMinimum
+        ? fullTransferBound : twoDispatchMinimum;
+  }
+  if (operationTimeoutMs < minimumTimeoutMs || operationTimeoutMs > 1000) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Read-time timeout is not executable",
+                         static_cast<int32_t>(minimumTimeoutMs));
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::ReadTimeSnapshot;
+  _job.activeKind = JobKind::READ_TIME_SNAPSHOT;
   _job.deadlineMs = nowMs + operationTimeoutMs;
   _job.deadlineActive = true;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
-  _job.state = JobState::ReadTimeStatus;
+  _job.state = JobState::READ_TIME_STATUS;
   return _job.lastStatus;
 }
 
 Status RV3032::getReadTimeSnapshotJobResult(TimeSnapshot& out) const {
-  if (_job.activeKind == JobKind::ReadTimeSnapshot) {
+  if (_job.activeKind == JobKind::READ_TIME_SNAPSHOT) {
     return Status::Error(Err::IN_PROGRESS, "Read-time job in progress");
   }
-  if (_job.completedKind != JobKind::ReadTimeSnapshot) {
+  if (_job.completedKind != JobKind::READ_TIME_SNAPSHOT) {
     return Status::Error(Err::JOB_RESULT_UNAVAILABLE, "Read-time result unavailable");
   }
   out = _job.timeSnapshot;
@@ -1121,13 +1957,24 @@ Status RV3032::startSetTimeAndClearInvalidFlagsVerifiedJob(
       value.weekday > 6) {
     return Status::Error(Err::INVALID_DATETIME, "Invalid date/time");
   }
-  if (operationTimeoutMs <= MIN_SET_TIME_OPERATION_BUDGET_MS ||
-      operationTimeoutMs > 1000) {
-    return Status::Error(Err::INVALID_PARAM, "Verified-set timeout must be 126..1000 ms");
+  uint32_t minimumTimeoutMs = MIN_SET_TIME_OPERATION_BUDGET_MS + 2U;
+  if (_config.nowMs == nullptr) {
+    const uint32_t fullTransferBound =
+        VERIFIED_SET_JOB_CALLBACK_CAP * _config.i2cTimeoutMs;
+    const uint32_t statusWriteAdmissionBound =
+        MIN_SET_TIME_OPERATION_BUDGET_MS +
+        VERIFIED_SET_STATUS_WRITE_PREFIX_CAP * _config.i2cTimeoutMs + 2U;
+    minimumTimeoutMs = fullTransferBound > statusWriteAdmissionBound
+        ? fullTransferBound : statusWriteAdmissionBound;
+  }
+  if (operationTimeoutMs < minimumTimeoutMs || operationTimeoutMs > 1000) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Verified-set timeout is not executable",
+                         static_cast<int32_t>(minimumTimeoutMs));
   }
 
   _job = JobOp{};
-  _job.activeKind = JobKind::SetTimeVerified;
+  _job.activeKind = JobKind::SET_TIME_VERIFIED;
   _job.deadlineMs = nowMs + operationTimeoutMs;
   _job.mutationCutoffMs = nowMs +
       (operationTimeoutMs - MIN_SET_TIME_OPERATION_BUDGET_MS);
@@ -1137,21 +1984,21 @@ Status RV3032::startSetTimeAndClearInvalidFlagsVerifiedJob(
   _job.calendarBuf[0] = binToBcd(value.second);
   _job.calendarBuf[1] = binToBcd(value.minute);
   _job.calendarBuf[2] = binToBcd(value.hour);
-  _job.calendarBuf[3] = binToBcd(value.weekday);
+  _job.calendarBuf[3] = value.weekday;
   _job.calendarBuf[4] = binToBcd(value.day);
   _job.calendarBuf[5] = binToBcd(value.month);
   _job.calendarBuf[6] = binToBcd(static_cast<uint8_t>(value.year - 2000));
   _job.lastStatus = Status::Error(Err::IN_PROGRESS, "Job in progress");
-  _job.state = JobState::SetTimeReadStatusBefore;
+  _job.state = JobState::SET_TIME_READ_STATUS_BEFORE;
   return _job.lastStatus;
 }
 
 Status RV3032::getSetTimeAndClearInvalidFlagsVerifiedJobResult(
     VerifiedTimeSetReport& out) const {
-  if (_job.activeKind == JobKind::SetTimeVerified) {
+  if (_job.activeKind == JobKind::SET_TIME_VERIFIED) {
     return Status::Error(Err::IN_PROGRESS, "Verified-set job in progress");
   }
-  if (_job.completedKind != JobKind::SetTimeVerified) {
+  if (_job.completedKind != JobKind::SET_TIME_VERIFIED) {
     return Status::Error(Err::JOB_RESULT_UNAVAILABLE, "Verified-set result unavailable");
   }
   out = _job.verifiedSet;
@@ -1166,19 +2013,23 @@ Status RV3032::startPersistentReadJob(uint8_t address, uint8_t length,
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
+  const uint32_t cleanupReserveMs =
+      EEPROM_CLEANUP_READY_TIMEOUT_MS +
+      6U * _config.i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS;
+  const uint32_t minimumTimeoutMs =
+      cleanupReserveMs + _config.i2cTimeoutMs + 1U;
   if (length == 0 || length > USER_EEPROM_JOB_MAX_BYTES ||
-      timeoutMs < 50 || timeoutMs > 10000) {
+      timeoutMs < minimumTimeoutMs || timeoutMs > 10000) {
     return Status::Error(Err::INVALID_PARAM, "Invalid persistent-read bounds");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::PersistentRead;
-  _job.state = JobState::Persistent;
-  _job.persistentState = EepromState::ReadControl1;
+  _job.activeKind = JobKind::PERSISTENT_READ;
+  _job.state = JobState::PERSISTENT;
+  _job.persistentState = EepromState::READ_CONTROL1;
   _job.persistentAddress = address;
   _job.persistentLength = length;
   _job.deadlineMs = nowMs + timeoutMs;
-  _job.mutationCutoffMs = nowMs + (timeoutMs -
-      (timeoutMs > 600 ? 300 : timeoutMs / 2));
+  _job.mutationCutoffMs = nowMs + (timeoutMs - cleanupReserveMs);
   _job.deadlineActive = true;
   _job.mutationCutoffActive = true;
   _job.persistentRead.eepromAddress = address;
@@ -1220,21 +2071,27 @@ Status RV3032::startWriteUserEepromJob(uint8_t offset, const uint8_t* data,
   if (!_config.enableEepromWrites) {
     return Status::Error(Err::INVALID_CONFIG, "Generic EEPROM writes are disabled");
   }
+  const uint32_t cleanupReserveMs =
+      EEPROM_CLEANUP_READY_TIMEOUT_MS +
+      6U * _config.i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS;
+  const uint32_t minimumTimeoutMs =
+      cleanupReserveMs + _config.i2cTimeoutMs + 1U;
   if (data == nullptr || offset >= USER_EEPROM_SIZE || length == 0 ||
       length > USER_EEPROM_JOB_MAX_BYTES ||
       length > static_cast<uint8_t>(USER_EEPROM_SIZE - offset) ||
-      operationTimeoutMs <= 300 || operationTimeoutMs > 10000) {
+      operationTimeoutMs < minimumTimeoutMs || operationTimeoutMs > 10000) {
     return Status::Error(Err::INVALID_PARAM, "User EEPROM write out of range");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::UserEepromWrite;
-  _job.state = JobState::Persistent;
-  _job.persistentState = EepromState::ReadControl1;
+  _job.activeKind = JobKind::USER_EEPROM_WRITE;
+  _job.state = JobState::PERSISTENT;
+  _job.persistentState = EepromState::READ_CONTROL1;
   _job.persistentAddress = static_cast<uint8_t>(cmd::USER_EEPROM_START + offset);
   _job.persistentLength = length;
   _job.persistentWriteMode = true;
   _job.deadlineMs = nowMs + operationTimeoutMs;
-  _job.mutationCutoffMs = nowMs + (operationTimeoutMs - 300);
+  _job.mutationCutoffMs = nowMs +
+      (operationTimeoutMs - cleanupReserveMs);
   _job.deadlineActive = true;
   _job.mutationCutoffActive = true;
   std::memcpy(_job.userRamBuf, data, length);
@@ -1245,10 +2102,10 @@ Status RV3032::startWriteUserEepromJob(uint8_t offset, const uint8_t* data,
 }
 
 Status RV3032::getPersistentReadJobResult(PersistentReadResult& out) const {
-  if (_job.activeKind == JobKind::PersistentRead) {
+  if (_job.activeKind == JobKind::PERSISTENT_READ) {
     return Status::Error(Err::IN_PROGRESS, "Persistent-read job in progress");
   }
-  if (_job.completedKind != JobKind::PersistentRead) {
+  if (_job.completedKind != JobKind::PERSISTENT_READ) {
     return Status::Error(Err::JOB_RESULT_UNAVAILABLE, "Persistent-read result unavailable");
   }
   out = _job.persistentRead;
@@ -1256,10 +2113,10 @@ Status RV3032::getPersistentReadJobResult(PersistentReadResult& out) const {
 }
 
 Status RV3032::getUserEepromWriteJobResult(UserEepromWriteReport& out) const {
-  if (_job.activeKind == JobKind::UserEepromWrite) {
+  if (_job.activeKind == JobKind::USER_EEPROM_WRITE) {
     return Status::Error(Err::IN_PROGRESS, "User EEPROM write in progress");
   }
-  if (_job.completedKind != JobKind::UserEepromWrite) {
+  if (_job.completedKind != JobKind::USER_EEPROM_WRITE) {
     return Status::Error(Err::JOB_RESULT_UNAVAILABLE, "User EEPROM write result unavailable");
   }
   out = _job.userEepromWrite;
@@ -1275,11 +2132,12 @@ Status RV3032::getSettings(SettingsSnapshot& out) const {
   out.hasNowMsHook = (_config.nowMs != nullptr);
   out.hasWaitMsHook = (_config.waitMs != nullptr);
 
-  out.beginInProgress = _beginInProgress;
   out.enableEepromWrites = _config.enableEepromWrites;
   out.eepromTimeoutMs = _config.eepromTimeoutMs;
   out.eepromBusy = isEepromBusy();
   out.eepromLastStatus = _eepromLastStatus;
+  out.eepromOperationStatus = _eepromOperationStatus;
+  out.eepromCleanupStatus = _eepromCleanupStatus;
   out.eepromWriteCount = _eepromWriteCount;
   out.eepromWriteFailures = _eepromWriteFailures;
   out.eepromQueueDepth = _eeprom.queueCount;
@@ -1297,18 +2155,19 @@ Status RV3032::getSettings(SettingsSnapshot& out) const {
 // ===== Driver State and Health =====
 
 Status RV3032::probe() {
-  if (!_initialized && !_beginInProgress) {
+  if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!_config.i2cWriteRead) {
     return Status::Error(Err::INVALID_CONFIG, "I2C callbacks not configured");
   }
-  // Read a known register to verify device presence.
+  // Read the Status register to prove address response/communication for this
+  // transaction. An ACK/read cannot prove the responding silicon's identity.
   // Uses raw I2C (no health tracking) - this is a diagnostic-only function.
   // The status register value is not used; we only check if I2C succeeds.
   uint8_t statusReg = 0;
   Status st = _readRegisterRaw(cmd::REG_STATUS, statusReg);
-  (void)statusReg;  // Value unused - we only verify I2C communication works
+  (void)statusReg;
 
   // Do NOT call _updateHealth() - probe is diagnostic only
   return mapPresenceError(st);
@@ -1323,75 +2182,249 @@ Status RV3032::recover() {
 
   uint8_t statusReg = 0;
   const uint8_t reg = cmd::REG_STATUS;
-  Status st = _i2cWriteReadTracked(&reg, 1, &statusReg, 1);
+  Status st = _i2cWriteReadPresenceTracked(&reg, 1, &statusReg, 1);
   (void)statusReg;
-  return mapPresenceError(st);
+  return st;
 }
 
 // ===== I2C Transport Wrappers =====
 
-Status RV3032::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
+Status RV3032::normalizeTransportResult(const Status& status) {
+  switch (status.code) {
+    case Err::OK:
+    case Err::I2C_ERROR:
+    case Err::I2C_NACK_ADDR:
+    case Err::I2C_NACK_DATA:
+    case Err::I2C_TIMEOUT:
+    case Err::I2C_BUS:
+      return status;
+    default:
+      return Status::Error(
+          Err::TRANSPORT_CONTRACT_VIOLATION,
+          "Transport callback returned invalid status",
+          static_cast<int32_t>(status.code));
+  }
+}
+
+RV3032::RawTransferResult RV3032::_i2cWriteReadRaw(
+    const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
   return _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen,
                           _config.i2cTimeoutMs);
 }
 
-Status RV3032::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen,
-                                uint8_t* rxBuf, size_t rxLen,
-                                uint32_t timeoutMs) {
+RV3032::RawTransferResult RV3032::_i2cWriteReadRaw(
+    const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen,
+    uint32_t timeoutMs) {
+  RawTransferResult result{};
   if (!_config.i2cWriteRead) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
+    result.status = Status::Error(Err::INVALID_CONFIG, "I2C read callback null");
+    return result;
   }
   if ((txLen > 0 && txBuf == nullptr) || rxBuf == nullptr || rxLen == 0 ||
       timeoutMs == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid I2C read buffers");
+    result.status = Status::Error(Err::INVALID_PARAM, "Invalid I2C read buffers");
+    return result;
   }
-  return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
-                              timeoutMs, _config.i2cUser);
+  result.callbackInvoked = true;
+  result.status = normalizeTransportResult(
+      _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
+                           timeoutMs, _config.i2cUser));
+  return result;
 }
 
-Status RV3032::_i2cWriteRaw(const uint8_t* buf, size_t len) {
+RV3032::RawTransferResult RV3032::_i2cWriteRaw(
+    const uint8_t* buf, size_t len) {
   return _i2cWriteRaw(buf, len, _config.i2cTimeoutMs);
 }
 
-Status RV3032::_i2cWriteRaw(const uint8_t* buf, size_t len,
-                            uint32_t timeoutMs) {
+RV3032::RawTransferResult RV3032::_i2cWriteRaw(
+    const uint8_t* buf, size_t len, uint32_t timeoutMs) {
+  RawTransferResult result{};
   if (!_config.i2cWrite) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C write callback null");
+    result.status = Status::Error(Err::INVALID_CONFIG, "I2C write callback null");
+    return result;
   }
   if (!buf || len == 0 || timeoutMs == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid I2C write buffer");
+    result.status = Status::Error(Err::INVALID_PARAM, "Invalid I2C write buffer");
+    return result;
   }
-  return _config.i2cWrite(_config.i2cAddress, buf, len,
-                          timeoutMs, _config.i2cUser);
+  result.callbackInvoked = true;
+  result.status = normalizeTransportResult(
+      _config.i2cWrite(_config.i2cAddress, buf, len,
+                       timeoutMs, _config.i2cUser));
+  return result;
 }
 
 Status RV3032::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
-  Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
-  if (!shouldTrackHealth(st)) {
-    return st;
-  }
-  return _updateHealth(st);
+  const RawTransferResult result = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
+  return result.callbackInvoked ? _updateHealth(result.status) : result.status;
 }
 
 Status RV3032::_i2cWriteTracked(const uint8_t* buf, size_t len) {
-  Status st = _i2cWriteRaw(buf, len);
-  if (!shouldTrackHealth(st)) {
-    return st;
-  }
-  return _updateHealth(st);
+  const RawTransferResult result = _i2cWriteRaw(buf, len);
+  return result.callbackInvoked ? _updateHealth(result.status) : result.status;
 }
 
 Status RV3032::_i2cWriteReadTrackedTimeout(const uint8_t* txBuf, size_t txLen,
                                             uint8_t* rxBuf, size_t rxLen,
                                             uint32_t timeoutMs) {
-  Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen, timeoutMs);
-  return shouldTrackHealth(st) ? _updateHealth(st) : st;
+  const RawTransferResult result =
+      _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen, timeoutMs);
+  return result.callbackInvoked ? _updateHealth(result.status) : result.status;
 }
 
 Status RV3032::_i2cWriteTrackedTimeout(const uint8_t* buf, size_t len,
                                        uint32_t timeoutMs) {
-  Status st = _i2cWriteRaw(buf, len, timeoutMs);
-  return shouldTrackHealth(st) ? _updateHealth(st) : st;
+  const RawTransferResult result = _i2cWriteRaw(buf, len, timeoutMs);
+  return result.callbackInvoked ? _updateHealth(result.status) : result.status;
+}
+
+Status RV3032::_i2cWriteReadPresenceTracked(
+    const uint8_t* tx, size_t txLen, uint8_t* rx, size_t rxLen) {
+  const RawTransferResult result = _i2cWriteReadRaw(tx, txLen, rx, rxLen);
+  const Status mapped = mapPresenceError(result.status);
+  return result.callbackInvoked ? _updateHealth(mapped) : mapped;
+}
+
+RV3032::TimedTransferResult RV3032::_i2cWriteReadTrackedBefore(
+    const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen,
+    uint32_t& nowMs, uint32_t deadlineMs) {
+  TimedTransferResult result{};
+  result.completedAtMs = nowMs;
+
+  uint32_t callbackStartedAt = nowMs;
+  if (_config.nowMs != nullptr) {
+    callbackStartedAt = _nowMs();
+    if (static_cast<int32_t>(callbackStartedAt - nowMs) > 0) {
+      nowMs = callbackStartedAt;
+    }
+  }
+  result.completedAtMs = nowMs;
+
+  uint32_t remainingMs = 0;
+  if (!remainingBefore(nowMs, deadlineMs, remainingMs) || remainingMs <= 1U) {
+    result.status = Status::Error(
+        Err::TIMEOUT, "Operation deadline reached before transport callback");
+    return result;
+  }
+  const uint32_t timeoutMs =
+      _config.i2cTimeoutMs < (remainingMs - 1U)
+          ? _config.i2cTimeoutMs
+          : (remainingMs - 1U);
+
+  const RawTransferResult raw =
+      _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen, timeoutMs);
+  result.callbackInvoked = raw.callbackInvoked;
+  result.callbackStatus = raw.callbackInvoked ? raw.status : Status::Ok();
+
+  if (raw.callbackInvoked) {
+    if (_config.nowMs != nullptr) {
+      const uint32_t observed = _nowMs();
+      result.callbackTimeoutViolated =
+          static_cast<uint32_t>(observed - callbackStartedAt) > timeoutMs;
+      if (static_cast<int32_t>(observed - nowMs) > 0) nowMs = observed;
+    } else {
+      nowMs += timeoutMs;
+    }
+  }
+  result.completedAtMs = nowMs;
+  uint32_t ignored = 0;
+  result.deadlineCrossed = !remainingBefore(nowMs, deadlineMs, ignored);
+
+  Status healthStatus = raw.status;
+  if (raw.callbackInvoked && result.callbackTimeoutViolated &&
+      raw.status.code != Err::TRANSPORT_CONTRACT_VIOLATION) {
+    healthStatus = Status::Error(Err::I2C_TIMEOUT,
+                                 "Transport callback exceeded timeout");
+  }
+  if (raw.callbackInvoked) (void)_updateHealth(healthStatus);
+
+  if (!raw.callbackInvoked) {
+    result.status = raw.status;
+  } else if (raw.status.code == Err::TRANSPORT_CONTRACT_VIOLATION) {
+    result.status = raw.status;
+  } else if (result.callbackTimeoutViolated) {
+    result.status = healthStatus;
+  } else if (!raw.status.ok()) {
+    result.status = raw.status;
+  } else if (result.deadlineCrossed) {
+    result.status = Status::Error(
+        Err::TIMEOUT, "Transport callback crossed operation deadline",
+        static_cast<int32_t>(result.callbackStatus.code));
+  } else {
+    result.status = Status::Ok();
+  }
+  return result;
+}
+
+RV3032::TimedTransferResult RV3032::_i2cWriteTrackedBefore(
+    const uint8_t* buf, size_t len,
+    uint32_t& nowMs, uint32_t deadlineMs) {
+  TimedTransferResult result{};
+  result.completedAtMs = nowMs;
+
+  uint32_t callbackStartedAt = nowMs;
+  if (_config.nowMs != nullptr) {
+    callbackStartedAt = _nowMs();
+    if (static_cast<int32_t>(callbackStartedAt - nowMs) > 0) {
+      nowMs = callbackStartedAt;
+    }
+  }
+  result.completedAtMs = nowMs;
+
+  uint32_t remainingMs = 0;
+  if (!remainingBefore(nowMs, deadlineMs, remainingMs) || remainingMs <= 1U) {
+    result.status = Status::Error(
+        Err::TIMEOUT, "Operation deadline reached before transport callback");
+    return result;
+  }
+  const uint32_t timeoutMs =
+      _config.i2cTimeoutMs < (remainingMs - 1U)
+          ? _config.i2cTimeoutMs
+          : (remainingMs - 1U);
+
+  const RawTransferResult raw = _i2cWriteRaw(buf, len, timeoutMs);
+  result.callbackInvoked = raw.callbackInvoked;
+  result.callbackStatus = raw.callbackInvoked ? raw.status : Status::Ok();
+
+  if (raw.callbackInvoked) {
+    if (_config.nowMs != nullptr) {
+      const uint32_t observed = _nowMs();
+      result.callbackTimeoutViolated =
+          static_cast<uint32_t>(observed - callbackStartedAt) > timeoutMs;
+      if (static_cast<int32_t>(observed - nowMs) > 0) nowMs = observed;
+    } else {
+      nowMs += timeoutMs;
+    }
+  }
+  result.completedAtMs = nowMs;
+  uint32_t ignored = 0;
+  result.deadlineCrossed = !remainingBefore(nowMs, deadlineMs, ignored);
+
+  Status healthStatus = raw.status;
+  if (raw.callbackInvoked && result.callbackTimeoutViolated &&
+      raw.status.code != Err::TRANSPORT_CONTRACT_VIOLATION) {
+    healthStatus = Status::Error(Err::I2C_TIMEOUT,
+                                 "Transport callback exceeded timeout");
+  }
+  if (raw.callbackInvoked) (void)_updateHealth(healthStatus);
+
+  if (!raw.callbackInvoked) {
+    result.status = raw.status;
+  } else if (raw.status.code == Err::TRANSPORT_CONTRACT_VIOLATION) {
+    result.status = raw.status;
+  } else if (result.callbackTimeoutViolated) {
+    result.status = healthStatus;
+  } else if (!raw.status.ok()) {
+    result.status = raw.status;
+  } else if (result.deadlineCrossed) {
+    result.status = Status::Error(
+        Err::TIMEOUT, "Transport callback crossed operation deadline",
+        static_cast<int32_t>(result.callbackStatus.code));
+  } else {
+    result.status = Status::Ok();
+  }
+  return result;
 }
 
 Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
@@ -1399,7 +2432,7 @@ Status RV3032::_readRegisterRaw(uint8_t reg, uint8_t& value) {
     return Status::Error(Err::INVALID_PARAM, "Register address out of range");
   }
   uint8_t tx = reg;
-  return _i2cWriteReadRaw(&tx, 1, &value, 1);
+  return _i2cWriteReadRaw(&tx, 1, &value, 1).status;
 }
 
 Status RV3032::_updateHealth(const Status& st) {
@@ -1413,9 +2446,7 @@ Status RV3032::_updateHealth(const Status& st) {
     // Success path
     _lastOkMs = _nowMs();
     _consecutiveFailures = 0;
-    if (_totalSuccess < UINT32_MAX) {
-      ++_totalSuccess;
-    }
+    ++_totalSuccess;
 
     // Transition to READY on first success after init or recovery.
     if (_driverState == DriverState::UNINIT ||
@@ -1430,9 +2461,7 @@ Status RV3032::_updateHealth(const Status& st) {
     if (_consecutiveFailures < 0xFFu) {
       ++_consecutiveFailures;
     }
-    if (_totalFailures < UINT32_MAX) {
-      ++_totalFailures;
-    }
+    ++_totalFailures;
 
     // Transition READY -> DEGRADED on first failure.
     if (_consecutiveFailures == 1 && _driverState == DriverState::READY) {
@@ -1458,15 +2487,15 @@ uint32_t RV3032::_nowMs() const {
 void RV3032::_resetRuntimeState() {
   _config = Config{};
   _initialized = false;
-  _beginInProgress = false;
   _driverState = DriverState::UNINIT;
   _eeprom = EepromOp{};
   _job = JobOp{};
   _eepromLastStatus = Status::Ok();
+  _eepromOperationStatus = Status::Ok();
+  _eepromCleanupStatus = Status::Ok();
   _eepromWriteCount = 0;
   _eepromWriteFailures = 0;
   _primaryCellEnsureAttempted = false;
-  _passwordStatus = PasswordProtectionStatus{};
   _lastOkMs = 0;
   _lastError = Status::Ok();
   _lastErrorMs = 0;
@@ -1526,7 +2555,7 @@ Status RV3032::setTime(const DateTime& time) {
     binToBcd(time.second),
     binToBcd(time.minute),
     binToBcd(time.hour),
-    binToBcd(time.weekday),
+    time.weekday,
     binToBcd(time.day),
     binToBcd(time.month),
     binToBcd(static_cast<uint8_t>(time.year % 100))
@@ -1575,7 +2604,10 @@ Status RV3032::setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date) {
   const uint8_t clear[3] = {
       0x7F, 0x3F, static_cast<uint8_t>(date == 0 ? 0xBF : 0x3F)};
   const uint8_t set[3] = {binToBcd(minute), binToBcd(hour), binToBcd(date)};
-  return updateRegisterBlock(cmd::REG_ALARM_MINUTE, 3, implemented, clear, set);
+  return updateRegisterBlock(
+      cmd::REG_ALARM_MINUTE, 3, implemented, clear, set,
+      QuiescenceGuard{cmd::REG_CONTROL2,
+                      static_cast<uint8_t>(1u << cmd::CTRL2_AIE_BIT)});
 }
 
 Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
@@ -1589,7 +2621,10 @@ Status RV3032::setAlarmMatch(bool matchMinute, bool matchHour, bool matchDate) {
       static_cast<uint8_t>(matchMinute ? 0 : 0x80),
       static_cast<uint8_t>(matchHour ? 0 : 0x80),
       static_cast<uint8_t>(matchDate ? 0 : 0x80)};
-  return updateRegisterBlock(cmd::REG_ALARM_MINUTE, 3, implemented, clear, set);
+  return updateRegisterBlock(
+      cmd::REG_ALARM_MINUTE, 3, implemented, clear, set,
+      QuiescenceGuard{cmd::REG_CONTROL2,
+                      static_cast<uint8_t>(1u << cmd::CTRL2_AIE_BIT)});
 }
 
 Status RV3032::getAlarmConfig(AlarmConfig& out) {
@@ -1685,7 +2720,7 @@ Status RV3032::clearAlarmFlag() {
 Status RV3032::enableAlarmInterrupt(bool enable) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL2_AIE_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL2, cmd::CONTROL2_IMPLEMENTED_MASK,
-                              bit, enable ? bit : 0);
+                              bit, enable ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getAlarmInterruptEnabled(bool& enabled) {
@@ -1736,7 +2771,7 @@ Status RV3032::getTimer(uint16_t& ticks, TimerFrequency& freq, bool& enabled) {
 Status RV3032::setTimerInterruptEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL2_TIE_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL2, cmd::CONTROL2_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getTimerInterruptEnabled(bool& enabled) {
@@ -1758,32 +2793,38 @@ Status RV3032::clearTimerFlag() {
 }
 
 Status RV3032::setPeriodicUpdate(PeriodicUpdateFrequency frequency,
-                                  bool interruptEnabled) {
+                                  bool updateEventEnabled) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
+  }
   const uint8_t raw = static_cast<uint8_t>(frequency);
   if (raw > 1) {
     return Status::Error(Err::INVALID_PARAM, "Periodic update frequency out of range");
   }
-  const uint8_t implemented[2] = {cmd::CONTROL1_IMPLEMENTED_MASK,
-                                  cmd::CONTROL2_IMPLEMENTED_MASK};
-  const uint8_t clear[2] = {
-      static_cast<uint8_t>(1u << cmd::CTRL1_USEL_BIT),
-      static_cast<uint8_t>(1u << cmd::CTRL2_UIE_BIT)};
-  const uint8_t set[2] = {
-      static_cast<uint8_t>(raw ? (1u << cmd::CTRL1_USEL_BIT) : 0),
-      static_cast<uint8_t>(interruptEnabled ?
-          (1u << cmd::CTRL2_UIE_BIT) : 0)};
-  return updateRegisterBlock(cmd::REG_CONTROL1, 2, implemented, clear, set);
+  if (!workIdle()) {
+    return Status::Error(Err::BUSY, "Driver work already in progress");
+  }
+  _job = JobOp{};
+  _job.activeKind = JobKind::SET_PERIODIC_UPDATE;
+  _job.periodicTarget[0] = static_cast<uint8_t>(
+      raw ? (1u << cmd::CTRL1_USEL_BIT) : 0);
+  _job.periodicTarget[1] = static_cast<uint8_t>(
+      updateEventEnabled ? (1u << cmd::CTRL2_UIE_BIT) : 0);
+  _job.lastStatus = Status::Error(
+      Err::IN_PROGRESS, "Periodic update configuration in progress");
+  _job.state = JobState::PERIODIC_READ_CONTROLS;
+  return _job.lastStatus;
 }
 
 Status RV3032::getPeriodicUpdate(PeriodicUpdateFrequency& frequency,
-                                  bool& interruptEnabled) {
+                                  bool& updateEventEnabled) {
   uint8_t values[2] = {};
   Status st = readRegs(cmd::REG_CONTROL1, values, sizeof(values));
   if (st.ok()) {
     frequency = (values[0] & (1u << cmd::CTRL1_USEL_BIT)) != 0
         ? PeriodicUpdateFrequency::MINUTE
         : PeriodicUpdateFrequency::SECOND;
-    interruptEnabled = (values[1] & (1u << cmd::CTRL2_UIE_BIT)) != 0;
+    updateEventEnabled = (values[1] & (1u << cmd::CTRL2_UIE_BIT)) != 0;
   }
   return st;
 }
@@ -1801,25 +2842,54 @@ Status RV3032::clearPeriodicUpdateFlag() {
 
 // ===== Power Management / Backup Operations =====
 
-Status RV3032::setBackupSwitchMode(BackupSwitchMode mode) {
-  const uint8_t modeRaw = static_cast<uint8_t>(mode);
-  if (modeRaw > kMaxBackupSwitchMode) {
-    return Status::Error(Err::INVALID_PARAM, "Backup switch mode out of range");
+Status RV3032::startSetBackupSwitchModeJob(
+    BackupSwitchMode mode, uint32_t nowMs, uint32_t operationTimeoutMs) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
-  uint8_t setMask = 0;
+  uint8_t requestedBsm = 0;
+  uint32_t activationMs = 0;
   switch (mode) {
     case BackupSwitchMode::Off:
       break;
     case BackupSwitchMode::Level:
-      setMask = cmd::PMU_BSM_LEVEL;
+      requestedBsm = cmd::PMU_BSM_LEVEL;
+      activationMs = 10U;
       break;
     case BackupSwitchMode::Direct:
-      setMask = cmd::PMU_BSM_DIRECT;
+      requestedBsm = cmd::PMU_BSM_DIRECT;
+      activationMs = 2U;
       break;
+    default:
+      return Status::Error(Err::INVALID_PARAM,
+                           "Backup switch mode out of range");
   }
-  return updateRegisterSingle(cmd::REG_ACTIVE_PMU,
-                              cmd::PMU_IMPLEMENTED_MASK,
-                              cmd::PMU_BSM_MASK, setMask);
+  const uint32_t minimumMs =
+      4U * _config.i2cTimeoutMs + activationMs + 1U;
+  if (operationTimeoutMs < minimumMs ||
+      operationTimeoutMs > BACKUP_SWITCH_OPERATION_TIMEOUT_MAX_MS) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Backup operation timeout is not executable",
+                         static_cast<int32_t>(minimumMs));
+  }
+  const bool persist = _config.enableEepromWrites;
+  if (isJobBusy() || _eeprom.state != EepromState::IDLE ||
+      (!persist && _eeprom.queueCount > 0)) {
+    return Status::Error(Err::BUSY, "Driver work already in progress");
+  }
+  _job = JobOp{};
+  _job.activeKind = JobKind::SET_BACKUP_SWITCH_MODE;
+  _job.state = JobState::BACKUP_READ_CONTROL3;
+  _job.backupTargetPmu = requestedBsm;
+  _job.persistRegisterUpdate = persist;
+  _job.deadlineMs = nowMs + operationTimeoutMs;
+  _job.mutationCutoffMs = nowMs +
+      (operationTimeoutMs - (_config.i2cTimeoutMs + activationMs));
+  _job.deadlineActive = true;
+  _job.mutationCutoffActive = true;
+  _job.lastStatus = Status::Error(
+      Err::IN_PROGRESS, "Backup configuration in progress");
+  return _job.lastStatus;
 }
 
 Status RV3032::getBackupSwitchMode(BackupSwitchMode& mode) {
@@ -1854,7 +2924,7 @@ Status RV3032::setTrickleChargeMode(TrickleChargeMode mode) {
   }
   return updateRegisterSingle(cmd::REG_ACTIVE_PMU,
                               cmd::PMU_IMPLEMENTED_MASK,
-                              cmd::PMU_TCM_MASK, raw);
+                              cmd::PMU_TCM_MASK, raw, QuiescenceGuard{});
 }
 
 Status RV3032::getTrickleChargeMode(TrickleChargeMode& mode) {
@@ -1873,7 +2943,8 @@ Status RV3032::setTrickleChargeResistance(
   return updateRegisterSingle(cmd::REG_ACTIVE_PMU,
                               cmd::PMU_IMPLEMENTED_MASK,
                               cmd::PMU_TCR_MASK,
-                              static_cast<uint8_t>(raw << 2));
+                              static_cast<uint8_t>(raw << 2),
+                              QuiescenceGuard{});
 }
 
 Status RV3032::getTrickleChargeResistance(
@@ -1890,7 +2961,7 @@ Status RV3032::getTrickleChargeResistance(
 Status RV3032::setBackupSwitchInterruptEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL3_BSIE_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL3, cmd::CONTROL3_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getBackupSwitchInterruptEnabled(bool& enabled) {
@@ -2224,7 +3295,8 @@ Status RV3032::ensurePrimaryCellConfiguration(
 Status RV3032::setClkoutEnabled(bool enabled) {
   return updateRegisterSingle(
       cmd::REG_ACTIVE_PMU, cmd::PMU_IMPLEMENTED_MASK,
-      cmd::PMU_NCLKE_MASK, enabled ? 0 : cmd::PMU_NCLKE_MASK);
+      cmd::PMU_NCLKE_MASK, enabled ? 0 : cmd::PMU_NCLKE_MASK,
+      QuiescenceGuard{});
 }
 
 Status RV3032::getClkoutEnabled(bool& enabled) {
@@ -2252,18 +3324,19 @@ Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
   }
 
   const bool persist = _config.enableEepromWrites;
-  if (isJobBusy() || _eeprom.state != EepromState::Idle ||
+  if (isJobBusy() || _eeprom.state != EepromState::IDLE ||
       (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.clkoutConfig.xtalFrequency = freq;
+  _job.activeKind = JobKind::SET_CLKOUT_CONFIG;
+  _job.clkoutTarget[3] = static_cast<uint8_t>(
+      (freqRaw << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK);
   _job.clkoutLegacyFrequency = true;
   _job.persistRegisterUpdate = persist;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS,
                                   "CLKOUT configuration in progress");
-  _job.state = JobState::ClkoutReadActive;
+  _job.state = JobState::CLKOUT_READ_ACTIVE;
   return _job.lastStatus;
 }
 
@@ -2305,17 +3378,26 @@ Status RV3032::setClkoutConfig(const ClkoutConfig& config) {
     return Status::Error(Err::INVALID_PARAM, "CLKOUT frequency out of range");
   }
   const bool persist = _config.enableEepromWrites;
-  if (isJobBusy() || _eeprom.state != EepromState::Idle ||
+  if (isJobBusy() || _eeprom.state != EepromState::IDLE ||
       (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.clkoutConfig = config;
+  _job.activeKind = JobKind::SET_CLKOUT_CONFIG;
+  const uint16_t hfd = static_cast<uint16_t>(
+      config.highFrequencyDivider - 1U);
+  _job.clkoutTarget[0] =
+      config.enabled ? 0 : cmd::PMU_NCLKE_MASK;
+  _job.clkoutTarget[2] = static_cast<uint8_t>(hfd & 0xFFU);
+  _job.clkoutTarget[3] = static_cast<uint8_t>(
+      (config.highFrequencyMode ? cmd::CLKOUT_OS_MASK : 0) |
+      ((static_cast<uint8_t>(config.xtalFrequency)
+        << cmd::CLKOUT_FREQ_SHIFT) & cmd::CLKOUT_FREQ_MASK) |
+      ((hfd >> 8) & cmd::CLKOUT_HFD_HIGH_MASK));
   _job.persistRegisterUpdate = persist;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS,
                                   "CLKOUT configuration in progress");
-  _job.state = JobState::ClkoutReadActive;
+  _job.state = JobState::CLKOUT_READ_ACTIVE;
   return _job.lastStatus;
 }
 
@@ -2336,7 +3418,7 @@ Status RV3032::getClkoutConfig(ClkoutConfig& config) {
 Status RV3032::setClockInterruptEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL2_CLKIE_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL2, cmd::CONTROL2_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getClockInterruptEnabled(bool& enabled) {
@@ -2359,7 +3441,7 @@ Status RV3032::setClockInterruptMaskConfig(
       (config.tempLowSource ? (1u << cmd::CLOCK_INT_CTLIE_BIT) : 0));
   return updateRegisterSingle(
       cmd::REG_CLOCK_INT_MASK, cmd::CLOCK_INT_MASK_IMPLEMENTED_MASK,
-      cmd::CLOCK_INT_MASK_IMPLEMENTED_MASK, value);
+      cmd::CLOCK_INT_MASK_IMPLEMENTED_MASK, value, QuiescenceGuard{});
 }
 
 Status RV3032::getClockInterruptMaskConfig(
@@ -2389,26 +3471,7 @@ Status RV3032::getClockOutputFlag(bool& triggered) {
 }
 
 Status RV3032::clearClockOutputFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  if (!workIdle()) {
-    return Status::Error(Err::BUSY, "Driver work already in progress");
-  }
-  _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.registerUpdateReg = cmd::REG_TEMP_LSB;
-  _job.registerUpdateImplementedMask = static_cast<uint8_t>(
-      cmd::EEPROM_EEF_MASK | cmd::TEMP_CLKF_MASK | cmd::TEMP_BSF_MASK);
-  _job.registerUpdateClearMask = cmd::TEMP_CLKF_MASK;
-  _job.registerUpdateRequiredMask = cmd::TEMP_CLKF_MASK;
-  _job.registerUpdateForbiddenMask = cmd::EEPROM_BUSY_MASK;
-  _job.registerUpdateGuardedClear = true;
-  _job.registerUpdateGuardFailureIsBusy = true;
-  _job.lastStatus = Status::Error(Err::IN_PROGRESS,
-                                  "Clock-output flag clear in progress");
-  _job.state = JobState::RegisterUpdateRead;
-  return _job.lastStatus;
+  return startTempLsbFlagClear(cmd::TEMP_CLKF_MASK);
 }
 
 // ===== Calibration Operations =====
@@ -2433,7 +3496,8 @@ Status RV3032::setOffsetPpm(float ppm) {
   const uint8_t raw = static_cast<uint8_t>(value & cmd::OFFSET_VALUE_MASK);
   return updateRegisterSingle(cmd::REG_ACTIVE_OFFSET,
                               cmd::OFFSET_REGISTER_IMPLEMENTED_MASK,
-                              cmd::OFFSET_VALUE_MASK, raw);
+                              cmd::OFFSET_VALUE_MASK, raw,
+                              QuiescenceGuard{});
 }
 
 Status RV3032::getOffsetPpm(float& ppm) {
@@ -2457,7 +3521,8 @@ Status RV3032::getOffsetPpm(float& ppm) {
 Status RV3032::setPowerOnResetInterruptEnabled(bool enabled) {
   return updateRegisterSingle(
       cmd::REG_ACTIVE_OFFSET, cmd::OFFSET_REGISTER_IMPLEMENTED_MASK,
-      cmd::OFFSET_PORIE_MASK, enabled ? cmd::OFFSET_PORIE_MASK : 0);
+      cmd::OFFSET_PORIE_MASK, enabled ? cmd::OFFSET_PORIE_MASK : 0,
+      QuiescenceGuard{});
 }
 
 Status RV3032::getPowerOnResetInterruptEnabled(bool& enabled) {
@@ -2470,7 +3535,8 @@ Status RV3032::getPowerOnResetInterruptEnabled(bool& enabled) {
 Status RV3032::setVoltageLowInterruptEnabled(bool enabled) {
   return updateRegisterSingle(
       cmd::REG_ACTIVE_OFFSET, cmd::OFFSET_REGISTER_IMPLEMENTED_MASK,
-      cmd::OFFSET_VLIE_MASK, enabled ? cmd::OFFSET_VLIE_MASK : 0);
+      cmd::OFFSET_VLIE_MASK, enabled ? cmd::OFFSET_VLIE_MASK : 0,
+      QuiescenceGuard{});
 }
 
 Status RV3032::getVoltageLowInterruptEnabled(bool& enabled) {
@@ -2506,13 +3572,22 @@ Status RV3032::startReadCoherentTemperatureJob(
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
-  if (operationTimeoutMs == 0 || operationTimeoutMs > 1000) {
+  uint32_t minimumTimeoutMs = 2U;
+  if (_config.nowMs == nullptr) {
+    const uint32_t fullTransferBound =
+        TWO_TRANSFER_JOB_CALLBACK_CAP * _config.i2cTimeoutMs;
+    const uint32_t twoDispatchMinimum = _config.i2cTimeoutMs + 2U;
+    minimumTimeoutMs = fullTransferBound > twoDispatchMinimum
+        ? fullTransferBound : twoDispatchMinimum;
+  }
+  if (operationTimeoutMs < minimumTimeoutMs || operationTimeoutMs > 1000) {
     return Status::Error(Err::INVALID_PARAM,
-                         "Temperature timeout must be 1..1000 ms");
+                         "Temperature timeout is not executable",
+                         static_cast<int32_t>(minimumTimeoutMs));
   }
   _job = JobOp{};
-  _job.activeKind = JobKind::ReadCoherentTemperature;
-  _job.state = JobState::ReadTemperatureFirst;
+  _job.activeKind = JobKind::READ_COHERENT_TEMPERATURE;
+  _job.state = JobState::READ_TEMPERATURE_FIRST;
   _job.deadlineMs = nowMs + operationTimeoutMs;
   _job.deadlineActive = true;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS,
@@ -2522,11 +3597,11 @@ Status RV3032::startReadCoherentTemperatureJob(
 
 Status RV3032::getReadCoherentTemperatureJobResult(
     CoherentTemperatureResult& result) const {
-  if (_job.activeKind == JobKind::ReadCoherentTemperature) {
+  if (_job.activeKind == JobKind::READ_COHERENT_TEMPERATURE) {
     return Status::Error(Err::IN_PROGRESS,
                          "Temperature job in progress");
   }
-  if (_job.completedKind != JobKind::ReadCoherentTemperature) {
+  if (_job.completedKind != JobKind::READ_COHERENT_TEMPERATURE) {
     return Status::Error(Err::JOB_RESULT_UNAVAILABLE,
                          "Temperature result unavailable");
   }
@@ -2542,16 +3617,6 @@ Status RV3032::setTemperatureEventConfig(
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
-  const uint8_t implemented[6] = {
-      cmd::CONTROL3_IMPLEMENTED_MASK, cmd::TS_CONTROL_IMPLEMENTED_MASK,
-      0xFF, cmd::EVI_IMPLEMENTED_MASK, 0xFF, 0xFF};
-  const uint8_t control3Mask = static_cast<uint8_t>(
-      (1u << cmd::CTRL3_THE_BIT) | (1u << cmd::CTRL3_TLE_BIT) |
-      (1u << cmd::CTRL3_THIE_BIT) | (1u << cmd::CTRL3_TLIE_BIT));
-  const uint8_t overwriteMask = static_cast<uint8_t>(
-      (1u << cmd::TS_TLOW_OVERWRITE_BIT) |
-      (1u << cmd::TS_THIGH_OVERWRITE_BIT));
-  const uint8_t clear[6] = {control3Mask, overwriteMask, 0, 0, 0xFF, 0xFF};
   const uint8_t control3 = static_cast<uint8_t>(
       (config.highEventEnabled ? (1u << cmd::CTRL3_THE_BIT) : 0) |
       (config.lowEventEnabled ? (1u << cmd::CTRL3_TLE_BIT) : 0) |
@@ -2560,20 +3625,17 @@ Status RV3032::setTemperatureEventConfig(
   const uint8_t overwrite = static_cast<uint8_t>(
       (config.lowTimestampOverwrite ? (1u << cmd::TS_TLOW_OVERWRITE_BIT) : 0) |
       (config.highTimestampOverwrite ? (1u << cmd::TS_THIGH_OVERWRITE_BIT) : 0));
-  const uint8_t set[6] = {
-      control3, overwrite, 0, 0,
-      static_cast<uint8_t>(config.lowThresholdC),
-      static_cast<uint8_t>(config.highThresholdC)};
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.registerBlockReg = cmd::REG_CONTROL3;
-  _job.registerBlockLen = 6;
-  std::memcpy(_job.registerBlockImplemented, implemented, 6);
-  std::memcpy(_job.registerBlockClear, clear, 6);
-  std::memcpy(_job.registerBlockSet, set, 6);
+  _job.activeKind = JobKind::SET_TEMPERATURE_EVENT_CONFIG;
+  _job.temperatureTarget[0] = control3;
+  _job.temperatureTarget[1] = overwrite;
+  _job.temperatureTarget[4] =
+      static_cast<uint8_t>(config.lowThresholdC);
+  _job.temperatureTarget[5] =
+      static_cast<uint8_t>(config.highThresholdC);
   _job.lastStatus = Status::Error(
       Err::IN_PROGRESS, "Temperature configuration in progress");
-  _job.state = JobState::TemperatureConfigRead;
+  _job.state = JobState::TEMPERATURE_READ_CONFIG;
   return _job.lastStatus;
 }
 
@@ -2604,7 +3666,7 @@ Status RV3032::setTemperatureReference(int16_t referenceRaw) {
   const uint8_t implemented[2] = {0xFF, 0xFF};
   const uint8_t clear[2] = {0xFF, 0xFF};
   return updateRegisterBlock(cmd::REG_ACTIVE_TREFERENCE0, 2,
-                             implemented, clear, values);
+                             implemented, clear, values, QuiescenceGuard{});
 }
 
 Status RV3032::getTemperatureReference(int16_t& referenceRaw) {
@@ -2639,7 +3701,11 @@ Status RV3032::clearTemperatureFlags() {
 Status RV3032::setEviEdge(bool rising) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::EVI_EB_BIT);
   return updateRegisterSingle(cmd::REG_EVI_CONTROL, cmd::EVI_IMPLEMENTED_MASK,
-                              bit, rising ? bit : 0);
+                              bit, rising ? bit : 0,
+                              QuiescenceGuard{
+                                  cmd::REG_CONTROL2,
+                                  static_cast<uint8_t>(
+                                      1u << cmd::CTRL2_EIE_BIT)});
 }
 
 Status RV3032::setEviDebounce(EviDebounce debounce) {
@@ -2653,14 +3719,21 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
 
   return updateRegisterSingle(
       cmd::REG_EVI_CONTROL, cmd::EVI_IMPLEMENTED_MASK, cmd::EVI_DB_MASK,
-      static_cast<uint8_t>((debounceRaw << cmd::EVI_DB_SHIFT) & cmd::EVI_DB_MASK));
+      static_cast<uint8_t>((debounceRaw << cmd::EVI_DB_SHIFT) &
+                           cmd::EVI_DB_MASK),
+      QuiescenceGuard{cmd::REG_CONTROL2,
+                      static_cast<uint8_t>(1u << cmd::CTRL2_EIE_BIT)});
 }
 
 Status RV3032::setEviOverwrite(bool enable) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::TS_EVI_OVERWRITE_BIT);
   return updateRegisterSingle(cmd::REG_TS_CONTROL,
                               cmd::TS_CONTROL_IMPLEMENTED_MASK,
-                              bit, enable ? bit : 0);
+                              bit, enable ? bit : 0,
+                              QuiescenceGuard{
+                                  cmd::REG_CONTROL2,
+                                  static_cast<uint8_t>(
+                                      1u << cmd::CTRL2_EIE_BIT)});
 }
 
 Status RV3032::getEviConfig(EviConfig& out) {
@@ -2686,7 +3759,7 @@ Status RV3032::getEviConfig(EviConfig& out) {
 Status RV3032::setEventInterruptEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL2_EIE_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL2, cmd::CONTROL2_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getEventInterruptEnabled(bool& enabled) {
@@ -2710,7 +3783,11 @@ Status RV3032::clearEventFlag() {
 Status RV3032::setEventSynchronizationEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::EVI_ESYN_BIT);
   return updateRegisterSingle(cmd::REG_EVI_CONTROL, cmd::EVI_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0,
+                              QuiescenceGuard{
+                                  cmd::REG_CONTROL2,
+                                  static_cast<uint8_t>(
+                                      1u << cmd::CTRL2_EIE_BIT)});
 }
 
 Status RV3032::getEventSynchronizationEnabled(bool& enabled) {
@@ -2723,7 +3800,7 @@ Status RV3032::getEventSynchronizationEnabled(bool& enabled) {
 Status RV3032::setClkoutStopDelayEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::EVI_CLKDE_BIT);
   return updateRegisterSingle(cmd::REG_EVI_CONTROL, cmd::EVI_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getClkoutStopDelayEnabled(bool& enabled) {
@@ -2736,7 +3813,7 @@ Status RV3032::getClkoutStopDelayEnabled(bool& enabled) {
 Status RV3032::setStopEnabled(bool enabled) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::CTRL2_STOP_BIT);
   return updateRegisterSingle(cmd::REG_CONTROL2, cmd::CONTROL2_IMPLEMENTED_MASK,
-                              bit, enabled ? bit : 0);
+                              bit, enabled ? bit : 0, QuiescenceGuard{});
 }
 
 Status RV3032::getStopEnabled(bool& enabled) {
@@ -2755,7 +3832,8 @@ Status RV3032::setGeneralPurposeBits(bool gp0, bool gp1) {
   const uint8_t set[2] = {
       static_cast<uint8_t>(gp0 ? (1u << cmd::CTRL1_GP0_BIT) : 0),
       static_cast<uint8_t>(gp1 ? (1u << cmd::CTRL2_GP1_BIT) : 0)};
-  return updateRegisterBlock(cmd::REG_CONTROL1, 2, implemented, clear, set);
+  return updateRegisterBlock(cmd::REG_CONTROL1, 2, implemented, clear, set,
+                             QuiescenceGuard{});
 }
 
 Status RV3032::getGeneralPurposeBits(bool& gp0, bool& gp1) {
@@ -2766,96 +3844,6 @@ Status RV3032::getGeneralPurposeBits(bool& gp0, bool& gp1) {
     gp1 = (values[1] & (1u << cmd::CTRL2_GP1_BIT)) != 0;
   }
   return st;
-}
-
-Status RV3032::unlockPasswordProtection(
-    const PasswordCredential& credential) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  if (!workIdle()) {
-    return Status::Error(Err::BUSY, "Driver work already in progress");
-  }
-  Status st = writeRegs(cmd::REG_PASSWORD0, credential.bytes,
-                        sizeof(credential.bytes));
-  if (st.ok()) {
-    // The active password inputs are write-only/read-zero. Callback success is
-    // not authentication evidence; a later protected operation must prove it.
-    _passwordStatus = PasswordProtectionStatus{};
-  }
-  return st;
-}
-
-Status RV3032::startConfigurePasswordProtectionJob(
-    const PasswordCredential& currentCredential,
-    const PasswordCredential& newCredential,
-    bool enable, uint32_t nowMs, uint32_t operationTimeoutMs) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  if (!workIdle()) {
-    return Status::Error(Err::BUSY, "Driver work already in progress");
-  }
-  if (!_config.enableEepromWrites) {
-    return Status::Error(Err::INVALID_CONFIG,
-                         "Password persistence requires generic EEPROM authority");
-  }
-  if (operationTimeoutMs <= 300 || operationTimeoutMs > 10000) {
-    return Status::Error(Err::INVALID_PARAM,
-                         "Password operation timeout out of range");
-  }
-  if (enable && newCredential.bytes[0] == 0 && newCredential.bytes[1] == 0 &&
-      newCredential.bytes[2] == 0 && newCredential.bytes[3] == 0) {
-    return Status::Error(Err::INVALID_PARAM,
-                         "All-zero persistent password is not permitted");
-  }
-
-  _job = JobOp{};
-  _job.activeKind = JobKind::PasswordProtection;
-  _job.state = JobState::Persistent;
-  _job.persistentState = EepromState::WritePassword;
-  _job.persistentWriteMode = true;
-  _job.persistentUseAddressList = true;
-  _job.currentCredential = currentCredential;
-  _job.newCredential = newCredential;
-  _job.passwordEnable = enable;
-  _job.deadlineMs = nowMs + operationTimeoutMs;
-  _job.mutationCutoffMs = nowMs + (operationTimeoutMs - 300);
-  _job.deadlineActive = true;
-  _job.mutationCutoffActive = true;
-  if (enable) {
-    _job.persistentLength = 6;
-    _job.persistentAddresses[0] = cmd::REG_EEPROM_PW_ENABLE;
-    _job.persistentAddresses[1] = cmd::REG_EEPROM_PASSWORD0;
-    _job.persistentAddresses[2] = cmd::REG_EEPROM_PASSWORD1;
-    _job.persistentAddresses[3] = cmd::REG_EEPROM_PASSWORD2;
-    _job.persistentAddresses[4] = cmd::REG_EEPROM_PASSWORD3;
-    _job.persistentAddresses[5] = cmd::REG_EEPROM_PW_ENABLE;
-    _job.userRamBuf[0] = 0;
-    std::memcpy(&_job.userRamBuf[1], newCredential.bytes, 4);
-    _job.userRamBuf[5] = 0xFF;
-  } else {
-    _job.persistentLength = 1;
-    _job.persistentAddresses[0] = cmd::REG_EEPROM_PW_ENABLE;
-    _job.userRamBuf[0] = 0;
-  }
-  _passwordStatus = PasswordProtectionStatus{};
-  _job.lastStatus = Status::Error(Err::IN_PROGRESS,
-                                  "Password protection job in progress");
-  return _job.lastStatus;
-}
-
-Status RV3032::getPasswordProtectionStatus(
-    PasswordProtectionStatus& status) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  if (_job.activeKind == JobKind::PasswordProtection) {
-    return Status::Error(Err::IN_PROGRESS,
-                         "Password protection job in progress");
-  }
-  status = _passwordStatus;
-  return Status::Ok();
 }
 
 Status RV3032::readTimestamp(TimestampSource source, Timestamp& out) {
@@ -2920,10 +3908,10 @@ Status RV3032::readTimestamp(TimestampSource source, Timestamp& out) {
   dt.day = bcdToBin(dayReg);
   dt.month = bcdToBin(monthReg);
   dt.year = static_cast<uint16_t>(2000 + bcdToBin(yearReg));
-  dt.weekday = computeWeekday(dt.year, dt.month, dt.day);
   if (!isValidDateTime(dt)) {
     return Status::Error(Err::INVALID_DATETIME, "Timestamp block contains invalid date/time");
   }
+  dt.weekday = weekdayFromValidDate(dt.year, dt.month, dt.day);
 
   out.count = buf[0];
   out.timeValid = true;
@@ -2948,18 +3936,22 @@ Status RV3032::resetTimestamp(TimestampSource source) {
       return Status::Error(Err::BUSY, "Driver work already in progress");
     }
     _job = JobOp{};
-    _job.activeKind = JobKind::RegisterUpdate;
+    _job.activeKind = JobKind::REGISTER_UPDATE;
     _job.registerUpdateReg = cmd::REG_TS_CONTROL;
+    _job.quiescenceGuard = QuiescenceGuard{
+        cmd::REG_CONTROL2,
+        static_cast<uint8_t>(1u << cmd::CTRL2_EIE_BIT)};
+    _job.quiescenceNextState = JobState::EVI_RESET_READ;
     _job.lastStatus = Status::Error(Err::IN_PROGRESS,
                                     "EVI timestamp reset in progress");
-    _job.state = JobState::EviResetRead;
+    _job.state = JobState::REGISTER_UPDATE_READ_QUIESCENCE;
     return _job.lastStatus;
   }
 
   const uint8_t mask = static_cast<uint8_t>(1u << bit);
   return updateRegisterSingle(cmd::REG_TS_CONTROL,
                               cmd::TS_CONTROL_IMPLEMENTED_MASK,
-                              mask, mask);
+                              mask, mask, QuiescenceGuard{});
 }
 
 // ===== Status Operations =====
@@ -3000,7 +3992,7 @@ Status RV3032::clearStatus(uint8_t mask) {
   const uint8_t temperatureFlagMask = static_cast<uint8_t>(
       (1u << cmd::STATUS_THF_BIT) | (1u << cmd::STATUS_TLF_BIT));
   _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
+  _job.activeKind = JobKind::REGISTER_UPDATE;
   _job.registerUpdateReg = cmd::REG_STATUS;
   _job.registerUpdateImplementedMask = 0xFF;
   _job.registerUpdateClearMask = mask;
@@ -3010,7 +4002,7 @@ Status RV3032::clearStatus(uint8_t mask) {
   _job.registerUpdateGuardedClear = true;
   _job.lastStatus = Status::Error(Err::IN_PROGRESS,
                                   "Status clear in progress");
-  _job.state = JobState::RegisterUpdateRead;
+  _job.state = JobState::REGISTER_UPDATE_READ;
   return _job.lastStatus;
 }
 
@@ -3026,26 +4018,7 @@ Status RV3032::getEepromHardwareFlags(EepromHardwareFlags& out) {
 }
 
 Status RV3032::clearEepromErrorFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-  if (!workIdle()) {
-    return Status::Error(Err::BUSY, "Driver work already in progress");
-  }
-  _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.registerUpdateReg = cmd::REG_TEMP_LSB;
-  _job.registerUpdateImplementedMask = static_cast<uint8_t>(
-      cmd::EEPROM_EEF_MASK | cmd::TEMP_CLKF_MASK | cmd::TEMP_BSF_MASK);
-  _job.registerUpdateClearMask = cmd::EEPROM_EEF_MASK;
-  _job.registerUpdateRequiredMask = cmd::EEPROM_EEF_MASK;
-  _job.registerUpdateForbiddenMask = cmd::EEPROM_BUSY_MASK;
-  _job.registerUpdateGuardedClear = true;
-  _job.registerUpdateGuardFailureIsBusy = true;
-  _job.lastStatus = Status::Error(Err::IN_PROGRESS,
-                                  "EEPROM failure flag clear in progress");
-  _job.state = JobState::RegisterUpdateRead;
-  return _job.lastStatus;
+  return startTempLsbFlagClear(cmd::EEPROM_EEF_MASK);
 }
 
 // ===== Low-Level Operations =====
@@ -3114,55 +4087,84 @@ bool RV3032::isValidDateTime(const DateTime& time) {
   return true;
 }
 
-uint8_t RV3032::computeWeekday(uint16_t year, uint8_t month, uint8_t day) {
-  uint32_t days = dateToDays(year, month, day);
-  return static_cast<uint8_t>((days + 4) % 7);
+Status RV3032::computeWeekday(uint16_t year, uint8_t month, uint8_t day,
+                              uint8_t& weekday) {
+  DateTime date{};
+  date.year = year;
+  date.month = month;
+  date.day = day;
+  if (!isValidDateTime(date)) {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid Gregorian date");
+  }
+  weekday = weekdayFromValidDate(year, month, day);
+  return Status::Ok();
 }
 
-bool RV3032::parseBuildTime(DateTime& out) {
+Status RV3032::parseBuildTime(DateTime& out) {
   const char* dateStr = __DATE__;
   const char* timeStr = __TIME__;
   if (!dateStr || !timeStr) {
-    return false;
+    return Status::Error(Err::INVALID_DATETIME, "Build time is unavailable");
   }
 
   char monthStr[4] = {0};
   int day = 0;
   int year = 0;
-  if (sscanf(dateStr, "%3s %d %d", monthStr, &day, &year) != 3) {
-    return false;
+  int dateConsumed = 0;
+  if (sscanf(dateStr, "%3s %d %d%n", monthStr, &day, &year,
+             &dateConsumed) != 3 || dateStr[dateConsumed] != '\0') {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid build date");
   }
 
   int hour = 0;
   int minute = 0;
   int second = 0;
-  if (sscanf(timeStr, "%d:%d:%d", &hour, &minute, &second) != 3) {
-    return false;
+  int timeConsumed = 0;
+  if (sscanf(timeStr, "%d:%d:%d%n", &hour, &minute, &second,
+             &timeConsumed) != 3 || timeStr[timeConsumed] != '\0') {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid build time");
   }
 
-  const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  const char* pos = strstr(months, monthStr);
-  if (!pos) {
-    return false;
+  static const char* const months[] = {
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  uint8_t month = 0;
+  for (uint8_t i = 0; i < 12; ++i) {
+    if (strcmp(monthStr, months[i]) == 0) {
+      month = static_cast<uint8_t>(i + 1U);
+      break;
+    }
+  }
+  if (month == 0) {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid build month");
+  }
+  if (year < 2000 || year > 2099 || day < 1 || day > 31 ||
+      hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+      second < 0 || second > 59) {
+    return Status::Error(Err::INVALID_DATETIME,
+                         "Build date/time out of range");
   }
 
-  uint8_t month = static_cast<uint8_t>((pos - months) / 3 + 1);
-
-  out.year = static_cast<uint16_t>(year);
-  out.month = month;
-  out.day = static_cast<uint8_t>(day);
-  out.hour = static_cast<uint8_t>(hour);
-  out.minute = static_cast<uint8_t>(minute);
-  out.second = static_cast<uint8_t>(second);
-  out.weekday = computeWeekday(out.year, out.month, out.day);
-
-  return isValidDateTime(out);
+  DateTime parsed{};
+  parsed.year = static_cast<uint16_t>(year);
+  parsed.month = month;
+  parsed.day = static_cast<uint8_t>(day);
+  parsed.hour = static_cast<uint8_t>(hour);
+  parsed.minute = static_cast<uint8_t>(minute);
+  parsed.second = static_cast<uint8_t>(second);
+  if (!isValidDateTime(parsed)) {
+    return Status::Error(Err::INVALID_DATETIME, "Build date/time out of range");
+  }
+  parsed.weekday = weekdayFromValidDate(parsed.year, parsed.month, parsed.day);
+  out = parsed;
+  return Status::Ok();
 }
 
 // ===== Private Helper Functions =====
 
-Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
-  if (!_initialized && !_beginInProgress) {
+Status RV3032::validateReadRegsRequest(
+    uint8_t reg, const uint8_t* buf, size_t len) const {
+  if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!buf || len == 0) {
@@ -3175,14 +4177,24 @@ Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
   if (!isKnownRegisterBlock(reg, len)) {
     return Status::Error(Err::INVALID_PARAM, "Register block out of range");
   }
+  if (intersectsUnsupportedPasswordRange(reg, len)) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Password registers are unsupported");
+  }
+  return Status::Ok();
+}
 
+Status RV3032::readRegs(uint8_t reg, uint8_t* buf, size_t len) {
+  const Status validation = validateReadRegsRequest(reg, buf, len);
+  if (!validation.ok()) return validation;
   uint8_t tx = reg;
   // Use tracked wrapper - health is updated automatically
   return _i2cWriteReadTracked(&tx, 1, buf, len);
 }
 
-Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
-  if (!_initialized && !_beginInProgress) {
+Status RV3032::validateWriteRegsRequest(
+    uint8_t reg, const uint8_t* buf, size_t len) const {
+  if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
   }
   if (!buf || len == 0) {
@@ -3198,12 +4210,86 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
   if (!isKnownRegisterBlock(reg, len)) {
     return Status::Error(Err::INVALID_PARAM, "Register block out of range");
   }
+  if (intersectsUnsupportedPasswordRange(reg, len)) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Password registers are unsupported");
+  }
+  return Status::Ok();
+}
 
+Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
+  const Status validation = validateWriteRegsRequest(reg, buf, len);
+  if (!validation.ok()) return validation;
+  static constexpr size_t kMaxWriteLen = 16;
   uint8_t tx[kMaxWriteLen] = {0};
   tx[0] = reg;
   std::memcpy(&tx[1], buf, len);
   // Use tracked wrapper - health is updated automatically
   return _i2cWriteTracked(tx, len + 1);
+}
+
+bool RV3032::intersectsUnsupportedPasswordRange(uint8_t reg, size_t len) {
+  const uint16_t start = reg;
+  const uint16_t end = static_cast<uint16_t>(start + len - 1U);
+  return (start <= cmd::REG_PASSWORD3 && end >= cmd::REG_PASSWORD0) ||
+         (start <= cmd::REG_EEPROM_PW_ENABLE &&
+          end >= cmd::REG_EEPROM_PASSWORD0);
+}
+
+bool RV3032::remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
+                             uint32_t& remainingMs) {
+  const int32_t signedRemaining = static_cast<int32_t>(deadlineMs - nowMs);
+  if (signedRemaining <= 0) {
+    remainingMs = 0;
+    return false;
+  }
+  remainingMs = static_cast<uint32_t>(signedRemaining);
+  return true;
+}
+
+uint32_t RV3032::earlierDeadline(uint32_t nowMs,
+                                 uint32_t first,
+                                 uint32_t second) {
+  uint32_t firstRemaining = 0;
+  uint32_t secondRemaining = 0;
+  const bool firstActive = remainingBefore(nowMs, first, firstRemaining);
+  const bool secondActive = remainingBefore(nowMs, second, secondRemaining);
+  if (!firstActive) return first;
+  if (!secondActive) return second;
+  return firstRemaining <= secondRemaining ? first : second;
+}
+
+RV3032::TimedTransferResult RV3032::readRegsBefore(
+    uint8_t reg, uint8_t* buf, size_t len,
+    uint32_t& nowMs, uint32_t deadlineMs) {
+  TimedTransferResult result{};
+  result.completedAtMs = nowMs;
+  const Status validation = validateReadRegsRequest(reg, buf, len);
+  if (!validation.ok()) {
+    result.status = validation;
+    return result;
+  }
+  const uint8_t tx = reg;
+  return _i2cWriteReadTrackedBefore(
+      &tx, 1, buf, len, nowMs, deadlineMs);
+}
+
+RV3032::TimedTransferResult RV3032::writeRegsBefore(
+    uint8_t reg, const uint8_t* buf, size_t len,
+    uint32_t& nowMs, uint32_t deadlineMs) {
+  TimedTransferResult result{};
+  result.completedAtMs = nowMs;
+  const Status validation = validateWriteRegsRequest(reg, buf, len);
+  if (!validation.ok()) {
+    result.status = validation;
+    return result;
+  }
+  static constexpr size_t kMaxWriteLen = 16;
+  uint8_t tx[kMaxWriteLen] = {0};
+  tx[0] = reg;
+  std::memcpy(&tx[1], buf, len);
+  return _i2cWriteTrackedBefore(
+      tx, len + 1U, nowMs, deadlineMs);
 }
 
 Status RV3032::ensureRead(uint8_t reg, uint8_t* data, size_t len,
@@ -3626,166 +4712,189 @@ Status RV3032::cleanupPrimaryCellEnsure(
   return Status::Ok();
 }
 
-Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
+Status RV3032::processPersistentJob(uint32_t& nowMs, bool& callbackUsed) {
   callbackUsed = false;
   const Status inProgress = Status::Error(Err::IN_PROGRESS, "Persistent job in progress");
-  auto currentAfterCallback = [&]() -> uint32_t {
-    if (_config.nowMs != nullptr) {
-      const uint32_t observedNowMs = _nowMs();
-      if (static_cast<int32_t>(observedNowMs - nowMs) > 0) {
-        return observedNowMs;
-      }
-      return nowMs;
+  auto isCleanupState = [&]() -> bool {
+    return _job.persistentState == EepromState::RESTORE_SELECTED_ACTIVE ||
+           _job.persistentState == EepromState::VERIFY_SELECTED_ACTIVE ||
+           _job.persistentState == EepromState::RESTORE_ACTIVE ||
+           _job.persistentState == EepromState::CLEANUP_WAIT_READY ||
+           _job.persistentState == EepromState::VERIFY_ACTIVE ||
+           _job.persistentState == EepromState::RESTORE_CONTROL1 ||
+           _job.persistentState == EepromState::VERIFY_CONTROL1 ||
+           _job.persistentState == EepromState::SETTLE;
+  };
+  auto phaseDeadlineApplies = [&]() -> bool {
+    return _job.persistentState == EepromState::WAIT_READY ||
+           _job.persistentState == EepromState::POLL_READ1 ||
+           _job.persistentState == EepromState::READ_DATA1 ||
+           _job.persistentState == EepromState::POLL_READ2 ||
+           _job.persistentState == EepromState::READ_DATA2 ||
+           _job.persistentState == EepromState::WAIT_READY_POST_CMD ||
+           _job.persistentState == EepromState::CLEANUP_WAIT_READY;
+  };
+  auto transferBoundary = [&](bool forwardWrite) -> uint32_t {
+    uint32_t boundary = _job.deadlineActive
+        ? _job.deadlineMs
+        : nowMs + _config.i2cTimeoutMs + 1U;
+    if (phaseDeadlineApplies()) {
+      boundary = earlierDeadline(
+          nowMs, boundary, _job.persistentPhaseDeadlineMs);
     }
-    // With no observable clock, charge the callback's full configured bound
-    // before starting a vendor-mandated post-command wait.
-    return nowMs + _config.i2cTimeoutMs;
+    if (forwardWrite && !isCleanupState() && _job.mutationCutoffActive) {
+      boundary = earlierDeadline(nowMs, boundary, _job.mutationCutoffMs);
+    }
+    return boundary;
+  };
+  auto readPersistent = [&](uint8_t reg, uint8_t* data,
+                            size_t len) -> Status {
+    const TimedTransferResult result =
+        readRegsBefore(reg, data, len, nowMs, transferBoundary(false));
+    callbackUsed = result.callbackInvoked;
+    return result.status;
+  };
+  auto writePersistent = [&](uint8_t reg, const uint8_t* data,
+                             size_t len) -> Status {
+    const TimedTransferResult result =
+        writeRegsBefore(reg, data, len, nowMs, transferBoundary(true));
+    callbackUsed = result.callbackInvoked;
+    return result.status;
   };
   auto shouldRestoreSelectedActive = [&]() -> bool {
-    return _job.activeKind == JobKind::None &&
+    return _job.activeKind == JobKind::NONE &&
         _job.persistentSafeC0Verified &&
         _job.persistentAddress > cmd::REG_ACTIVE_PMU &&
         _job.persistentAddress <= cmd::REG_ACTIVE_TREFERENCE1;
   };
   auto beginActiveRestore = [&]() {
     _job.persistentState = shouldRestoreSelectedActive()
-        ? EepromState::RestoreSelectedActive
-        : EepromState::RestoreActive;
+        ? EepromState::RESTORE_SELECTED_ACTIVE
+        : EepromState::RESTORE_ACTIVE;
   };
-  auto rememberFailure = [&](const Status& st) {
-    if (_job.completedStatus.ok()) {
-      _job.completedStatus = st;
+  auto rememberOperationFailure = [&](const Status& st) {
+    if (!st.ok() && _job.persistentOperationStatus.ok()) {
+      _job.persistentOperationStatus = st;
     }
+  };
+  auto exposeEvidence = [&]() {
+    _job.persistentRead.operationStatus =
+        _job.persistentOperationStatus;
+    _job.persistentRead.cleanupStatus =
+        _job.persistentCleanupStatus;
+    _job.userEepromWrite.operationStatus =
+        _job.persistentOperationStatus;
+    _job.userEepromWrite.cleanupStatus =
+        _job.persistentCleanupStatus;
+  };
+  auto beginCleanup = [&]() {
+    // Entering the cleanup owner makes final access-state proof mandatory,
+    // even when the original Control 1 already had EERD set and no forward
+    // write was needed.  This latch also preserves semantic cleanup-failure
+    // precedence if a cleanup callback is late or cannot be dispatched.
+    _job.persistentCleanupRequired = true;
     _job.persistentReadyChecks = 0;
     _job.persistentNotBeforeMs = 0;
     _job.persistentPhaseDeadlineMs =
         nowMs + EEPROM_CLEANUP_READY_TIMEOUT_MS;
     _job.persistentState = _job.persistentControl1Valid
-        ? EepromState::CleanupWaitReady
-        : (_job.passwordAuthorizationMayBeActive
-               ? EepromState::CleanupLockPassword
-               : EepromState::RestoreActive);
+        ? EepromState::CLEANUP_WAIT_READY
+        : EepromState::RESTORE_ACTIVE;
   };
-  auto finishCleanupFailure = [&](const Status& st) -> Status {
-    if (_job.persistentCleanupStatus.ok()) {
+  auto rememberFailure = [&](const Status& st) {
+    rememberOperationFailure(st);
+    beginCleanup();
+  };
+  auto rememberCleanupFailure = [&](const Status& st,
+                                    bool proofStillPossible) {
+    if (!st.ok() && _job.persistentCleanupStatus.ok()) {
       _job.persistentCleanupStatus = st;
     }
-    if (_job.activeKind == JobKind::PasswordProtection &&
-        _job.passwordAuthorizationMayBeActive) {
-      _job.persistentState = EepromState::CleanupLockPassword;
-      return inProgress;
-    }
-    return _job.persistentCleanupStatus;
+    if (!proofStillPossible) _job.persistentCleanupProofPossible = false;
+  };
+  auto finishOperation = [&](const Status& st) -> Status {
+    rememberOperationFailure(st);
+    exposeEvidence();
+    return _job.persistentOperationStatus;
+  };
+  auto finishCleanupFailure = [&](const Status& st) -> Status {
+    rememberCleanupFailure(st, false);
+    _job.persistentRead.cleanupVerified = false;
+    _job.userEepromWrite.cleanupVerified = false;
+    exposeEvidence();
+    return Status::Error(Err::EEPROM_CLEANUP_FAILED,
+                         "Persistent access cleanup failed",
+                         _job.persistentCleanupStatus.detail);
   };
   auto currentAddress = [&]() -> uint8_t {
-    return _job.persistentUseAddressList
-        ? _job.persistentAddresses[_job.persistentIndex]
-        : static_cast<uint8_t>(_job.persistentAddress +
-                               _job.persistentIndex);
+    return static_cast<uint8_t>(_job.persistentAddress +
+                                _job.persistentIndex);
   };
   auto nextByteOrCleanup = [&]() {
     ++_job.persistentIndex;
     _job.persistentWriteAttempted = false;
-    if (_job.activeKind == JobKind::PasswordProtection &&
-        _job.persistentIndex == 1) {
-      // CA is persisted as disabled first.  Disable the active protection
-      // mirror before changing any persistent or active password byte.
-      _job.persistentState = EepromState::ApplyPassword;
-    } else if (_job.persistentIndex >= _job.persistentLength) {
-      if (_job.activeKind == JobKind::PasswordProtection) {
-        _job.persistentState = _job.passwordEnable
-            ? EepromState::ApplyPasswordBytes
-            : EepromState::RestoreActive;
-      } else {
-        beginActiveRestore();
-      }
+    if (_job.persistentIndex >= _job.persistentLength) {
+      beginActiveRestore();
     } else {
-      _job.persistentState = EepromState::WriteAddr;
+      _job.persistentState = EepromState::WRITE_ADDR;
     }
   };
 
-  const bool cleanupState =
-      _job.persistentState == EepromState::RestoreSelectedActive ||
-      _job.persistentState == EepromState::VerifySelectedActive ||
-      _job.persistentState == EepromState::RestoreActive ||
-      _job.persistentState == EepromState::CleanupWaitReady ||
-      _job.persistentState == EepromState::VerifyActive ||
-      _job.persistentState == EepromState::RestoreControl1 ||
-      _job.persistentState == EepromState::VerifyControl1 ||
-      _job.persistentState == EepromState::Settle ||
-      _job.persistentState == EepromState::FinalizePasswordEnable ||
-      _job.persistentState == EepromState::CleanupLockPassword;
+  const bool cleanupState = isCleanupState();
   if (!cleanupState && !_job.persistentWriteAttempted &&
       _job.mutationCutoffActive &&
       hasDeadlinePassed(nowMs, _job.mutationCutoffMs)) {
     const Status cutoff = Status::Error(
         Err::TIMEOUT, "Persistent operation cleanup reserve reached");
-    if (_job.persistentCleanupRequired ||
-        _job.passwordAuthorizationMayBeActive) {
+    if (_job.persistentCleanupRequired) {
       rememberFailure(cutoff);
       return inProgress;
     }
-    // No device state has changed, so there is nothing to clean up.  In
-    // particular, do not start password authentication or invent C0/C1
-    // restore writes after the reserved cleanup interval begins.
-    return cutoff;
+    // No device state has changed, so there is nothing to clean up. Do not
+    // invent C0/Control 1 restore writes after the reserved interval begins.
+    return finishOperation(cutoff);
   }
 
   switch (_job.persistentState) {
-    case EepromState::WritePassword: {
-      _job.passwordAuthorizationMayBeActive = true;
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_PASSWORD0,
-                            _job.currentCredential.bytes,
-                            sizeof(_job.currentCredential.bytes));
+    case EepromState::READ_CONTROL1: {
+      Status st = readPersistent(cmd::REG_CONTROL1, &_job.persistentControl1, 1);
       if (!st.ok()) {
-        rememberFailure(st);
-        return inProgress;
-      }
-      _job.persistentState = EepromState::ReadControl1;
-      return inProgress;
-    }
-    case EepromState::ReadControl1: {
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_CONTROL1, &_job.persistentControl1, 1);
-      if (!st.ok()) {
-        if (_job.persistentCleanupRequired ||
-            _job.passwordAuthorizationMayBeActive) {
+        if (_job.persistentCleanupRequired) {
           rememberFailure(st);
           return inProgress;
         }
-        return st;
+        return finishOperation(st);
       }
       _job.persistentControl1Valid = true;
-      _job.persistentState = EepromState::EnableEerd;
+      _job.persistentState = EepromState::ENABLE_EERD;
       return inProgress;
     }
-    case EepromState::EnableEerd: {
+    case EepromState::ENABLE_EERD: {
       const uint8_t desired = static_cast<uint8_t>(
           (_job.persistentControl1 & cmd::CONTROL1_IMPLEMENTED_MASK) |
           cmd::CONTROL1_EERD_MASK);
       if ((_job.persistentControl1 & cmd::CONTROL1_IMPLEMENTED_MASK) == desired) {
-        _job.persistentState = EepromState::VerifyEerd;
+        _job.persistentState = EepromState::VERIFY_EERD;
         return inProgress;
       }
-      const uint8_t payload[2] = {cmd::REG_CONTROL1, desired};
-      _job.persistentCleanupRequired = true;
-      callbackUsed = true;
-      Status st = _i2cWriteTracked(payload, sizeof(payload));
+      Status st = writePersistent(cmd::REG_CONTROL1, &desired, 1);
+      if (callbackUsed) _job.persistentCleanupRequired = true;
       if (!st.ok()) {
         // A failed mutating callback may still have reached the device.  Once
         // Control 1 is known, every such ambiguity must take the bounded
         // restore-and-verify path instead of returning with EERD possibly set.
-        rememberFailure(st);
-        return inProgress;
+        if (_job.persistentCleanupRequired) {
+          rememberFailure(st);
+          return inProgress;
+        }
+        return finishOperation(st);
       }
-      _job.persistentState = EepromState::VerifyEerd;
+      _job.persistentState = EepromState::VERIFY_EERD;
       return inProgress;
     }
-    case EepromState::VerifyEerd: {
+    case EepromState::VERIFY_EERD: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_CONTROL1, &value, 1);
+      Status st = readPersistent(cmd::REG_CONTROL1, &value, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3798,12 +4907,12 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
                                       "EERD enable verification failed"));
         return inProgress;
       }
-      _job.persistentState = EepromState::WaitReady;
+      _job.persistentState = EepromState::WAIT_READY;
       _job.persistentReadyChecks = 0;
       _job.persistentPhaseDeadlineMs = nowMs + EEPROM_READY_TIMEOUT_MS;
       return inProgress;
     }
-    case EepromState::WaitReady: {
+    case EepromState::WAIT_READY: {
       if (_job.persistentReadyChecks != 0 &&
           !hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
@@ -3814,8 +4923,7 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
         return inProgress;
       }
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3829,12 +4937,11 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
         _job.persistentNotBeforeMs = nowMs + EEPROM_BUSY_POLL_INTERVAL_MS;
         return inProgress;
       }
-      _job.persistentState = EepromState::ReadActiveC0;
+      _job.persistentState = EepromState::READ_ACTIVE_C0;
       return inProgress;
     }
-    case EepromState::ReadActiveC0: {
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_ACTIVE_PMU, &_job.persistentActiveC0, 1);
+    case EepromState::READ_ACTIVE_C0: {
+      Status st = readPersistent(cmd::REG_ACTIVE_PMU, &_job.persistentActiveC0, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3842,30 +4949,31 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
       _job.persistentActiveC0Valid = true;
       _job.persistentSafeC0 = static_cast<uint8_t>(
           _job.persistentActiveC0 & cmd::PMU_PRIMARY_PRESERVE_MASK);
-      _job.persistentState = EepromState::WriteSafeC0;
+      _job.persistentState = EepromState::WRITE_SAFE_C0;
       return inProgress;
     }
-    case EepromState::WriteSafeC0:
+    case EepromState::WRITE_SAFE_C0:
       if ((_job.persistentActiveC0 & cmd::PMU_IMPLEMENTED_MASK) ==
           _job.persistentSafeC0) {
-        _job.persistentState = EepromState::VerifySafeC0;
+        _job.persistentState = EepromState::VERIFY_SAFE_C0;
         return inProgress;
       }
-      _job.persistentCleanupRequired = true;
-      callbackUsed = true;
       {
-        Status st = writeRegs(cmd::REG_ACTIVE_PMU, &_job.persistentSafeC0, 1);
+        Status st = writePersistent(cmd::REG_ACTIVE_PMU, &_job.persistentSafeC0, 1);
+        if (callbackUsed) _job.persistentCleanupRequired = true;
         if (!st.ok()) {
-          rememberFailure(st);
-          return inProgress;
+          if (_job.persistentCleanupRequired) {
+            rememberFailure(st);
+            return inProgress;
+          }
+          return finishOperation(st);
         }
       }
-      _job.persistentState = EepromState::VerifySafeC0;
+      _job.persistentState = EepromState::VERIFY_SAFE_C0;
       return inProgress;
-    case EepromState::VerifySafeC0: {
+    case EepromState::VERIFY_SAFE_C0: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_ACTIVE_PMU, &value, 1);
+      Status st = readPersistent(cmd::REG_ACTIVE_PMU, &value, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3876,24 +4984,22 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
         return inProgress;
       }
       _job.persistentSafeC0Verified = true;
-      _job.persistentState = EepromState::WriteAddr;
+      _job.persistentState = EepromState::WRITE_ADDR;
       return inProgress;
     }
-    case EepromState::WriteAddr: {
+    case EepromState::WRITE_ADDR: {
       const uint8_t address = currentAddress();
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_EE_ADDRESS, &address, 1);
+      Status st = writePersistent(cmd::REG_EE_ADDRESS, &address, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
       }
-      _job.persistentState = EepromState::VerifyAddr;
+      _job.persistentState = EepromState::VERIFY_ADDR;
       return inProgress;
     }
-    case EepromState::VerifyAddr: {
+    case EepromState::VERIFY_ADDR: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_ADDRESS, &value, 1);
+      Status st = readPersistent(cmd::REG_EE_ADDRESS, &value, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3903,84 +5009,88 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
                                       "EEPROM address staging mismatch"));
         return inProgress;
       }
-      _job.persistentState = EepromState::WriteSentinel1;
+      _job.persistentState = EepromState::WRITE_SENTINEL1;
       return inProgress;
     }
-    case EepromState::WriteSentinel1:
+    case EepromState::WRITE_SENTINEL1:
       _job.persistentSentinel = cmd::PERSISTENT_READ_SENTINEL;
-      callbackUsed = true;
       {
-        Status st = writeRegs(cmd::REG_EE_DATA, &_job.persistentSentinel, 1);
+        Status st = writePersistent(cmd::REG_EE_DATA, &_job.persistentSentinel, 1);
         if (!st.ok()) {
           rememberFailure(st);
           return inProgress;
         }
       }
-      _job.persistentState = EepromState::VerifySentinel1;
+      _job.persistentState = EepromState::VERIFY_SENTINEL1;
       return inProgress;
-    case EepromState::VerifySentinel1: {
+    case EepromState::VERIFY_SENTINEL1: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_DATA, &value, 1);
+      Status st = readPersistent(cmd::REG_EE_DATA, &value, 1);
       if (!st.ok() || value != _job.persistentSentinel) {
         rememberFailure(st.ok() ? Status::Error(Err::EEPROM_VERIFY_FAILED,
                                                  "EEPROM sentinel staging mismatch") : st);
         return inProgress;
       }
-      _job.persistentState = EepromState::PreReadBusy1;
+      _job.persistentState = EepromState::PRE_READ_BUSY1;
       return inProgress;
     }
-    case EepromState::PreReadBusy1:
-    case EepromState::PreReadBusy2: {
+    case EepromState::PRE_READ_BUSY1:
+    case EepromState::PRE_READ_BUSY2: {
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok() || (temp & cmd::EEPROM_BUSY_MASK) != 0) {
         rememberFailure(st.ok() ? Status::Error(Err::BUSY,
                                                  "EEPROM busy before read-one") : st);
         return inProgress;
       }
-      _job.persistentState = (_job.persistentState == EepromState::PreReadBusy1)
-          ? EepromState::ReadCmd1 : EepromState::ReadCmd2;
+      _job.persistentState = (_job.persistentState == EepromState::PRE_READ_BUSY1)
+          ? EepromState::READ_CMD1 : EepromState::READ_CMD2;
       return inProgress;
     }
-    case EepromState::ReadCmd1:
-    case EepromState::ReadCmd2: {
-      const bool second = _job.persistentState == EepromState::ReadCmd2;
+    case EepromState::READ_CMD1:
+    case EepromState::READ_CMD2: {
+      const bool second = _job.persistentState == EepromState::READ_CMD2;
       const uint8_t command = cmd::EEPROM_CMD_READ_ONE;
-      _job.persistentCleanupRequired = true;
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_EE_COMMAND, &command, 1);
-      (void)st;  // A command error is reconciled by direct persistent proof.
-      const uint32_t commandCompletedMs = currentAfterCallback();
+      Status st = writePersistent(cmd::REG_EE_COMMAND, &command, 1);
+      if (callbackUsed) _job.persistentCleanupRequired = true;
+      if (!callbackUsed && !st.ok()) {
+        if (_job.persistentCleanupRequired) {
+          rememberFailure(st);
+          return inProgress;
+        }
+        return finishOperation(st);
+      }
+      // A dispatched READ_ONE is never replayed. Preserve its callback
+      // failure while direct persistent proof reconciles the content.
+      rememberOperationFailure(st);
+      const uint32_t commandCompletedMs = nowMs;
       _job.persistentNotBeforeMs =
           commandCompletedMs + EEPROM_READ_SETTLE_MS;
       _job.persistentReadyChecks = 0;
       _job.persistentPhaseDeadlineMs =
           commandCompletedMs + EEPROM_READ_TIMEOUT_MS;
-      _job.persistentState = second ? EepromState::WaitRead2
-                                    : EepromState::WaitRead1;
+      _job.persistentState = second ? EepromState::WAIT_READ2
+                                    : EepromState::WAIT_READ1;
       return inProgress;
     }
-    case EepromState::WaitRead1:
-    case EepromState::WaitRead2:
+    case EepromState::WAIT_READ1:
+    case EepromState::WAIT_READ2:
       if (!hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
       }
-      _job.persistentState = (_job.persistentState == EepromState::WaitRead1)
-          ? EepromState::PollRead1 : EepromState::PollRead2;
+      _job.persistentState = (_job.persistentState == EepromState::WAIT_READ1)
+          ? EepromState::POLL_READ1 : EepromState::POLL_READ2;
       return inProgress;
-    case EepromState::PollRead1:
-    case EepromState::PollRead2: {
-      const bool second = _job.persistentState == EepromState::PollRead2;
+    case EepromState::POLL_READ1:
+    case EepromState::POLL_READ2: {
+      const bool second = _job.persistentState == EepromState::POLL_READ2;
       if (hasDeadlinePassed(nowMs, _job.persistentPhaseDeadlineMs)) {
         rememberFailure(Status::Error(Err::TIMEOUT,
                                       "EEPROM read-one phase deadline reached"));
         return inProgress;
       }
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -3992,53 +5102,49 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
           return inProgress;
         }
         _job.persistentNotBeforeMs = nowMs + EEPROM_BUSY_POLL_INTERVAL_MS;
-        _job.persistentState = second ? EepromState::WaitRead2
-                                      : EepromState::WaitRead1;
+        _job.persistentState = second ? EepromState::WAIT_READ2
+                                      : EepromState::WAIT_READ1;
         return inProgress;
       }
-      _job.persistentState = second ? EepromState::ReadData2
-                                    : EepromState::ReadData1;
+      _job.persistentState = second ? EepromState::READ_DATA2
+                                    : EepromState::READ_DATA1;
       return inProgress;
     }
-    case EepromState::ReadData1: {
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_DATA, &_job.persistentFirstRead, 1);
+    case EepromState::READ_DATA1: {
+      Status st = readPersistent(cmd::REG_EE_DATA, &_job.persistentFirstRead, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
       }
       _job.persistentSentinel = static_cast<uint8_t>(
           _job.persistentFirstRead ^ 0xFFu);
-      _job.persistentState = EepromState::WriteSentinel2;
+      _job.persistentState = EepromState::WRITE_SENTINEL2;
       return inProgress;
     }
-    case EepromState::WriteSentinel2:
-      callbackUsed = true;
+    case EepromState::WRITE_SENTINEL2:
       {
-        Status st = writeRegs(cmd::REG_EE_DATA, &_job.persistentSentinel, 1);
+        Status st = writePersistent(cmd::REG_EE_DATA, &_job.persistentSentinel, 1);
         if (!st.ok()) {
           rememberFailure(st);
           return inProgress;
         }
       }
-      _job.persistentState = EepromState::VerifySentinel2;
+      _job.persistentState = EepromState::VERIFY_SENTINEL2;
       return inProgress;
-    case EepromState::VerifySentinel2: {
+    case EepromState::VERIFY_SENTINEL2: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_DATA, &value, 1);
+      Status st = readPersistent(cmd::REG_EE_DATA, &value, 1);
       if (!st.ok() || value != _job.persistentSentinel) {
         rememberFailure(st.ok() ? Status::Error(Err::EEPROM_VERIFY_FAILED,
                                                  "Second sentinel staging mismatch") : st);
         return inProgress;
       }
-      _job.persistentState = EepromState::PreReadBusy2;
+      _job.persistentState = EepromState::PRE_READ_BUSY2;
       return inProgress;
     }
-    case EepromState::ReadData2: {
+    case EepromState::READ_DATA2: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_DATA, &value, 1);
+      Status st = readPersistent(cmd::REG_EE_DATA, &value, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -4051,6 +5157,9 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
       if (!_job.persistentWriteMode) {
         _job.persistentRead.data[_job.persistentIndex] = value;
         ++_job.persistentRead.length;
+        if (_job.persistentRead.length == _job.persistentLength) {
+          _job.persistentRead.persistentVerified = true;
+        }
         nextByteOrCleanup();
         return inProgress;
       }
@@ -4061,114 +5170,126 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
                                         "User EEPROM durable readback mismatch"));
           return inProgress;
         }
-        if (!_job.completedStatus.ok()) {
+        ++_job.userEepromWrite.completedBytes;
+        ++_job.userEepromWrite.durablyVerifiedBytes;
+        if (!_job.persistentOperationStatus.ok()) {
           beginActiveRestore();
           return inProgress;
         }
-        ++_job.userEepromWrite.completedBytes;
-        ++_job.userEepromWrite.durablyVerifiedBytes;
         nextByteOrCleanup();
         return inProgress;
       }
       if (value == desired) {
         ++_job.userEepromWrite.completedBytes;
         ++_job.userEepromWrite.durablyVerifiedBytes;
+        if (!_job.persistentOperationStatus.ok()) {
+          beginActiveRestore();
+          return inProgress;
+        }
         nextByteOrCleanup();
         return inProgress;
       }
+      if (!_job.persistentOperationStatus.ok()) {
+        beginActiveRestore();
+        return inProgress;
+      }
       _job.persistentDesired = desired;
-      _job.persistentState = EepromState::ClearEef;
+      _job.persistentState = EepromState::CLEAR_EEF;
       return inProgress;
     }
-    case EepromState::ClearEef: {
+    case EepromState::CLEAR_EEF: {
       const uint8_t value = cmd::EEPROM_CLEAR_EEF_VALUE;
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_TEMP_LSB, &value, 1);
+      Status st = writePersistent(cmd::REG_TEMP_LSB, &value, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
       }
-      _job.persistentState = EepromState::VerifyEef;
+      _job.persistentState = EepromState::VERIFY_EEF;
       return inProgress;
     }
-    case EepromState::VerifyEef: {
+    case EepromState::VERIFY_EEF: {
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok() || (temp & (cmd::EEPROM_BUSY_MASK | cmd::EEPROM_EEF_MASK)) != 0) {
         rememberFailure(st.ok() ? Status::Error(Err::EEPROM_WRITE_FAILED,
                                                  "EEPROM not ready for write-one") : st);
         return inProgress;
       }
-      _job.persistentState = EepromState::WriteData;
+      _job.persistentState = EepromState::WRITE_DATA;
       return inProgress;
     }
-    case EepromState::WriteData:
-      callbackUsed = true;
+    case EepromState::WRITE_DATA:
       {
-        Status st = writeRegs(cmd::REG_EE_DATA, &_job.persistentDesired, 1);
+        Status st = writePersistent(cmd::REG_EE_DATA, &_job.persistentDesired, 1);
         if (!st.ok()) {
           rememberFailure(st);
           return inProgress;
         }
       }
-      _job.persistentState = EepromState::VerifyData;
+      _job.persistentState = EepromState::VERIFY_DATA;
       return inProgress;
-    case EepromState::VerifyData: {
+    case EepromState::VERIFY_DATA: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_EE_DATA, &value, 1);
+      Status st = readPersistent(cmd::REG_EE_DATA, &value, 1);
       if (!st.ok() || value != _job.persistentDesired) {
         rememberFailure(st.ok() ? Status::Error(Err::EEPROM_VERIFY_FAILED,
                                                  "EEPROM data staging mismatch") : st);
         return inProgress;
       }
-      _job.persistentState = EepromState::WaitReadyPreCmd;
+      _job.persistentState = EepromState::WAIT_READY_PRE_CMD;
       return inProgress;
     }
-    case EepromState::WaitReadyPreCmd: {
+    case EepromState::WAIT_READY_PRE_CMD: {
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok() || (temp & cmd::EEPROM_BUSY_MASK) != 0) {
         rememberFailure(st.ok() ? Status::Error(Err::BUSY,
                                                  "EEPROM busy before write-one") : st);
         return inProgress;
       }
-      _job.persistentState = EepromState::WriteCmd;
+      _job.persistentState = EepromState::WRITE_CMD;
       return inProgress;
     }
-    case EepromState::WriteCmd: {
+    case EepromState::WRITE_CMD: {
       const uint8_t command = cmd::EEPROM_CMD_WRITE_ONE;
-      _job.persistentWriteAttempted = true;
+      const TimedTransferResult transfer = writeRegsBefore(
+          cmd::REG_EE_COMMAND, &command, 1, nowMs, transferBoundary(true));
+      callbackUsed = transfer.callbackInvoked;
+      _job.persistentWriteAttempted = transfer.callbackInvoked;
+      if (!transfer.callbackInvoked) {
+        if (_job.persistentCleanupRequired) {
+          rememberFailure(transfer.status);
+          return inProgress;
+        }
+        return finishOperation(transfer.status);
+      }
       _job.persistentCleanupRequired = true;
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_EE_COMMAND, &command, 1);
-      (void)st;  // Never resent; later READ_ONE proof determines durability.
-      const uint32_t commandCompletedMs = currentAfterCallback();
+      rememberOperationFailure(transfer.status);
+      // Never resend this may-have-committed command. Later READ_ONE proof
+      // determines durability regardless of the effective callback status.
+      const uint32_t commandCompletedMs = nowMs;
       _job.persistentNotBeforeMs =
           commandCompletedMs + EEPROM_WRITE_SETTLE_MS;
       _job.persistentReadyChecks = 0;
       _job.persistentPhaseDeadlineMs =
           _job.persistentNotBeforeMs + _config.eepromTimeoutMs;
-      _job.persistentState = EepromState::WaitWriteSettle;
+      _job.persistentState = EepromState::WAIT_WRITE_SETTLE;
       return inProgress;
     }
-    case EepromState::WaitWriteSettle:
+    case EepromState::WAIT_WRITE_SETTLE:
       if (!hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
       }
-      _job.persistentState = EepromState::WaitReadyPostCmd;
+      _job.persistentState = EepromState::WAIT_READY_POST_CMD;
       return inProgress;
-    case EepromState::WaitReadyPostCmd: {
+    case EepromState::WAIT_READY_POST_CMD: {
       if (hasDeadlinePassed(nowMs, _job.persistentPhaseDeadlineMs)) {
         rememberFailure(Status::Error(Err::TIMEOUT,
                                       "EEPROM write-one phase deadline reached"));
         return inProgress;
       }
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
         rememberFailure(st);
         return inProgress;
@@ -4180,111 +5301,23 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
           return inProgress;
         }
         _job.persistentNotBeforeMs = nowMs + EEPROM_BUSY_POLL_INTERVAL_MS;
-        _job.persistentState = EepromState::WaitWriteSettle;
+        _job.persistentState = EepromState::WAIT_WRITE_SETTLE;
         return inProgress;
       }
       if ((temp & cmd::EEPROM_EEF_MASK) != 0) {
-        if (_job.completedStatus.ok()) {
-          _job.completedStatus = Status::Error(
-              Err::EEPROM_WRITE_FAILED,
-              "EEPROM write-one reported EEF");
-        }
+        rememberOperationFailure(Status::Error(
+            Err::EEPROM_WRITE_FAILED,
+            "EEPROM write-one reported EEF"));
         // EEF is failure evidence, not content evidence. Continue through the
         // adaptive direct READ_ONE proof so a may-have-committed command is
         // reconciled without ever being resent.
-        _job.persistentState = EepromState::WriteAddr;
+        _job.persistentState = EepromState::WRITE_ADDR;
         return inProgress;
       }
-      _job.persistentState = EepromState::WriteAddr;
+      _job.persistentState = EepromState::WRITE_ADDR;
       return inProgress;
     }
-    case EepromState::ApplyPassword: {
-      _job.persistentCleanupRequired = true;
-      callbackUsed = true;
-      const uint8_t disabled = 0;
-      Status st = writeRegs(cmd::REG_EEPROM_PW_ENABLE, &disabled, 1);
-      if (!st.ok()) {
-        rememberFailure(st);
-        return inProgress;
-      }
-      _job.persistentState = _job.persistentIndex < _job.persistentLength
-          ? EepromState::WriteAddr
-          : (_job.passwordEnable ? EepromState::ApplyPasswordBytes
-                                 : EepromState::RestoreActive);
-      return inProgress;
-    }
-    case EepromState::ApplyPasswordBytes: {
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_EEPROM_PASSWORD0,
-                            _job.newCredential.bytes,
-                            sizeof(_job.newCredential.bytes));
-      if (!st.ok()) {
-        rememberFailure(st);
-        return inProgress;
-      }
-      _job.persistentState = EepromState::ApplyPasswordCredential;
-      return inProgress;
-    }
-    case EepromState::ApplyPasswordCredential: {
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_PASSWORD0,
-                            _job.newCredential.bytes,
-                            sizeof(_job.newCredential.bytes));
-      if (!st.ok()) {
-        rememberFailure(st);
-        return inProgress;
-      }
-      _job.passwordAuthorizationMayBeActive = true;
-      _job.persistentState = EepromState::RestoreActive;
-      return inProgress;
-    }
-    case EepromState::FinalizePasswordEnable: {
-      const uint8_t enabled = 0xFF;
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_EEPROM_PW_ENABLE, &enabled, 1);
-      if (!st.ok() && _job.completedStatus.ok()) {
-        _job.completedStatus = st;
-      }
-      _job.persistentState = EepromState::CleanupLockPassword;
-      return inProgress;
-    }
-    case EepromState::CleanupLockPassword: {
-      uint8_t invalidCredential[4] = {};
-      for (size_t i = 0; i < sizeof(invalidCredential); ++i) {
-        invalidCredential[i] = static_cast<uint8_t>(
-            _job.newCredential.bytes[i] ^ 0xFFu);
-        if (invalidCredential[i] == _job.currentCredential.bytes[i]) {
-          invalidCredential[i] ^= 0x01u;
-        }
-      }
-      callbackUsed = true;
-      Status st = writeRegs(cmd::REG_PASSWORD0, invalidCredential,
-                            sizeof(invalidCredential));
-      std::memset(invalidCredential, 0, sizeof(invalidCredential));
-      if (!st.ok()) {
-        _job.persistentCleanupStatus = Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "Password authorization lock failed", st.detail);
-      } else {
-        _job.passwordAuthorizationMayBeActive = false;
-        _job.persistentCleanupRequired = false;
-      }
-      if (_job.completedStatus.ok() &&
-          _job.persistentCleanupStatus.ok()) {
-        _passwordStatus.evidence = _job.passwordEnable
-            ? PasswordProtectionEvidence::VERIFIED_ENABLED
-            : PasswordProtectionEvidence::VERIFIED_DISABLED;
-        _passwordStatus.credentialAccepted = false;
-        _passwordStatus.persistentVerified = true;
-        _passwordStatus.cleanupVerified = true;
-      } else {
-        _passwordStatus = PasswordProtectionStatus{};
-      }
-      return _job.persistentCleanupStatus.ok()
-          ? _job.completedStatus
-          : _job.persistentCleanupStatus;
-    }
-    case EepromState::CleanupWaitReady: {
+    case EepromState::CLEANUP_WAIT_READY: {
       if (_job.persistentReadyChecks != 0 &&
           !hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
@@ -4292,16 +5325,13 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
       if (hasDeadlinePassed(nowMs, _job.persistentPhaseDeadlineMs) ||
           _job.persistentReadyChecks >= EEPROM_CLEANUP_CHECK_CAP) {
         return finishCleanupFailure(Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
+            Err::TIMEOUT,
             "EEPROM busy during cleanup"));
       }
       uint8_t temp = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_TEMP_LSB, &temp, 1);
+      Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
-        return finishCleanupFailure(Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "EEPROM cleanup readiness read failed", st.detail));
+        return finishCleanupFailure(st);
       }
       if ((temp & cmd::EEPROM_BUSY_MASK) != 0) {
         ++_job.persistentReadyChecks;
@@ -4312,193 +5342,198 @@ Status RV3032::processPersistentJob(uint32_t nowMs, bool& callbackUsed) {
       beginActiveRestore();
       return inProgress;
     }
-    case EepromState::RestoreSelectedActive: {
+    case EepromState::RESTORE_SELECTED_ACTIVE: {
       const uint8_t desired = _job.userRamBuf[0];
-      callbackUsed = true;
-      Status st = writeRegs(_job.persistentAddress, &desired, 1);
-      if (!st.ok() && _job.persistentCleanupStatus.ok()) {
-        _job.persistentCleanupStatus = Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "Selected active mirror restore failed", st.detail);
-      }
-      _job.persistentState = EepromState::VerifySelectedActive;
+      Status st = writePersistent(_job.persistentAddress, &desired, 1);
+      rememberCleanupFailure(st, true);
+      _job.persistentState = EepromState::VERIFY_SELECTED_ACTIVE;
       return inProgress;
     }
-    case EepromState::VerifySelectedActive: {
+    case EepromState::VERIFY_SELECTED_ACTIVE: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(_job.persistentAddress, &value, 1);
-      if ((!st.ok() || value != _job.userRamBuf[0]) &&
-          _job.persistentCleanupStatus.ok()) {
-        _job.persistentCleanupStatus = Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "Selected active mirror cleanup verification failed",
-            st.detail);
+      Status st = readPersistent(_job.persistentAddress, &value, 1);
+      if (!st.ok()) {
+        rememberCleanupFailure(st, false);
+      } else if (value != _job.userRamBuf[0]) {
+        rememberCleanupFailure(Status::Error(
+            Err::EEPROM_VERIFY_FAILED,
+            "Selected active mirror cleanup verification failed"), false);
       }
-      _job.persistentState = EepromState::RestoreActive;
+      _job.persistentState = EepromState::RESTORE_ACTIVE;
       return inProgress;
     }
-    case EepromState::RestoreActive:
+    case EepromState::RESTORE_ACTIVE:
       if (!_job.persistentActiveC0Valid) {
-        _job.persistentState = EepromState::RestoreControl1;
+        _job.persistentState = EepromState::RESTORE_CONTROL1;
         return inProgress;
       }
-      callbackUsed = true;
       {
         const bool restoreQueuedC0 =
-            _job.activeKind == JobKind::None &&
+            _job.activeKind == JobKind::NONE &&
             _job.persistentSafeC0Verified &&
             _job.persistentAddress == cmd::REG_ACTIVE_PMU;
         const uint8_t value = static_cast<uint8_t>(
             (restoreQueuedC0 ? _job.userRamBuf[0]
                              : _job.persistentActiveC0) &
             cmd::PMU_IMPLEMENTED_MASK);
-        Status st = writeRegs(cmd::REG_ACTIVE_PMU, &value, 1);
-        if (!st.ok() && _job.persistentCleanupStatus.ok()) {
-          _job.persistentCleanupStatus = Status::Error(
-              Err::EEPROM_CLEANUP_FAILED, "Active PMU restore failed",
-              st.detail);
-        }
+        Status st = writePersistent(cmd::REG_ACTIVE_PMU, &value, 1);
+        rememberCleanupFailure(st, true);
       }
-      _job.persistentState = EepromState::VerifyActive;
+      _job.persistentState = EepromState::VERIFY_ACTIVE;
       return inProgress;
-    case EepromState::VerifyActive: {
+    case EepromState::VERIFY_ACTIVE: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_ACTIVE_PMU, &value, 1);
+      Status st = readPersistent(cmd::REG_ACTIVE_PMU, &value, 1);
       const bool restoreQueuedC0 =
-          _job.activeKind == JobKind::None &&
+          _job.activeKind == JobKind::NONE &&
           _job.persistentSafeC0Verified &&
           _job.persistentAddress == cmd::REG_ACTIVE_PMU;
       const uint8_t expected = static_cast<uint8_t>(
           (restoreQueuedC0 ? _job.userRamBuf[0]
                            : _job.persistentActiveC0) &
           cmd::PMU_IMPLEMENTED_MASK);
-      if ((!st.ok() || (value & cmd::PMU_IMPLEMENTED_MASK) != expected) &&
-          _job.persistentCleanupStatus.ok()) {
-        _job.persistentCleanupStatus = Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "Active PMU cleanup verification failed", st.detail);
+      if (!st.ok()) {
+        rememberCleanupFailure(st, false);
+      } else if ((value & cmd::PMU_IMPLEMENTED_MASK) != expected) {
+        rememberCleanupFailure(Status::Error(
+            Err::EEPROM_VERIFY_FAILED,
+            "Active PMU cleanup verification failed"), false);
       }
-      _job.persistentState = EepromState::RestoreControl1;
+      _job.persistentState = EepromState::RESTORE_CONTROL1;
       return inProgress;
     }
-    case EepromState::RestoreControl1:
+    case EepromState::RESTORE_CONTROL1:
       if (!_job.persistentControl1Valid) {
         return finishCleanupFailure(Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
+            Err::INTERNAL_STATE_ERROR,
             "Control 1 cleanup evidence unavailable"));
       }
-      callbackUsed = true;
       {
         const uint8_t value = static_cast<uint8_t>(
             _job.persistentControl1 & cmd::CONTROL1_IMPLEMENTED_MASK);
-        Status st = writeRegs(cmd::REG_CONTROL1, &value, 1);
-        if (!st.ok() && _job.persistentCleanupStatus.ok()) {
-          _job.persistentCleanupStatus = Status::Error(
-              Err::EEPROM_CLEANUP_FAILED, "Control 1 restore failed",
-              st.detail);
-        }
+        Status st = writePersistent(cmd::REG_CONTROL1, &value, 1);
+        rememberCleanupFailure(st, true);
       }
-      _job.persistentState = EepromState::VerifyControl1;
+      _job.persistentState = EepromState::VERIFY_CONTROL1;
       return inProgress;
-    case EepromState::VerifyControl1: {
+    case EepromState::VERIFY_CONTROL1: {
       uint8_t value = 0;
-      callbackUsed = true;
-      Status st = readRegs(cmd::REG_CONTROL1, &value, 1);
+      Status st = readPersistent(cmd::REG_CONTROL1, &value, 1);
       const uint8_t expected = static_cast<uint8_t>(
           _job.persistentControl1 & cmd::CONTROL1_IMPLEMENTED_MASK);
-      if ((!st.ok() || (value & cmd::CONTROL1_IMPLEMENTED_MASK) != expected) &&
-          _job.persistentCleanupStatus.ok()) {
-        _job.persistentCleanupStatus = Status::Error(
-            Err::EEPROM_CLEANUP_FAILED,
-            "Control 1 cleanup verification failed", st.detail);
+      if (!st.ok()) {
+        rememberCleanupFailure(st, false);
+      } else if ((value & cmd::CONTROL1_IMPLEMENTED_MASK) != expected) {
+        rememberCleanupFailure(Status::Error(
+            Err::EEPROM_VERIFY_FAILED,
+            "Control 1 cleanup verification failed"), false);
+      } else if (_job.persistentCleanupProofPossible) {
+        _job.persistentRead.cleanupVerified = true;
+        _job.userEepromWrite.cleanupVerified = true;
       }
       _job.persistentNotBeforeMs =
-          currentAfterCallback() + EEPROM_WRITE_SETTLE_MS;
-      _job.persistentState = EepromState::Settle;
+          nowMs + EEPROM_WRITE_SETTLE_MS;
+      _job.persistentState = EepromState::SETTLE;
       return inProgress;
     }
-    case EepromState::Settle:
+    case EepromState::SETTLE:
       if (!hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
       }
-      if (_job.activeKind == JobKind::PasswordProtection) {
-        _job.persistentState =
-            _job.completedStatus.ok() && _job.passwordEnable
-                ? EepromState::FinalizePasswordEnable
-                : EepromState::CleanupLockPassword;
-        return inProgress;
-      }
-      if (_job.activeKind == JobKind::PersistentRead) {
-        _job.persistentRead.persistentVerified =
-            _job.persistentIndex >= _job.persistentLength;
-        _job.persistentRead.cleanupVerified =
-            _job.persistentCleanupStatus.ok();
-      } else {
-        _job.userEepromWrite.cleanupVerified =
-            _job.persistentCleanupStatus.ok();
-      }
       _job.persistentCleanupRequired = false;
-      return _job.persistentCleanupStatus.ok()
-          ? _job.completedStatus
-          : _job.persistentCleanupStatus;
-    case EepromState::Idle:
+      exposeEvidence();
+      if (!_job.persistentCleanupStatus.ok()) {
+        return Status::Error(Err::EEPROM_CLEANUP_FAILED,
+                             "Persistent access cleanup failed",
+                             _job.persistentCleanupStatus.detail);
+      }
+      return _job.persistentOperationStatus;
+    case EepromState::IDLE:
     default:
-      return Status::Error(Err::EEPROM_VERIFY_FAILED,
-                           "Invalid persistent job state");
+      {
+        const Status internal = Status::Error(
+            Err::INTERNAL_STATE_ERROR, "Impossible persistent job state",
+            static_cast<int32_t>(_job.persistentState));
+        if (cleanupState) {
+          return finishCleanupFailure(internal);
+        }
+        if (_job.persistentCleanupRequired) {
+          rememberFailure(internal);
+          return inProgress;
+        }
+        return finishOperation(internal);
+      }
   }
 }
 
 Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed) {
   instructionsUsed = 0;
+  auto latchItemEvidence = [&]() {
+    if (_eepromOperationStatus.ok() &&
+        !_job.persistentOperationStatus.ok()) {
+      _eepromOperationStatus = _job.persistentOperationStatus;
+    }
+    if (_eepromCleanupStatus.ok() &&
+        !_job.persistentCleanupStatus.ok()) {
+      _eepromCleanupStatus = _job.persistentCleanupStatus;
+    }
+    if (!_eepromCleanupStatus.ok()) {
+      _eepromLastStatus = Status::Error(
+          Err::EEPROM_CLEANUP_FAILED,
+          "EEPROM cleanup could not be verified",
+          _eepromCleanupStatus.detail);
+    } else if (!_eepromOperationStatus.ok()) {
+      _eepromLastStatus = _eepromOperationStatus;
+    } else {
+      _eepromLastStatus = Status::Ok();
+    }
+  };
   if (!_config.enableEepromWrites) {
-    _eeprom.state = EepromState::Idle;
+    _eeprom.state = EepromState::IDLE;
     _eeprom.queueHead = 0;
     _eeprom.queueTail = 0;
     _eeprom.queueCount = 0;
-    return _eepromLastStatus;
+    return getEepromStatus();
   }
 
   if (maxInstructions == 0) {
     return isEepromBusy() ? Status::Error(Err::IN_PROGRESS, "EEPROM update in progress")
-                          : _eepromLastStatus;
+                          : getEepromStatus();
   }
 
+  uint32_t currentNowMs = now_ms;
   while (instructionsUsed < maxInstructions) {
-    uint32_t currentNowMs = now_ms;
     if (_config.nowMs != nullptr) {
       const uint32_t observedNowMs = _nowMs();
       if (static_cast<int32_t>(observedNowMs - currentNowMs) > 0) {
         currentNowMs = observedNowMs;
       }
-    } else if (instructionsUsed != 0) {
-      // A multi-instruction call must not reuse its entry timestamp after a
-      // callback. Conservatively charge the configured callback bound when no
-      // live clock hook is available.
-      currentNowMs += static_cast<uint32_t>(instructionsUsed) *
-                      _config.i2cTimeoutMs;
     }
-    if (_eeprom.state == EepromState::Idle) {
+    if (_eeprom.state == EepromState::IDLE) {
       uint8_t nextReg = 0;
       uint8_t nextValue = 0;
       if (!eepromQueuePop(nextReg, nextValue)) {
-        return _eepromLastStatus;
+        return getEepromStatus();
       }
       (void)startEepromUpdate(nextReg, nextValue);
     }
 
-    if (_job.state == JobState::Idle) {
+    if (_job.state == JobState::IDLE) {
       _job = JobOp{};
-      _job.state = JobState::Persistent;
-      _job.activeKind = JobKind::None; // queue owns the shared engine
-      _job.persistentState = EepromState::ReadControl1;
+      _job.state = JobState::PERSISTENT;
+      _job.activeKind = JobKind::NONE; // queue owns the shared engine
+      _job.persistentState = EepromState::READ_CONTROL1;
       _job.persistentAddress = _eeprom.reg;
       _job.persistentLength = 1;
       _job.persistentWriteMode = true;
       _job.userRamBuf[0] = _eeprom.value;
-      _job.deadlineMs = currentNowMs + 4000;
-      _job.mutationCutoffMs = currentNowMs + 3700;
+      const uint32_t cleanupReserveMs =
+          EEPROM_CLEANUP_READY_TIMEOUT_MS +
+          6U * _config.i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS;
+      _job.deadlineMs =
+          currentNowMs + GENERIC_EEPROM_OPERATION_TIMEOUT_MS;
+      _job.mutationCutoffMs = currentNowMs +
+          (GENERIC_EEPROM_OPERATION_TIMEOUT_MS - cleanupReserveMs);
       _job.deadlineActive = true;
       _job.mutationCutoffActive = true;
     }
@@ -4507,16 +5542,20 @@ Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& 
         hasDeadlinePassed(currentNowMs, _job.deadlineMs)) {
       Status terminal = Status::Error(Err::TIMEOUT,
                                       "EEPROM queue deadline expired");
-      if (_job.persistentCleanupRequired ||
-          _job.passwordAuthorizationMayBeActive) {
+      if (_job.persistentCleanupRequired) {
+        if (_job.persistentCleanupStatus.ok()) {
+          _job.persistentCleanupStatus = Status::Error(
+              Err::TIMEOUT,
+              "EEPROM queue deadline expired before cleanup proof");
+        }
         terminal = Status::Error(
             Err::EEPROM_CLEANUP_FAILED,
             "EEPROM queue deadline expired before cleanup proof");
+      } else if (_job.persistentOperationStatus.ok()) {
+        _job.persistentOperationStatus = terminal;
       }
-      if (_eepromLastStatus.ok()) {
-        _eepromLastStatus = terminal;
-      }
-      if (_eepromWriteFailures < UINT32_MAX) ++_eepromWriteFailures;
+      latchItemEvidence();
+      ++_eepromWriteFailures;
       // No callback is permitted at or after the whole-item deadline.  If the
       // caller starved the reserved cleanup interval, the device access state
       // is unverified; never continue into another admitted queue item.
@@ -4530,30 +5569,55 @@ Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& 
     if (callbackUsed) {
       ++instructionsUsed;
     }
+    if (_job.deadlineActive &&
+        hasDeadlinePassed(currentNowMs, _job.deadlineMs)) {
+      Status terminal = st;
+      if (_job.persistentCleanupRequired) {
+        if (_job.persistentCleanupStatus.ok()) {
+          _job.persistentCleanupStatus = st.ok() || st.inProgress()
+              ? Status::Error(
+                    Err::TIMEOUT,
+                    "EEPROM callback crossed deadline before cleanup proof")
+              : st;
+        }
+        terminal = Status::Error(
+            Err::EEPROM_CLEANUP_FAILED,
+            "EEPROM callback crossed deadline before cleanup proof");
+      } else if (st.ok() || st.inProgress()) {
+        terminal = Status::Error(Err::TIMEOUT,
+                                 "EEPROM callback crossed item deadline");
+        if (_job.persistentOperationStatus.ok()) {
+          _job.persistentOperationStatus = terminal;
+        }
+      }
+      latchItemEvidence();
+      ++_eepromWriteFailures;
+      _eeprom = EepromOp{};
+      _job = JobOp{};
+      return terminal;
+    }
     if (st.inProgress()) {
       if (!callbackUsed) return st;
       continue;
     }
 
+    latchItemEvidence();
     if (st.ok()) {
-      if (_eepromWriteCount < UINT32_MAX) ++_eepromWriteCount;
+      ++_eepromWriteCount;
     } else {
-      if (_eepromLastStatus.ok()) {
-        _eepromLastStatus = st;
-      }
-      if (_eepromWriteFailures < UINT32_MAX) ++_eepromWriteFailures;
+      ++_eepromWriteFailures;
     }
-    if (st.code == Err::EEPROM_CLEANUP_FAILED) {
-      // Cleanup failure means C0/C1 (and possibly password authorization) is
-      // not proven.  Cancel later queue entries and return the observable
-      // terminal error instead of issuing more device commands.
+    if (!_eepromCleanupStatus.ok()) {
+      // Cleanup failure means C0/Control 1 is not proven. Cancel later queue
+      // entries and return the observable terminal error instead of issuing
+      // more device commands.
       _eeprom = EepromOp{};
       _job = JobOp{};
-      return st;
+      return _eepromLastStatus;
     }
     _eeprom = [&]() {
       EepromOp next = _eeprom;
-      next.state = EepromState::Idle;
+      next.state = EepromState::IDLE;
       return next;
     }();
     _job = JobOp{};
@@ -4566,13 +5630,13 @@ Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& 
   }
 
   return isEepromBusy() ? Status::Error(Err::IN_PROGRESS, "EEPROM update in progress")
-                        : _eepromLastStatus;
+                        : getEepromStatus();
 }
 
 Status RV3032::startEepromUpdate(uint8_t reg, uint8_t value) {
   _eeprom.reg = reg;
   _eeprom.value = value;
-  _eeprom.state = EepromState::ReadControl1;
+  _eeprom.state = EepromState::READ_CONTROL1;
   return Status::Error(Err::IN_PROGRESS, "EEPROM update in progress");
 }
 
@@ -4587,7 +5651,7 @@ bool RV3032::eepromQueueContains(uint8_t reg, uint8_t value) const {
       return _eeprom.queue[index].value == value;
     }
   }
-  if (_eeprom.state != EepromState::Idle && _eeprom.reg == reg) {
+  if (_eeprom.state != EepromState::IDLE && _eeprom.reg == reg) {
     return _eeprom.value == value;
   }
   return false;
@@ -4600,8 +5664,10 @@ bool RV3032::eepromQueuePush(uint8_t reg, uint8_t value) {
   if (_eeprom.queueCount >= kEepromQueueSize) {
     return false;  // Queue full
   }
-  if (_eeprom.state == EepromState::Idle && _eeprom.queueCount == 0) {
+  if (_eeprom.state == EepromState::IDLE && _eeprom.queueCount == 0) {
     _eepromLastStatus = Status::Ok();
+    _eepromOperationStatus = Status::Ok();
+    _eepromCleanupStatus = Status::Ok();
   }
   
   _eeprom.queue[_eeprom.queueHead].reg = reg;
@@ -4657,8 +5723,9 @@ bool RV3032::decodeCalendar(const uint8_t* data, DateTime& out) {
       (data[5] & 0xE0u) != 0) {
     return false;
   }
-  for (uint8_t i = 0; i < 7; ++i) {
-    if (!isValidBcd(data[i])) {
+  static constexpr uint8_t BCD_INDEXES[] = {0, 1, 2, 4, 5, 6};
+  for (uint8_t index : BCD_INDEXES) {
+    if (!isValidBcd(data[index])) {
       return false;
     }
   }
@@ -4666,7 +5733,7 @@ bool RV3032::decodeCalendar(const uint8_t* data, DateTime& out) {
   decoded.second = bcdToBin(data[0]);
   decoded.minute = bcdToBin(data[1]);
   decoded.hour = bcdToBin(data[2]);
-  decoded.weekday = bcdToBin(data[3]);
+  decoded.weekday = data[3];
   decoded.day = bcdToBin(data[4]);
   decoded.month = bcdToBin(data[5]);
   decoded.year = static_cast<uint16_t>(2000 + bcdToBin(data[6]));
@@ -4681,8 +5748,8 @@ bool RV3032::acceptedVerifiedTime(const DateTime& requested,
                                   const DateTime& observed) {
   uint32_t requestedUnix = 0;
   uint32_t observedUnix = 0;
-  if (!dateTimeToUnix(requested, requestedUnix) ||
-      !dateTimeToUnix(observed, observedUnix)) {
+  if (!dateTimeToUnix(requested, requestedUnix).ok() ||
+      !dateTimeToUnix(observed, observedUnix).ok()) {
     return false;
   }
   if (observedUnix == requestedUnix) {
@@ -4706,10 +5773,14 @@ uint8_t RV3032::bcdToBin(uint8_t v) {
 }
 
 uint8_t RV3032::binToBcd(uint8_t v) {
-  // Precondition: v must be <= 99. All call sites validate before calling.
-  // Return 0x99 (max valid BCD) as a safe, detectable sentinel if violated.
-  if (v > 99) { return 0x99; }
+  // Precondition: every caller has already validated v <= 99.
   return static_cast<uint8_t>(((v / 10) << 4) | (v % 10));
+}
+
+uint8_t RV3032::weekdayFromValidDate(
+    uint16_t year, uint8_t month, uint8_t day) {
+  const uint32_t days = dateToDays(year, month, day);
+  return static_cast<uint8_t>((days + 4U) % 7U);
 }
 
 bool RV3032::isLeapYear(uint16_t year) {
@@ -4798,7 +5869,7 @@ bool RV3032::unixToDate(uint32_t ts, DateTime& out) {
   rem %= 3600UL;
   out.minute = static_cast<uint8_t>(rem / 60UL);
   out.second = static_cast<uint8_t>(rem % 60UL);
-  out.weekday = computeWeekday(out.year, out.month, out.day);
+  out.weekday = weekdayFromValidDate(out.year, out.month, out.day);
 
   return true;
 }
@@ -4833,32 +5904,7 @@ Status RV3032::clearVoltageLowFlag() {
 }
 
 Status RV3032::clearBackupSwitchFlag() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "Call begin() first");
-  }
-
-  const uint8_t bsfMask = static_cast<uint8_t>(1u << cmd::TEMP_BSF_BIT);
-  const uint8_t otherFlagMask = static_cast<uint8_t>(
-      (1u << cmd::EEPROM_ERROR_BIT) |
-      (1u << cmd::EEPROM_BUSY_BIT) |
-      (1u << cmd::TEMP_CLKF_BIT));
-  if (!workIdle()) {
-    return Status::Error(Err::BUSY, "Driver work already in progress");
-  }
-  _job = JobOp{};
-  _job.activeKind = JobKind::RegisterUpdate;
-  _job.registerUpdateReg = cmd::REG_TEMP_LSB;
-  _job.registerUpdateImplementedMask = static_cast<uint8_t>(
-      cmd::EEPROM_EEF_MASK | bsfMask);
-  _job.registerUpdateClearMask = bsfMask;
-  _job.registerUpdateRequiredMask = bsfMask;
-  _job.registerUpdateForbiddenMask = otherFlagMask;
-  _job.registerUpdateGuardedClear = true;
-  _job.registerUpdateGuardFailureIsBusy = true;
-  _job.lastStatus = Status::Error(Err::IN_PROGRESS,
-                                  "Backup-switch flag clear in progress");
-  _job.state = JobState::RegisterUpdateRead;
-  return _job.lastStatus;
+  return startTempLsbFlagClear(cmd::TEMP_BSF_MASK);
 }
 
 // ===== User RAM Operations =====
@@ -4897,28 +5943,35 @@ Status RV3032::writeUserRam(uint8_t offset, const uint8_t* buf, size_t len) {
 
 // ===== Public Static Conversion Functions =====
 
-uint8_t RV3032::bcdToBinary(uint8_t bcd) {
-  return bcdToBin(bcd);
-}
-
-uint8_t RV3032::binaryToBcd(uint8_t bin) {
-  return binToBcd(bin);
-}
-
-bool RV3032::unixToDateTime(uint32_t ts, DateTime& out) {
-  return unixToDate(ts, out);
-}
-
-bool RV3032::dateTimeToUnix(const DateTime& time, uint32_t& out) {
-  if (!isValidDateTime(time)) {
-    return false;
+Status RV3032::unixToDateTime(uint32_t timestamp, DateTime& out) {
+  if (timestamp < kEpoch2000 || timestamp > kEndOf2099) {
+    return Status::Error(Err::INVALID_DATETIME,
+                         "Unix timestamp outside 2000..2099");
   }
-  uint32_t days = dateToDays(time.year, time.month, time.day);
-  out = days * 86400UL
+  DateTime converted{};
+  if (!unixToDate(timestamp, converted)) {
+    return Status::Error(Err::INVALID_DATETIME,
+                         "Unix timestamp conversion failed");
+  }
+  out = converted;
+  return Status::Ok();
+}
+
+Status RV3032::dateTimeToUnix(const DateTime& time, uint32_t& timestamp) {
+  if (!isValidDateTime(time)) {
+    return Status::Error(Err::INVALID_DATETIME, "Invalid date/time");
+  }
+  const uint32_t days = dateToDays(time.year, time.month, time.day);
+  const uint32_t converted = days * 86400UL
       + static_cast<uint32_t>(time.hour) * 3600UL
       + static_cast<uint32_t>(time.minute) * 60UL
       + static_cast<uint32_t>(time.second);
-  return true;
+  if (converted < kEpoch2000 || converted > kEndOf2099) {
+    return Status::Error(Err::INVALID_DATETIME,
+                         "Date/time outside Unix conversion range");
+  }
+  timestamp = converted;
+  return Status::Ok();
 }
 
 }  // namespace RV3032

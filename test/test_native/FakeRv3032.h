@@ -27,7 +27,7 @@ struct FakeRv3032 {
   static constexpr size_t WAIT_LOG_CAPACITY = 512;
 
   uint8_t direct[0x50] = {};
-  uint8_t activeConfig[11] = {};
+  uint8_t activeConfig[6] = {};
   uint8_t persistent[0x2B] = {};
   uint32_t nowMs = 0;
   uint32_t callbackCount = 0;
@@ -59,6 +59,7 @@ struct FakeRv3032 {
   uint32_t forceBusyAfterCallbackOrdinal = 0;
   uint32_t forcedBusyDurationMs = 0;
   bool lowVdd = false;
+  bool intAsserted = false;
   bool logOverflow = false;
   bool protocolViolation = false;
   bool unsafeAccessStateAtCommand = false;
@@ -66,16 +67,6 @@ struct FakeRv3032 {
   uint16_t readOneAttempts = 0;
   uint16_t updateAllAttempts = 0;
   uint16_t refreshAllAttempts = 0;
-  uint16_t rejectedProtectedWrites = 0;
-  bool passwordSequenceActive = false;
-  bool passwordReferenceChanged = false;
-  bool passwordNewCredentialEstablished = false;
-  bool passwordCleanupObserved = false;
-  bool passwordLockObserved = false;
-  bool passwordReferenceWriteWhileEnabled = false;
-  bool passwordCleanupBeforeNewCredential = false;
-  bool passwordProtectionEnabledBeforeCleanup = false;
-  bool passwordLockBeforeCleanup = false;
   Transfer log[LOG_CAPACITY] = {};
   size_t logCount = 0;
 
@@ -84,9 +75,6 @@ struct FakeRv3032 {
   uint8_t pendingCommand = 0;
   uint8_t pendingAddress = 0;
   uint8_t pendingData = 0;
-  uint8_t passwordInput[4] = {};
-  bool passwordAuthenticated = true;
-  bool pendingWriteAuthorized = true;
 
   FakeRv3032() {
     persistent[0] = RV3032::cmd::PMU_BSM_LEVEL;
@@ -99,12 +87,21 @@ struct FakeRv3032 {
     direct[RV3032::cmd::REG_STATUS] = 0x03;
     direct[RV3032::cmd::REG_CONTROL1] = 0;
     direct[RV3032::cmd::REG_TEMP_LSB] = 0;
-    memset(passwordInput, 0, sizeof(passwordInput));
-    updatePasswordAuthentication();
-    pendingWriteAuthorized = true;
     busyUntil = 0;
     initialBusy = false;
     pendingCommand = 0;
+    intAsserted = false;
+  }
+
+  void triggerPeriodicUpdateEvent() {
+    if ((direct[RV3032::cmd::REG_CONTROL2] &
+         (1u << RV3032::cmd::CTRL2_UIE_BIT)) == 0) {
+      return;
+    }
+    direct[RV3032::cmd::REG_STATUS] = static_cast<uint8_t>(
+        direct[RV3032::cmd::REG_STATUS] |
+        (1u << RV3032::cmd::STATUS_UF_BIT));
+    intAsserted = true;
   }
 
   void dailyRefresh() {
@@ -112,25 +109,7 @@ struct FakeRv3032 {
     if ((direct[RV3032::cmd::REG_CONTROL1] &
          RV3032::cmd::CONTROL1_EERD_MASK) == 0) {
       memcpy(activeConfig, persistent, sizeof(activeConfig));
-      updatePasswordAuthentication();
     }
-  }
-
-  bool passwordProtectionEnabled() const {
-    return activeConfig[RV3032::cmd::REG_EEPROM_PW_ENABLE -
-                        RV3032::cmd::CONFIG_EEPROM_START] == 0xFF;
-  }
-
-  bool passwordInputMatchesActiveReference() const {
-    return memcmp(passwordInput,
-                  &activeConfig[RV3032::cmd::REG_EEPROM_PASSWORD0 -
-                                RV3032::cmd::CONFIG_EEPROM_START],
-                  sizeof(passwordInput)) == 0;
-  }
-
-  void updatePasswordAuthentication() {
-    passwordAuthenticated = !passwordProtectionEnabled() ||
-        passwordInputMatchesActiveReference();
   }
 
   void setInitialBusy(uint32_t durationMs) {
@@ -154,7 +133,7 @@ struct FakeRv3032 {
     direct[RV3032::cmd::REG_SECONDS] = bcd(second);
     direct[RV3032::cmd::REG_MINUTES] = bcd(minute);
     direct[RV3032::cmd::REG_HOURS] = bcd(hour);
-    direct[RV3032::cmd::REG_WEEKDAY] = bcd(weekday);
+    direct[RV3032::cmd::REG_WEEKDAY] = weekday;
     direct[RV3032::cmd::REG_DATE] = bcd(day);
     direct[RV3032::cmd::REG_MONTH] = bcd(month);
     direct[RV3032::cmd::REG_YEAR] = bcd(static_cast<uint8_t>(year - 2000));
@@ -183,7 +162,7 @@ struct FakeRv3032 {
       direct[RV3032::cmd::REG_EE_DATA] =
           persistent[pendingAddress - RV3032::cmd::CONFIG_EEPROM_START];
     } else if (pendingCommand == RV3032::cmd::EEPROM_CMD_WRITE_ONE) {
-      if (lowVdd || !pendingWriteAuthorized) {
+      if (lowVdd) {
         direct[RV3032::cmd::REG_TEMP_LSB] |= RV3032::cmd::EEPROM_EEF_MASK;
       } else {
         persistent[pendingAddress - RV3032::cmd::CONFIG_EEPROM_START] =
@@ -195,6 +174,8 @@ struct FakeRv3032 {
 
   uint8_t readByte(uint8_t reg) {
     completeCommand();
+    // Password registers are write-only/read-zero silicon. This fake does not
+    // emulate a part protected out of band by other firmware.
     if (reg == RV3032::cmd::REG_EE_COMMAND ||
         (reg >= RV3032::cmd::REG_PASSWORD0 &&
          reg <= RV3032::cmd::REG_PASSWORD3) ||
@@ -204,7 +185,7 @@ struct FakeRv3032 {
     }
     if (reg < sizeof(direct)) return direct[reg];
     if (reg >= RV3032::cmd::CONFIG_EEPROM_START &&
-        reg <= RV3032::cmd::CONFIG_EEPROM_END) {
+        reg <= RV3032::cmd::REG_ACTIVE_TREFERENCE1) {
       return activeConfig[reg - RV3032::cmd::CONFIG_EEPROM_START];
     }
     return 0;
@@ -212,33 +193,19 @@ struct FakeRv3032 {
 
   void writeByte(uint8_t reg, uint8_t value) {
     completeCommand();
-    if (reg >= RV3032::cmd::REG_PASSWORD0 &&
-        reg <= RV3032::cmd::REG_PASSWORD3) {
-      const uint8_t index = static_cast<uint8_t>(
-          reg - RV3032::cmd::REG_PASSWORD0);
-      passwordInput[index] = value;
-      if (reg == RV3032::cmd::REG_PASSWORD3) {
-        updatePasswordAuthentication();
-        if (passwordSequenceActive) {
-          if (passwordInputMatchesActiveReference()) {
-            passwordNewCredentialEstablished = true;
-          } else {
-            if (!passwordCleanupObserved) {
-              passwordLockBeforeCleanup = true;
-            }
-            passwordLockObserved = true;
-            passwordSequenceActive = false;
-          }
-        }
-      }
-      return;
-    }
-    if (passwordProtectionEnabled() && !passwordAuthenticated) {
-      ++rejectedProtectedWrites;
+    if ((reg >= RV3032::cmd::REG_PASSWORD0 &&
+         reg <= RV3032::cmd::REG_PASSWORD3) ||
+        (reg >= RV3032::cmd::REG_EEPROM_PASSWORD0 &&
+         reg <= RV3032::cmd::REG_EEPROM_PW_ENABLE)) {
+      // Retain only the silicon write-only/read-zero behavior. The fake does
+      // not store credentials or emulate external password protection.
       return;
     }
     if (reg == RV3032::cmd::REG_STATUS) {
       direct[reg] = static_cast<uint8_t>(direct[reg] & value & 0x3Fu);
+      if ((direct[reg] & (1u << RV3032::cmd::STATUS_UF_BIT)) == 0) {
+        intAsserted = false;
+      }
       return;
     }
     if (reg == RV3032::cmd::REG_TEMP_LSB) {
@@ -253,13 +220,6 @@ struct FakeRv3032 {
       return;
     }
     if (reg == RV3032::cmd::REG_CONTROL1) {
-      if (passwordSequenceActive) {
-        if (passwordReferenceChanged &&
-            !passwordNewCredentialEstablished) {
-          passwordCleanupBeforeNewCredential = true;
-        }
-        passwordCleanupObserved = true;
-      }
       direct[reg] = static_cast<uint8_t>(value &
           RV3032::cmd::CONTROL1_IMPLEMENTED_MASK);
       return;
@@ -267,6 +227,9 @@ struct FakeRv3032 {
     if (reg == RV3032::cmd::REG_CONTROL2) {
       direct[reg] = static_cast<uint8_t>(value &
           RV3032::cmd::CONTROL2_IMPLEMENTED_MASK);
+      if ((direct[reg] & (1u << RV3032::cmd::CTRL2_UIE_BIT)) == 0) {
+        intAsserted = false;
+      }
       if ((direct[reg] & (1u << RV3032::cmd::CTRL2_STOP_BIT)) != 0) {
         direct[RV3032::cmd::REG_100TH_SECONDS] = 0;
       }
@@ -343,18 +306,8 @@ struct FakeRv3032 {
         protocolViolation = true;
         return;
       }
-      if (value == RV3032::cmd::EEPROM_CMD_WRITE_ONE &&
-          direct[RV3032::cmd::REG_EE_ADDRESS] >=
-              RV3032::cmd::REG_EEPROM_PASSWORD0 &&
-          direct[RV3032::cmd::REG_EE_ADDRESS] <=
-              RV3032::cmd::REG_EEPROM_PASSWORD3 &&
-          passwordProtectionEnabled()) {
-        passwordReferenceWriteWhileEnabled = true;
-      }
       pendingAddress = direct[RV3032::cmd::REG_EE_ADDRESS];
       pendingData = direct[RV3032::cmd::REG_EE_DATA];
-      pendingWriteAuthorized = passwordAuthenticated ||
-          !passwordProtectionEnabled();
       pendingCommand = value;
       if (value == RV3032::cmd::EEPROM_CMD_READ_ONE) {
         ++readOneAttempts;
@@ -374,42 +327,12 @@ struct FakeRv3032 {
       return;
     }
     if (reg >= RV3032::cmd::CONFIG_EEPROM_START &&
-        reg <= RV3032::cmd::CONFIG_EEPROM_END) {
-      if (reg == RV3032::cmd::REG_ACTIVE_PMU && passwordSequenceActive) {
-        if (passwordReferenceChanged &&
-            !passwordNewCredentialEstablished) {
-          passwordCleanupBeforeNewCredential = true;
-        }
-        passwordCleanupObserved = true;
-      }
-      if (reg >= RV3032::cmd::REG_EEPROM_PASSWORD0 &&
-          reg <= RV3032::cmd::REG_EEPROM_PASSWORD3 &&
-          passwordProtectionEnabled()) {
-        passwordReferenceWriteWhileEnabled = true;
-      }
-      if (reg == RV3032::cmd::REG_EEPROM_PW_ENABLE) {
-        if (value != 0xFF) {
-          passwordSequenceActive = true;
-          passwordReferenceChanged = false;
-          passwordNewCredentialEstablished = false;
-          passwordCleanupObserved = false;
-        } else if (passwordSequenceActive && !passwordCleanupObserved) {
-          passwordProtectionEnabledBeforeCleanup = true;
-        }
-      }
+        reg <= RV3032::cmd::REG_ACTIVE_TREFERENCE1) {
       const uint8_t index = static_cast<uint8_t>(
           reg - RV3032::cmd::CONFIG_EEPROM_START);
       activeConfig[index] = index == 0
           ? static_cast<uint8_t>(value & RV3032::cmd::PMU_IMPLEMENTED_MASK)
           : value;
-      if (reg >= RV3032::cmd::REG_EEPROM_PASSWORD0 &&
-          reg <= RV3032::cmd::REG_EEPROM_PW_ENABLE) {
-        if (reg >= RV3032::cmd::REG_EEPROM_PASSWORD0 &&
-            reg <= RV3032::cmd::REG_EEPROM_PASSWORD3) {
-          passwordReferenceChanged = true;
-        }
-        updatePasswordAuthentication();
-      }
     }
   }
 

@@ -9,7 +9,13 @@ heap allocation. Applications inject bounded transport and timing callbacks.
 ## Design contract
 
 - `begin()` validates and binds callbacks with exactly zero device I/O.
-- `probe()` is the explicit one-read presence check.
+- `probe()` is one raw Status-register communication check at address `0x51`.
+  It proves only that transaction's address response, not chip identity.
+- `end()` always abandons local queued/active work with zero I/O. It cannot
+  undo an already-issued silicon write; abandoned persistent cleanup requires
+  explicit product-policy reinitialization after rebinding.
+- A driver object cannot be copied or moved because it owns live cooperative
+  state and a borrowed transport binding.
 - `recover()` is one tracked read-only health re-probe; physical bus recovery
   and retry policy remain application-owned.
 - `OFFLINE` is an observational health label and never suppresses the next
@@ -24,6 +30,10 @@ heap allocation. Applications inject bounded transport and timing callbacks.
   and uses an injected yielding wait callback.
 - No operation performs application bus recovery or blindly retries a possibly
   mutating transfer.
+- Transport callbacks are synchronous borrowed-buffer calls with a closed
+  I2C-only status domain. Cooperative deadlines are exclusive and are checked
+  again at callback completion. A callback that exceeds its supplied timeout
+  is reported as `I2C_TIMEOUT`.
 
 ## Memory model
 
@@ -32,8 +42,8 @@ The chip has several different storage classes:
 | Range | Storage | Access |
 | --- | --- | --- |
 | `0x00..0x4F` | Direct volatile registers and 16-byte user RAM | Direct register transfers, subject to public allowlists |
-| `0xC0..0xCA` | Active configuration mirrors | Direct active behavior; not durable proof |
-| `0xC0..0xCA` | Configuration EEPROM | Indirect `EEADDR`/`EEDATA`/`EECMD` access |
+| `0xC0..0xC5` | Supported active configuration mirrors and EEPROM | Typed active operations; indirect durable proof |
+| `0xC6..0xCA` | Vendor password mirrors and EEPROM | Silicon reference only; library access is unsupported and denied |
 | `0xCB..0xEA` | 32-byte user EEPROM | Indirect access only |
 
 There is no FRAM. Time is maintained by the RTC counter while the backup supply
@@ -67,15 +77,21 @@ void setup() {
 
   RV3032::Status st = rtc.begin(cfg);   // validates/binds; zero I2C
   if (!st.ok()) return;
-  st = rtc.probe();                     // explicit presence evidence
+  st = rtc.probe();                     // address communication, not identity
   if (!st.ok()) return;
 }
 
 void loop() {
-  rtc.tick(millis());                   // generic persistence only
+  const uint32_t now = nowMs(nullptr);
+  RV3032::Status persistence = rtc.tick(now); // one EEPROM instruction
+  if (!persistence.ok() && !persistence.inProgress() &&
+      persistence.code != RV3032::Err::BUSY) {
+    handleRtcPersistenceFailure(persistence);
+  }
   if (rtc.isJobBusy()) {
     uint8_t used = 0;
-    rtc.pollJob(millis(), 1, used);     // at most one library callback
+    RV3032::Status job = rtc.pollJob(now, 1, used);
+    handleRtcJobProgress(job);          // at most one library callback
   }
 }
 ```
@@ -86,25 +102,29 @@ than spin or perform I2C.
 
 ## Calendar APIs
 
-`readTime()` and `setTime()` each perform one calendar burst. `readHundredths()`
+`readTime()` performs one calendar burst. `setTime()` performs one synchronous
+calendar write without readback verification or Status clearing. `readHundredths()`
 provides a separate strict BCD read of register `0x00`; applications must allow
 for rollover relative to a separate calendar burst. `readTime()`
 strictly rejects reserved bits, invalid BCD/calendar fields, and weekday values
 outside `0..6`. The RV3032 weekday is user-assigned: every value `0..6` is
 accepted without requiring agreement with the date, and setters preserve the
 caller's valid value. `computeWeekday()` remains available for applications
-that want Gregorian weekday policy. Writing Seconds resets the hundredths
+that want Gregorian weekday policy. It and the Unix/build-time conversions
+return `Status`, validate the complete `2000..2099` domain, and preserve output
+arguments on failure. Writing Seconds resets the hundredths
 counter and the 4096 Hz through 1 Hz prescalers. These helpers do not inspect
 or clear Status flags.
 
 Applications needing stronger evidence use:
 
 ```cpp
-rtc.startReadTimeSnapshotJob(nowMs, 100);
-rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, nowMs, 250);
+const uint32_t now = nowMs(nullptr);
+rtc.startReadTimeSnapshotJob(now, 100);
+rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, now, 250);
 
 uint8_t used = 0;
-RV3032::Status st = rtc.pollJob(nowMs, 1, used);
+RV3032::Status st = rtc.pollJob(now, 1, used);
 ```
 
 The snapshot reads Status before the calendar, returns typed `StatusFlags` from
@@ -117,28 +137,45 @@ The report records the unavoidable THF/TLF clearing, and the job verifies final
 Status/calendar state. Larger polling budgets refresh elapsed time between
 callbacks so no later mutation starts after its cutoff.
 
+Every simple Status clearer for AF, TF, UF, EVF, PORF, and VLF applies this
+silicon rule: any Status-register write clears THF and TLF. If either omitted
+flag is already set at the guard read, the operation returns `INVALID_PARAM`
+without writing. An assertion after the guard read cannot be preserved. The
+verified calendar-set job is a separate contract: its public name promises
+PORF/VLF clearing, its `VerifiedTimeSetReport` captures pre-clear THF/TLF
+evidence, and its Status write still has the unavoidable THF/TLF side effect.
+
 ## Persistent APIs
 
 Explicit reads work even when generic writes are disabled:
 
 ```cpp
+const uint32_t now = nowMs(nullptr);
 rtc.startReadConfigurationEepromJob(
-    RV3032::ConfigurationEepromRegister::PMU, nowMs);
-rtc.startReadUserEepromJob(offset, length, nowMs);
+    RV3032::ConfigurationEepromRegister::PMU, now);
+rtc.startReadUserEepromJob(offset, length, now);
 ```
 
 User EEPROM writes require `Config::enableEepromWrites=true`:
 
 ```cpp
-rtc.startWriteUserEepromJob(offset, data, length, nowMs, 4000);
+const uint32_t now = nowMs(nullptr);
+rtc.startWriteUserEepromJob(offset, data, length, now, 4000);
 ```
 
-Public user EEPROM offsets are `0..31`; each job is limited to 16 bytes. The
-library copies write input into fixed storage at admission. Reads use an
-adaptive two-read staging proof, and a failed multi-byte read reports only the
-number of bytes positively proven. Each changed byte is written with at most one
-`0x21` write-one attempt, reconciled after ambiguous callback failure, and
-directly read back. Generic persistence never uses update-all `0x11` or
+Public user EEPROM offsets are `0..31`; each job is limited to 16 bytes. Write
+authority is deliberately limited to configuration C0..C5 and typed user
+EEPROM CB..EA; it never authorizes password registers. Password protection must
+be disabled for supported operation. A module protected by other firmware is
+unsupported and requires out-of-band service. Callback success alone cannot
+prove a protected write changed silicon; typed multi-transfer operations rely
+on readback, and ordinary single writes exist only under this product
+precondition. The library copies write input into fixed storage at admission.
+Reads use an adaptive two-read staging proof, and a failed multi-byte read
+reports only the number of bytes positively proven. Each changed byte is
+written with at most one `0x21` write-one attempt, reconciled after ambiguous
+callback failure, and directly read back. Generic persistence never uses
+update-all `0x11` or
 refresh-all `0x12`.
 
 Configuration setters can update active mirrors while persistence is disabled.
@@ -147,16 +184,26 @@ EEPROM engine is idle, another persistence-producing setter may run even when
 entries are queued; unrelated jobs remain blocked. Capacity is checked before
 active mutation, and an exact request coalesces only with the newest pending
 value for that address, preserving FIFO final-state intent. The application
-advances durable work with `tick()` or `pollEeprom()`. READ_ONE/WRITE_ONE wait
+advances durable work with `Status tick(uint32_t nowMs)` or `pollEeprom()`.
+`tick()` delegates exactly one EEPROM instruction and returns
+`NOT_INITIALIZED`, ordinary-job `BUSY`, progress, or the cached terminal EEPROM
+status; it does not discard failures. READ_ONE/WRITE_ONE wait
 intervals start after the command transport callback completes; the generic
 `eepromTimeoutMs` window begins after the mandatory 10 ms WRITE_ONE settle.
 Successful cleanup restores and verifies the queued intended active C0..C5
 mirror as well as the saved safe-access state.
 
+Forward-operation and access-state-cleanup evidence are separate. Typed read
+and write reports retain `operationStatus`, `cleanupStatus`, durable proof, and
+exact partial byte counts independently. A cleanup failure cannot erase proof
+already established by direct persistent readback. Generic batch diagnostics
+expose the same two first-cause statuses in `SettingsSnapshot`; a new batch,
+`begin()`, or `end()` resets them.
+
 An ordinary queue-item failure is returned at that item boundary. Later items
-remain queued for a subsequent poll, while the first failure remains the batch
-status so a later success cannot hide it. A newly admitted batch resets that
-status. Once a hard operation deadline is reached, no further callback is
+remain queued for a subsequent poll, while the first operation failure remains
+the batch status so a later success cannot hide it. Once a hard operation
+deadline is reached, no further callback is
 started. If access-state cleanup was still required, the terminal error is
 `EEPROM_CLEANUP_FAILED` so an unproven safe state is never reported as a plain
 timeout. That terminal cleanup failure cancels remaining queued items and does
@@ -171,6 +218,60 @@ result getters.
 are distinct from the library queue state returned by `isEepromBusy()`.
 `clearEepromErrorFlag()` explicitly acknowledges stale EEF through a guarded
 cooperative W0C operation without claiming that an earlier write was durable.
+
+## Cooperative configuration evidence
+
+Timer, periodic-update, backup, CLKOUT, and temperature-event jobs publish a
+`ConfigurationJobReport`. Its terminal state is exactly one of
+`UNCHANGED`, `REQUESTED_VERIFIED`, `SAFE_DISABLED_VERIFIED`, or `UNKNOWN`.
+`operationStatus` retains the first forward failure; `cleanupStatus` retains
+the first safe-state or reconciliation failure. `mutationAttempted` is set
+only when a requested mutating callback was dispatched. A failed, timed-out,
+or otherwise ambiguous requested write is never replayed. Persistence is
+queued only after the requested active state was read back and
+`operationStatus` remained `OK`.
+
+Timer, periodic-update, CLKOUT, and temperature-event failures use their own
+bounded safe gates: TE=0, UIE=0, preserved PMU with NCLKE=1, and
+THE/TLE/THIE/TLIE=0 respectively. Their success/worst-case callback caps are
+6/9, 5/8, 5/8, and 7/10. Backup is reconciliation-only and has a 4/4 cap; it
+never issues a cleanup PMU write or replays its one requested write.
+
+Backup mode configuration is cooperative:
+
+```cpp
+const uint32_t now = nowMs(nullptr);
+RV3032::Status st = rtc.startSetBackupSwitchModeJob(
+    RV3032::BackupSwitchMode::Level, now);
+```
+
+The public enum is encoded explicitly: Off=`00`, Direct=`01`, Level=`10`;
+observed raw `11` is also disabled. Admission requires BSIE=0 and an exclusive
+timeout satisfying `4 * i2cTimeoutMs + activationMs + 1`, up to 1000 ms, where
+activation is 2 ms for disabled-to-Direct and 10 ms for disabled-to-Level.
+The job preserves non-BSM PMU bits, checks optional C0 queue capacity before
+mutation, writes at most once, reconciles by exact implemented-bit readback,
+and cannot report terminal success before the activation not-before boundary.
+Register proof does not prove physical retention, backup voltage/topology
+safety, or electrical timing on a real board.
+
+Periodic UIE is update-event enable, not merely interrupt enable. UIE=0
+suppresses both new UF generation and the INT event; there is no UF-polling-only
+mode. Configuration does not implicitly clear a pre-existing UF.
+
+Live reconfiguration uses explicit quiescence guards. The caller sequence is:
+
+```text
+disable interrupt -> consume/clear flag if appropriate -> configure -> enable
+```
+
+Timer requires TIE=0, alarm updates require AIE=0, EVI updates/reset require
+EIE=0, and backup requires BSIE=0; a busy guard performs no write. EIE=0
+suppresses interrupt signaling but does not stop timestamp capture, so an edge
+can still occur during EVI configuration. This is vendor-recommended
+hardening, not proof that a concurrent physical event was reproduced safely.
+`setClkoutStopDelayEnabled()` is intentionally not EIE-guarded because CLKDE
+controls CLKOUT delay after I2C STOP rather than EVI capture.
 
 ## Primary-cell configuration
 
@@ -242,7 +343,7 @@ and events, coherent two-sample temperature reads and THF/TLF handling,
 complete XTAL/HF CLKOUT configuration and typed CLKF read/clear, signed offset
 calibration plus PORIE/VLIE, independent BSM/TCM/TCR, BSIE/BSF,
 STOP/ESYN/CLKDE/GP bits, hardware EEbusy/EEF, Status/reset/validity,
-user RAM, configuration/user EEPROM, password/protection evidence, and passive
+user RAM, supported configuration/user EEPROM, and passive
 health diagnostics.
 
 Alarm date 0 restores the vendor's AF-never-sets reset state; setting every AE
@@ -261,7 +362,7 @@ is written and must advance that opt-in work through `tick()`/`pollEeprom()`.
 
 Raw diagnostics are intentionally narrow. Reads are limited to documented
 direct ranges. Writes are limited to temperature thresholds and volatile user
-RAM; they cannot reach calendar, alarm, timer, Status/control, password, EEPROM
+RAM; they cannot reach calendar, alarm, timer, Status/control, unsupported password, EEPROM
 staging/command, indirect EEPROM, read-only, or reserved registers. Use typed
 methods for side-effecting features.
 
@@ -279,8 +380,34 @@ struct Status {
 
 No exceptions are used. Transport success/failure is recorded only inside the
 tracked wrappers. Validation, precondition failures, and raw `probe()` do not
-change health counters. `READY` after `begin()` means callbacks are bound, not
-that device presence has been proved.
+change health counters. `READY` after `begin()` means callbacks are bound; it
+is observational health, not address response or presence evidence. A
+successful raw `probe()` proves only communication for that one address-`0x51`
+Status read. It does not prove RV3032 identity. `recover()` and `lastError()`
+map the same address NACK to `DEVICE_NOT_FOUND`. Lifetime success/failure
+counters are ordinary `uint32_t` counters and wrap from `UINT32_MAX` to zero.
+
+## Wire example adapter
+
+`examples/common/I2cTransport.h` is application glue, not library code. Its
+Arduino-ESP32 3.2.0 adapter applies the callback's supplied timeout as one hard,
+exclusive bound across the complete callback. Each blocking Wire phase gets
+only the remaining interval, and RAII restores the application's prior Wire
+timeout on every exit. A short staging write is not retried: the adapter emits
+one bounded final STOP before returning an I2C-domain error. The application
+must serialize the shared bus and keep the Wire mutex uncontended during the
+synchronous callback; the adapter does not add a second lock or scheduler.
+
+## CLI ownership
+
+The bring-up CLI uses one overflow-discarding line reader and strict numeric
+tokens with exact argument counts. Invalid input starts no RTC/I2C work. One
+fixed `PendingOperation` owns accepted asynchronous work, advances at most one
+callback per loop iteration, and retains the ordinary terminal status through
+optional EEPROM persistence. It prints completion only after terminal ordinary
+and persistence evidence is available; there is no parallel `tick()` path. An
+item-level persistence failure does not release ownership while later queue
+entries remain, so no queued work is orphaned.
 
 ## Repository and examples
 

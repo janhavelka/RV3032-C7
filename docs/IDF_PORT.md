@@ -19,7 +19,18 @@ The adapter owns I2C installation, pins, pull-ups, locking, per-transfer timeout
 enforcement, error mapping, bus recovery, retry policy, and task scheduling.
 Never replay a possibly mutating callback. If the application documents a
 bounded recovery plus one retry for read-only transfers, that extra physical
-attempt must be covered by its timing tests.
+attempt must be covered by its timing tests. Both attempts together must finish
+inside the one supplied callback timeout and count as one driver instruction.
+
+Both callbacks are synchronous and may retain no buffer pointer after return.
+They return only `OK`, `I2C_ERROR`, `I2C_NACK_ADDR`, `I2C_NACK_DATA`,
+`I2C_TIMEOUT`, or `I2C_BUS`, with a static-lifetime message. Cooperative
+deadlines are exclusive; the core clips the supplied timeout and checks the
+callback completion timestamp. The supplied interval is a hard bound on the complete adapter callback,
+including application serialization, permitted
+read-only recovery, and all physical phases. Arrange an uncontended serialized
+owner before dispatch. Without `nowMs`, the driver conservatively charges the
+full supplied timeout.
 
 ```cpp
 static uint32_t idfNowMs(void*) {
@@ -41,24 +52,51 @@ cfg.enableEepromWrites = false;
 RV3032::RV3032 rtc;
 RV3032::Status st = rtc.begin(cfg);  // passive: no I2C
 if (st.ok()) {
-  st = rtc.probe();                  // explicit one-read presence check
+  st = rtc.probe();                  // address communication, not identity
 }
 ```
+
+A successful probe proves only that address `0x51` answered the Status-register
+read for that transaction. It does not prove RV3032 silicon identity and it
+does not update health counters or state.
 
 ## Cooperative owner loop
 
 Admission methods perform no transfer. The I2C owner advances work explicitly:
 
 ```cpp
+const uint32_t now = idfNowMs(nullptr);
 uint8_t used = 0;
-rtc.pollJob(idfNowMs(nullptr), 1, used);
-rtc.pollEeprom(idfNowMs(nullptr), 1, used);
+RV3032::Status pollStatus;
+if (rtc.isJobBusy()) {
+  pollStatus = rtc.pollJob(now, 1, used);
+} else {
+  pollStatus = rtc.pollEeprom(now, 1, used);
+}
+// Retain, report, or otherwise handle pollStatus according to product policy.
 ```
 
-Keep the two calls serialized; inspect `isJobBusy()`/`isEepromBusy()` before
-choosing which owner action to admit. A budget of one guarantees at most one
-library transport callback in that poll. `tick()` is only the one-instruction
-compatibility scheduler for generic persistence.
+Choose exactly one surface per owner-loop iteration. Do not poll EEPROM in the
+same iteration in which an ordinary job terminates and may enqueue persistence.
+A budget of one therefore guarantees at most one library transport callback in
+that owner pass. `Status tick(uint32_t nowMs)` is only the one-instruction
+scheduler for generic persistence. It returns
+`NOT_INITIALIZED`, ordinary-job `BUSY`, progress, or cached terminal EEPROM
+status; the integration must observe or explicitly discard that result.
+
+Staged timer, periodic-update, backup, CLKOUT, and temperature-event jobs expose
+`ConfigurationJobReport`. Keep their exact terminal Status and separate
+operation/cleanup evidence together; do not infer success from an ACK or queue
+persistence before requested-state readback. A requested mutation is one
+physical attempt and is never retried. Backup admission additionally uses
+`4 * i2cTimeoutMs + activationMs + 1`, with 2 ms for disabled-to-Direct and
+10 ms for disabled-to-Level, and waits after callback completion without I/O.
+
+Before live reconfiguration, the application owner uses `disable interrupt ->
+consume/clear flag if appropriate -> configure -> enable`. The corresponding
+TIE/AIE/EIE/BSIE guard returns `BUSY` without mutation. EIE=0 does not stop EVI
+timestamp capture. UIE=0 suppresses both new UF and the INT event; it is not a
+UF-polling-only mode.
 
 The synchronous primary-cell ensure is a deliberate startup-only boundary. Run
 it in the serialized I2C owner, with no pending job or persistence work. Its
@@ -71,8 +109,16 @@ wait callback must yield the task; never implement it as a spin loop.
 - Do not add bus recovery, retry, driver installation, or logging to the core.
 - Do not treat `OFFLINE` as an admission block.
 - Keep EEPROM writes disabled unless the product explicitly owns an endurance
-  policy and regularly polls the cooperative engine.
+  policy and regularly polls the cooperative engine. That authority covers
+  only configuration C0..C5 and typed user EEPROM CB..EA.
+- Preserve separate persistent `operationStatus`, `cleanupStatus`, durable
+  proof, and partial counts. A cleanup failure has semantic terminal precedence
+  but does not erase content proof already established by readback.
+- Password management is unsupported. Password protection must be disabled;
+  a protected part requires out-of-band service.
 - Call `end()` before rebinding; a second `begin()` is intentionally `BUSY`.
+  `end()` performs zero I/O and abandons active local work, so reinitialize any
+  affected product policy after abandoning persistent cleanup.
 
 ## Local verification
 

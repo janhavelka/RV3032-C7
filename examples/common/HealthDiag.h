@@ -60,6 +60,11 @@ inline const char* errToString(RV3032::Err err) {
       return "PRIMARY_CELL_ALREADY_ATTEMPTED";
     case RV3032::Err::JOB_RESULT_UNAVAILABLE:return "JOB_RESULT_UNAVAILABLE";
     case RV3032::Err::INCOHERENT_DATA:      return "INCOHERENT_DATA";
+    case RV3032::Err::CONFIGURATION_CLEANUP_FAILED:
+      return "CONFIGURATION_CLEANUP_FAILED";
+    case RV3032::Err::TRANSPORT_CONTRACT_VIOLATION:
+      return "TRANSPORT_CONTRACT_VIOLATION";
+    case RV3032::Err::INTERNAL_STATE_ERROR: return "INTERNAL_STATE_ERROR";
     default:                                 return "UNKNOWN";
   }
 }
@@ -78,10 +83,6 @@ inline const char* stateColor(RV3032::DriverState state) {
 }
 
 inline const char* colorReset() { return LOG_COLOR_RESET; }
-
-inline const char* boolColor(bool value) {
-  return value ? LOG_COLOR_GREEN : LOG_COLOR_RED;
-}
 
 inline const char* successRateColor(float pct) {
   if (pct >= 99.9f) return LOG_COLOR_GREEN;
@@ -108,9 +109,8 @@ inline const char* totalFailureColor(uint32_t failures) {
  */
 inline void printHealthOneLine(RV3032::RV3032& driver) {
   RV3032::DriverState st = driver.state();
-  LOGI("Health: state=%s%s%s online=%s%s%s consecFail=%s%u%s ok=%s%lu%s fail=%s%lu%s",
+  LOGI("Health: state=%s%s%s consecFail=%s%u%s ok=%s%lu%s fail=%s%lu%s",
        stateColor(st), stateToString(st), colorReset(),
-       boolColor(driver.isOnline()), driver.isOnline() ? "true" : "false", colorReset(),
        failureCountColor(driver.consecutiveFailures()), driver.consecutiveFailures(), colorReset(),
        successCountColor(driver.totalSuccess()), (unsigned long)driver.totalSuccess(), colorReset(),
        totalFailureColor(driver.totalFailures()), (unsigned long)driver.totalFailures(), colorReset());
@@ -124,7 +124,6 @@ inline void printHealthVerbose(RV3032::RV3032& driver) {
   RV3032::Status lastErr = driver.lastError();
   uint32_t now = millis();
 
-  const bool online = driver.isOnline();
   const uint32_t totalSuccess = driver.totalSuccess();
   const uint32_t totalFailures = driver.totalFailures();
   uint32_t total = totalSuccess + totalFailures;
@@ -133,7 +132,6 @@ inline void printHealthVerbose(RV3032::RV3032& driver) {
   LOG_SERIAL.println();
   LOGI("=== Driver Health ===");
   LOGI("  State: %s%s%s", stateColor(st), stateToString(st), colorReset());
-  LOGI("  Online: %s%s%s", boolColor(online), online ? "true" : "false", colorReset());
   LOGI("  Consecutive failures: %s%u%s",
        failureCountColor(driver.consecutiveFailures()),
        driver.consecutiveFailures(),
@@ -246,60 +244,5 @@ inline void printHealthDiff(const HealthSnapshot& before, const HealthSnapshot& 
     LOGI("  (no changes)");
   }
 }
-
-/**
- * @brief Continuously monitor health with periodic logging.
- * Call from loop() for real-time monitoring.
- */
-class HealthMonitor {
-public:
-  /**
-   * @brief Initialize monitor with logging interval.
-   * @param intervalMs How often to log (0 = only on change)
-   */
-  void begin(uint32_t intervalMs = 1000) {
-    _intervalMs = intervalMs;
-    _lastLogMs = 0;
-    _lastState = RV3032::DriverState::UNINIT;
-    _lastConsecFail = 0;
-  }
-
-  /**
-   * @brief Check and optionally log health changes.
-   * @param driver Driver instance to monitor
-   * @param forceLog If true, always log even if no change
-   */
-  void tick(RV3032::RV3032& driver, bool forceLog = false) {
-    uint32_t now = millis();
-    RV3032::DriverState currentState = driver.state();
-    uint8_t currentFail = driver.consecutiveFailures();
-
-    bool stateChanged = (currentState != _lastState);
-    bool failChanged = (currentFail != _lastConsecFail);
-    bool intervalElapsed = (_intervalMs > 0 && (now - _lastLogMs >= _intervalMs));
-
-    if (stateChanged || failChanged || intervalElapsed || forceLog) {
-      if (stateChanged) {
-        LOGI("[HEALTH] State transition: %s%s%s -> %s%s%s",
-             stateColor(_lastState), stateToString(_lastState), colorReset(),
-             stateColor(currentState), stateToString(currentState), colorReset());
-      }
-
-      if (intervalElapsed || forceLog) {
-        printHealthOneLine(driver);
-      }
-
-      _lastState = currentState;
-      _lastConsecFail = currentFail;
-      _lastLogMs = now;
-    }
-  }
-
-private:
-  uint32_t _intervalMs = 1000;
-  uint32_t _lastLogMs = 0;
-  RV3032::DriverState _lastState = RV3032::DriverState::UNINIT;
-  uint8_t _lastConsecFail = 0;
-};
 
 }  // namespace diag

@@ -29,9 +29,6 @@
 #define LOG_COLOR_CYAN   "\033[36m"
 #define LOG_COLOR_GRAY   "\033[90m"
 #define LOG_COLOR_RESULT(ok) ((ok) ? LOG_COLOR_GREEN : LOG_COLOR_RED)
-#define LOG_COLOR_STATE(online, failures) \
-  ((online) ? (((failures) > 0U) ? LOG_COLOR_YELLOW : LOG_COLOR_GREEN) : LOG_COLOR_RED)
-
 inline const char* log_bool_str(bool value) { return value ? "yes" : "no"; }
 
 /**

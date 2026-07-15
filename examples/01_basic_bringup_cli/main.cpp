@@ -20,6 +20,8 @@
 
 #include "examples/common/BoardConfig.h"
 #include "examples/common/BusDiag.h"
+#include "examples/common/CliShell.h"
+#include "examples/common/CommandHandler.h"
 #include "examples/common/I2cTransport.h"
 #include "examples/common/CliStyle.h"
 #include "examples/common/Log.h"
@@ -29,14 +31,28 @@
 
 static RV3032::RV3032 g_rtc;
 
-static bool operation_accepted(const RV3032::Status& st) {
-  return st.ok() || st.inProgress();
-}
+enum class PendingSurface : uint8_t {
+  NONE,
+  ORDINARY_JOB,
+  EEPROM
+};
 
-static const char* cooperative_suffix(const RV3032::Status& st) {
-  return st.inProgress()
-      ? " (cooperative active-only job accepted; EEPROM persistence disabled)"
-      : " (active-only; EEPROM persistence disabled)";
+struct PendingOperation {
+  PendingSurface surface = PendingSurface::NONE;
+  const char* name = nullptr;
+  RV3032::Status ordinaryStatus = RV3032::Status::Ok();
+};
+
+static PendingOperation g_pendingOperation{};
+
+static bool operationAccepted(const char* name, const RV3032::Status& status) {
+  if (status.inProgress()) {
+    g_pendingOperation.surface = PendingSurface::ORDINARY_JOB;
+    g_pendingOperation.name = name;
+    g_pendingOperation.ordinaryStatus = RV3032::Status::Ok();
+    return true;
+  }
+  return status.ok();
 }
 
 static const char* primary_failure_stage_name(
@@ -76,11 +92,14 @@ static const char* stateToStr(RV3032::DriverState state) {
   }
 }
 
-static const char* stateColor(RV3032::DriverState state, bool online, uint8_t consecutiveFailures) {
-  if (state == RV3032::DriverState::UNINIT) {
-    return LOG_COLOR_RESET;
+static const char* stateColor(RV3032::DriverState state) {
+  switch (state) {
+    case RV3032::DriverState::READY: return LOG_COLOR_GREEN;
+    case RV3032::DriverState::DEGRADED: return LOG_COLOR_YELLOW;
+    case RV3032::DriverState::OFFLINE: return LOG_COLOR_RED;
+    case RV3032::DriverState::UNINIT: return LOG_COLOR_GRAY;
+    default: return LOG_COLOR_RESET;
   }
-  return LOG_COLOR_STATE(online, consecutiveFailures);
 }
 
 static const char* healthChangeColor(bool changed) {
@@ -132,7 +151,120 @@ static const char* errToStr(RV3032::Err code) {
       return "PRIMARY_CELL_ALREADY_ATTEMPTED";
     case RV3032::Err::JOB_RESULT_UNAVAILABLE:return "JOB_RESULT_UNAVAILABLE";
     case RV3032::Err::INCOHERENT_DATA:      return "INCOHERENT_DATA";
+    case RV3032::Err::CONFIGURATION_CLEANUP_FAILED:
+      return "CONFIGURATION_CLEANUP_FAILED";
+    case RV3032::Err::TRANSPORT_CONTRACT_VIOLATION:
+      return "TRANSPORT_CONTRACT_VIOLATION";
+    case RV3032::Err::INTERNAL_STATE_ERROR: return "INTERNAL_STATE_ERROR";
     default: return "UNKNOWN";
+  }
+}
+
+static const char* configurationFinalStateToStr(
+    RV3032::ConfigurationFinalState state) {
+  switch (state) {
+    case RV3032::ConfigurationFinalState::UNCHANGED: return "UNCHANGED";
+    case RV3032::ConfigurationFinalState::REQUESTED_VERIFIED:
+      return "REQUESTED_VERIFIED";
+    case RV3032::ConfigurationFinalState::SAFE_DISABLED_VERIFIED:
+      return "SAFE_DISABLED_VERIFIED";
+    case RV3032::ConfigurationFinalState::UNKNOWN: return "UNKNOWN";
+    default: return "INVALID";
+  }
+}
+
+static void printConfigurationReport(const char* name) {
+  RV3032::ConfigurationJobReport report{};
+  RV3032::Status result = RV3032::Status::Error(
+      RV3032::Err::JOB_RESULT_UNAVAILABLE, "No configuration result");
+  if (strcmp(name, "timer configuration") == 0) {
+    result = g_rtc.getSetTimerJobResult(report);
+  } else if (strcmp(name, "backup configuration") == 0) {
+    result = g_rtc.getSetBackupSwitchModeJobResult(report);
+  } else if (strcmp(name, "CLKOUT configuration") == 0) {
+    result = g_rtc.getSetClkoutConfigJobResult(report);
+  } else {
+    return;
+  }
+
+  if (result.code == RV3032::Err::JOB_RESULT_UNAVAILABLE ||
+      result.code == RV3032::Err::IN_PROGRESS) {
+    LOGE("%s result evidence unavailable: %s", name, errToStr(result.code));
+    return;
+  }
+  Serial.printf(
+      "%s evidence: final=%s mutation_attempted=%s operation=%s detail=%ld cleanup=%s detail=%ld\n",
+      name, configurationFinalStateToStr(report.finalState),
+      log_bool_str(report.mutationAttempted),
+      errToStr(report.operationStatus.code),
+      static_cast<long>(report.operationStatus.detail),
+      errToStr(report.cleanupStatus.code),
+      static_cast<long>(report.cleanupStatus.detail));
+}
+
+static void reportPendingCompletion(const RV3032::Status* persistenceStatus) {
+  const char* name = g_pendingOperation.name == nullptr
+                         ? "cooperative operation"
+                         : g_pendingOperation.name;
+  const RV3032::Status operationStatus = g_pendingOperation.ordinaryStatus;
+  if (operationStatus.ok()) {
+    LOGI("%s terminal status: OK", name);
+  } else {
+    LOGE("%s terminal status: %s (detail=%ld, message=%s)",
+         name, errToStr(operationStatus.code),
+         static_cast<long>(operationStatus.detail),
+         operationStatus.msg == nullptr ? "" : operationStatus.msg);
+  }
+  printConfigurationReport(name);
+
+  if (persistenceStatus != nullptr) {
+    RV3032::SettingsSnapshot snapshot{};
+    const RV3032::Status settingsStatus = g_rtc.getSettings(snapshot);
+    if (settingsStatus.ok()) {
+      Serial.printf(
+          "%s persistence: terminal=%s detail=%ld operation=%s detail=%ld cleanup=%s detail=%ld\n",
+          name, errToStr(persistenceStatus->code),
+          static_cast<long>(persistenceStatus->detail),
+          errToStr(snapshot.eepromOperationStatus.code),
+          static_cast<long>(snapshot.eepromOperationStatus.detail),
+          errToStr(snapshot.eepromCleanupStatus.code),
+          static_cast<long>(snapshot.eepromCleanupStatus.detail));
+    } else {
+      LOGE("%s persistence terminal status: %s", name,
+           errToStr(persistenceStatus->code));
+    }
+  }
+}
+
+static void pollPendingOperation(uint32_t nowMs) {
+  if (g_pendingOperation.surface == PendingSurface::ORDINARY_JOB) {
+    uint8_t instructionsUsed = 0;
+    const RV3032::Status status =
+        g_rtc.pollJob(nowMs, 1, instructionsUsed);
+    if (status.inProgress()) {
+      return;
+    }
+    g_pendingOperation.ordinaryStatus = status;
+    if (g_rtc.isEepromBusy()) {
+      g_pendingOperation.surface = PendingSurface::EEPROM;
+      return;
+    }
+    reportPendingCompletion(nullptr);
+    g_pendingOperation = PendingOperation{};
+    cli::printPrompt();
+    return;
+  }
+
+  if (g_pendingOperation.surface == PendingSurface::EEPROM) {
+    uint8_t instructionsUsed = 0;
+    const RV3032::Status status =
+        g_rtc.pollEeprom(nowMs, 1, instructionsUsed);
+    if (status.inProgress() || g_rtc.isEepromBusy()) {
+      return;
+    }
+    reportPendingCompletion(&status);
+    g_pendingOperation = PendingOperation{};
+    cli::printPrompt();
   }
 }
 
@@ -156,14 +288,9 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
   
   // Driver health snapshot
   const RV3032::DriverState drvState = g_rtc.state();
-  const bool online = g_rtc.isOnline();
   Serial.printf("  Driver State: %s%s%s\n",
-                stateColor(drvState, online, g_rtc.consecutiveFailures()),
+                stateColor(drvState),
                 stateToStr(drvState),
-                LOG_COLOR_RESET);
-  Serial.printf("  isOnline: %s%s%s\n",
-                online ? LOG_COLOR_GREEN : LOG_COLOR_RED,
-                log_bool_str(online),
                 LOG_COLOR_RESET);
   Serial.printf("  Consecutive Failures: %d\n", g_rtc.consecutiveFailures());
   Serial.printf("  Total: success=%lu, failures=%lu\n",
@@ -187,50 +314,44 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
 
 static RV3032::Status read_user_eeprom_chunk(uint8_t offset, uint8_t length,
                                               uint8_t* out) {
-  RV3032::Status st = g_rtc.startReadUserEepromJob(offset, length, millis(), 1000);
-  const uint32_t started = millis();
-  while (st.inProgress() && static_cast<uint32_t>(millis() - started) < 1000) {
+  static constexpr uint32_t TIMEOUT_MS = 1000U;
+  const uint32_t startedMs = millis();
+  const uint32_t deadlineMs = startedMs + TIMEOUT_MS;
+  RV3032::Status st = g_rtc.startReadUserEepromJob(
+      offset, length, startedMs, TIMEOUT_MS);
+  while (st.inProgress() &&
+         static_cast<int32_t>(deadlineMs - millis()) > 0) {
     uint8_t used = 0;
     st = g_rtc.pollJob(millis(), 1, used);
     if (st.inProgress()) delay(1);
   }
+  if (st.inProgress()) {
+    uint8_t used = 0;
+    st = g_rtc.pollJob(deadlineMs, 1, used);
+  }
   if (!st.ok()) return st;
   RV3032::PersistentReadResult result{};
   st = g_rtc.getPersistentReadJobResult(result);
-  if (!st.ok() || !result.persistentVerified || result.length != length) return st;
+  if (!st.ok()) return st;
+  if (!result.persistentVerified || result.length != length) {
+    return RV3032::Status::Error(RV3032::Err::INCOHERENT_DATA,
+                                 "Persistent read proof is incomplete");
+  }
   memcpy(out, result.data, length);
   return RV3032::Status::Ok();
 }
 
-/**
- * @brief Non-blocking line reader from Serial.
- */
-static String read_line() {
-  static String buffer;
-  while (Serial.available()) {
-    const char c = static_cast<char>(Serial.read());
-    if (c == '\r') {
-      continue;
-    }
-    if (c == '\n') {
-      String result = buffer;
-      buffer = "";
-      return result;
-    }
-    if (buffer.length() < 128) {
-      buffer += c;
-    }
-  }
-  return "";
-}
-
-static bool pop_token(String& text, String& token) {
+static bool popToken(String& text, String& token) {
   text.trim();
   if (text.length() == 0) {
     return false;
   }
-  const int split = text.indexOf(' ');
-  if (split < 0) {
+  size_t split = 0;
+  while (split < text.length() &&
+         !isspace(static_cast<unsigned char>(text[split]))) {
+    ++split;
+  }
+  if (split == text.length()) {
     token = text;
     text = "";
     return true;
@@ -240,17 +361,14 @@ static bool pop_token(String& text, String& token) {
   return true;
 }
 
-static bool parse_u8_token(const String& token, uint8_t& value) {
-  if (token.length() == 0) {
-    return false;
+static bool parseExactTokens(String text, String* tokens, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (!popToken(text, tokens[i])) {
+      return false;
+    }
   }
-  char* end = nullptr;
-  const unsigned long parsed = strtoul(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0' || parsed > 0xFFUL) {
-    return false;
-  }
-  value = static_cast<uint8_t>(parsed);
-  return true;
+  String extra;
+  return !popToken(text, extra);
 }
 
 static bool parse_timestamp_source(String token, RV3032::TimestampSource& source) {
@@ -300,24 +418,6 @@ static const char* backup_mode_name(RV3032::BackupSwitchMode mode) {
   }
 }
 
-static bool parse_backup_mode(String token, RV3032::BackupSwitchMode& mode) {
-  token.trim();
-  token.toLowerCase();
-  if (token == "off" || token == "0") {
-    mode = RV3032::BackupSwitchMode::Off;
-    return true;
-  }
-  if (token == "level" || token == "lsm" || token == "1") {
-    mode = RV3032::BackupSwitchMode::Level;
-    return true;
-  }
-  if (token == "direct" || token == "dsm" || token == "2") {
-    mode = RV3032::BackupSwitchMode::Direct;
-    return true;
-  }
-  return false;
-}
-
 /**
  * @brief Print available commands.
  */
@@ -347,7 +447,8 @@ static void print_help() {
   cli::printHelpItem("alarm_int [0|1]", "Disable/enable alarm interrupt (no args = show)");
   cli::printHelpItem("alarm_clear", "Clear alarm flag");
   cli::printHelpItem("timer", "Show timer config");
-  cli::printHelpItem("timer <ticks> <freq 0..3> <en 0|1>", "Set timer");
+  cli::printHelpItem("timer <ticks 1..4095> <freq 0..3> <en 0|1>",
+                     "Set timer");
 
   cli::printHelpSection("Clock And Event");
   cli::printHelpItem("clkout [0|1]", "Disable/enable clock output (no args = show)");
@@ -363,14 +464,14 @@ static void print_help() {
   cli::printHelpSection("Status And Registers");
   cli::printHelpItem("status", "Read status register");
   cli::printHelpItem("statusf", "Read decoded status flags");
-  cli::printHelpItem("status_clear <mask>", "Clear status flags by explicit mask");
+  cli::printHelpItem("status_clear <mask 0..255>", "Clear status flags by explicit decimal mask");
   cli::printHelpItem("validity", "Read PORF/VLF/BSF validity flags");
   cli::printHelpItem("ram [offset len]", "Dump user RAM (default all 16 bytes)");
-  cli::printHelpItem("ram_write <offset> <byte...>", "Write user RAM bytes");
+  cli::printHelpItem("ram_write <offset> <byte...>", "Write decimal user RAM bytes");
   cli::printHelpItem("reg <addr>", "Read register byte");
   cli::printHelpItem("reg <addr> <val> [confirm]", "Write register byte; confirm required outside user RAM");
   cli::printHelpItem("eeprom", "EEPROM stats and user EEPROM dump");
-  cli::printHelpItem("backup [off|level|direct]", "Show or set active battery backup PMU");
+  cli::printHelpItem("backup [status|off|direct|level]", "Show or cooperatively configure backup PMU");
   cli::printHelpItem("primary-cell ensure CONFIRM-PRIMARY-CELL",
                      "Explicit one-shot primary-cell provisioning");
   cli::printHelpItem("clear_porf", "Clear power-on reset flag");
@@ -379,7 +480,7 @@ static void print_help() {
 
   cli::printHelpSection("Diagnostics");
   cli::printHelpItem("drv", "Show driver state and health");
-  cli::printHelpItem("probe", "Probe device (no health tracking)");
+  cli::printHelpItem("probe", "Read 0x51 Status register without health tracking");
   cli::printHelpItem("recover", "Manual recovery attempt");
   cli::printHelpItem("verbose [0|1]", "Enable verbose status output (no args = show)");
   cli::printHelpItem("stress [N]", "Run N iterations stress test (default 100)");
@@ -448,9 +549,20 @@ static void cmd_set(const String& args) {
     return;
   }
 
-  int year, month, day, hour, minute, second;
-  if (sscanf(args.c_str(), "%d %d %d %d %d %d",
-             &year, &month, &day, &hour, &minute, &second) != 6) {
+  String tokens[6];
+  uint16_t year = 0;
+  uint8_t month = 0;
+  uint8_t day = 0;
+  uint8_t hour = 0;
+  uint8_t minute = 0;
+  uint8_t second = 0;
+  if (!parseExactTokens(args, tokens, 6) ||
+      !cmd::parseU16Token(tokens[0], year) ||
+      !cmd::parseU8Token(tokens[1], month) ||
+      !cmd::parseU8Token(tokens[2], day) ||
+      !cmd::parseU8Token(tokens[3], hour) ||
+      !cmd::parseU8Token(tokens[4], minute) ||
+      !cmd::parseU8Token(tokens[5], second)) {
     LOGE("Invalid format. Usage: set YYYY MM DD HH MM SS");
     return;
   }
@@ -462,13 +574,18 @@ static void cmd_set(const String& args) {
   dt.hour = hour;
   dt.minute = minute;
   dt.second = second;
-  dt.weekday = RV3032::RV3032::computeWeekday(year, month, day);
+  RV3032::Status st = RV3032::RV3032::computeWeekday(
+      year, month, day, dt.weekday);
+  if (!st.ok()) {
+    LOGE("Invalid date: %s", st.msg);
+    return;
+  }
 
-  RV3032::Status st = g_rtc.setTime(dt);
+  st = g_rtc.setTime(dt);
   if (!st.ok()) {
     LOGE("setTime() failed: %s", st.msg);
   } else {
-    LOGI("Time set successfully");
+    LOGI("Calendar set completed");
     print_datetime(dt);
   }
 }
@@ -478,7 +595,7 @@ static void cmd_set(const String& args) {
  */
 static void cmd_setbuild() {
   RV3032::DateTime dt;
-  if (!RV3032::RV3032::parseBuildTime(dt)) {
+  if (!RV3032::RV3032::parseBuildTime(dt).ok()) {
     LOGE("parseBuildTime() failed");
     return;
   }
@@ -487,7 +604,7 @@ static void cmd_setbuild() {
   if (!st.ok()) {
     LOGE("setTime() failed: %s", st.msg);
   } else {
-    LOGI("Time set to build timestamp:");
+    LOGI("Build timestamp calendar set completed");
     print_datetime(dt);
   }
 }
@@ -508,13 +625,19 @@ static void cmd_unix(const String& args) {
     return;
   }
 
-  const uint32_t ts = static_cast<uint32_t>(strtoul(args.c_str(), nullptr, 0));
+  String token;
+  uint32_t ts = 0;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseU32Token(token, ts)) {
+    LOGE("Usage: unix [timestamp]");
+    return;
+  }
   RV3032::Status st = g_rtc.setUnix(ts);
   if (!st.ok()) {
     LOGE("setUnix() failed: %s", st.msg);
     return;
   }
-  LOGI("Unix timestamp set to %lu", static_cast<unsigned long>(ts));
+  LOGI("Unix timestamp %lu set completed", static_cast<unsigned long>(ts));
 }
 
 /**
@@ -549,6 +672,10 @@ static void cmd_ts(const String& args) {
     Serial.printf(" hundredths=%u", ts.hundredths);
   }
   Serial.println();
+  if (!ts.timeValid) {
+    Serial.println(F("  Time: empty/unset"));
+    return;
+  }
   Serial.print(F("  Time: "));
   print_datetime(ts.time);
 }
@@ -561,12 +688,12 @@ static void cmd_ts_reset(const String& args) {
   }
 
   RV3032::Status st = g_rtc.resetTimestamp(source);
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("timestamp reset", st)) {
     LOGE("resetTimestamp(%s) failed: %s", timestamp_source_name(source), st.msg);
     return;
   }
-  LOGI("%s timestamp reset requested%s", timestamp_source_name(source),
-       cooperative_suffix(st));
+  LOGI("%s timestamp reset %s", timestamp_source_name(source),
+       st.inProgress() ? "accepted" : "completed");
 }
 
 /**
@@ -615,18 +742,26 @@ static void cmd_alarm_set(const String& args) {
     return;
   }
 
-  int minute, hour, date;
-  if (sscanf(args.c_str(), "%d %d %d", &minute, &hour, &date) != 3) {
+  String tokens[3];
+  uint8_t minute = 0;
+  uint8_t hour = 0;
+  uint8_t date = 0;
+  if (!parseExactTokens(args, tokens, 3) ||
+      !cmd::parseU8Token(tokens[0], minute) ||
+      !cmd::parseU8Token(tokens[1], hour) ||
+      !cmd::parseU8Token(tokens[2], date)) {
     LOGE("Invalid format. Usage: alarm_set MM HH DD");
     return;
   }
 
   RV3032::Status st = g_rtc.setAlarmTime(minute, hour, date);
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("alarm time", st)) {
     LOGE("setAlarmTime() failed: %s", st.msg);
   } else {
-    LOGI("Alarm time requested: %02d:%02d (date=%02d)%s",
-         hour, minute, date, cooperative_suffix(st));
+    LOGI("Alarm time %s: %02u:%02u (date=%02u)",
+         st.inProgress() ? "accepted" : "completed",
+         static_cast<unsigned>(hour), static_cast<unsigned>(minute),
+         static_cast<unsigned>(date));
   }
 }
 
@@ -647,18 +782,25 @@ static void cmd_alarm_match(const String& args) {
     return;
   }
 
-  int matchMin, matchHour, matchDate;
-  if (sscanf(args.c_str(), "%d %d %d", &matchMin, &matchHour, &matchDate) != 3) {
+  String tokens[3];
+  bool matchMin = false;
+  bool matchHour = false;
+  bool matchDate = false;
+  if (!parseExactTokens(args, tokens, 3) ||
+      !cmd::parseBool01Token(tokens[0], matchMin) ||
+      !cmd::parseBool01Token(tokens[1], matchHour) ||
+      !cmd::parseBool01Token(tokens[2], matchDate)) {
     LOGE("Invalid format. Usage: alarm_match M H D (1=on, 0=off)");
     return;
   }
 
-  RV3032::Status st = g_rtc.setAlarmMatch(matchMin != 0, matchHour != 0, matchDate != 0);
-  if (!operation_accepted(st)) {
+  RV3032::Status st = g_rtc.setAlarmMatch(matchMin, matchHour, matchDate);
+  if (!operationAccepted("alarm match", st)) {
     LOGE("setAlarmMatch() failed: %s", st.msg);
   } else {
-    LOGI("Alarm match requested: minute=%d hour=%d date=%d%s",
-         matchMin, matchHour, matchDate, cooperative_suffix(st));
+    LOGI("Alarm match %s: minute=%d hour=%d date=%d",
+         st.inProgress() ? "accepted" : "completed",
+         matchMin ? 1 : 0, matchHour ? 1 : 0, matchDate ? 1 : 0);
   }
 }
 
@@ -678,13 +820,19 @@ static void cmd_alarm_int(const String& args) {
     return;
   }
 
-  bool enable = (args.toInt() != 0);
+  String token;
+  bool enable = false;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseBool01Token(token, enable)) {
+    LOGE("Usage: alarm_int [0|1]");
+    return;
+  }
   RV3032::Status st = g_rtc.enableAlarmInterrupt(enable);
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("alarm interrupt", st)) {
     LOGE("enableAlarmInterrupt() failed: %s", st.msg);
   } else {
-    LOGI("Alarm interrupt %s requested%s",
-         enable ? "enabled" : "disabled", cooperative_suffix(st));
+    LOGI("Alarm interrupt %s %s", enable ? "enable" : "disable",
+         st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -693,10 +841,10 @@ static void cmd_alarm_int(const String& args) {
  */
 static void cmd_alarm_clear() {
   RV3032::Status st = g_rtc.clearAlarmFlag();
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("alarm flag clear", st)) {
     LOGE("clearAlarmFlag() failed: %s", st.msg);
   } else {
-    LOGI("Alarm flag clear requested%s", cooperative_suffix(st));
+    LOGI("Alarm flag clear %s", st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -715,16 +863,21 @@ static void cmd_clkout(const String& args) {
     return;
   }
 
-  bool enable = (args.toInt() != 0);
-  RV3032::Status st = g_rtc.setClkoutEnabled(enable);
-  if (st.ok()) {
-    LOGI("Clock output %s", enable ? "enabled" : "disabled");
-  } else if (st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Clock output %s requested%s", enable ? "enabled" : "disabled",
-         cooperative_suffix(st));
-  } else {
-    LOGE("setClkoutEnabled() failed: %s", st.msg);
+  String token;
+  bool enable = false;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseBool01Token(token, enable)) {
+    LOGE("Usage: clkout [0|1]");
+    return;
   }
+  RV3032::Status st = g_rtc.setClkoutEnabled(enable);
+  const char* operationName = enable ? "CLKOUT enable" : "CLKOUT disable";
+  if (!operationAccepted(operationName, st)) {
+    LOGE("setClkoutEnabled() failed: %s", st.msg);
+    return;
+  }
+  LOGI("Clock output %s %s", enable ? "enable" : "disable",
+       st.inProgress() ? "accepted" : "completed");
 }
 
 /**
@@ -745,22 +898,22 @@ static void cmd_clkout_freq(const String& args) {
     return;
   }
 
-  int freq = args.toInt();
-  if (freq < 0 || freq > 3) {
+  String token;
+  uint8_t freq = 0;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseU8Token(token, freq) || freq > 3U) {
     LOGE("Invalid frequency. Range: 0..3");
     return;
   }
 
   RV3032::ClkoutFrequency freqEnum = static_cast<RV3032::ClkoutFrequency>(freq);
   RV3032::Status st = g_rtc.setClkoutFrequency(freqEnum);
-  if (st.ok()) {
-    LOGI("Clock output frequency set to %s", freqStr[freq]);
-  } else if (st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Clock output frequency %s requested%s", freqStr[freq],
-         cooperative_suffix(st));
-  } else {
+  if (!operationAccepted("CLKOUT configuration", st)) {
     LOGE("setClkoutFrequency() failed: %s", st.msg);
+    return;
   }
+  LOGI("Clock output frequency %s %s", freqStr[freq],
+       st.inProgress() ? "accepted" : "completed");
 }
 
 /**
@@ -778,17 +931,20 @@ static void cmd_offset(const String& args) {
       Serial.printf("Frequency offset: %.2f ppm\n", ppm);
     }
   } else {
-    // Set offset
-    float ppm = args.toFloat();
-    RV3032::Status st = g_rtc.setOffsetPpm(ppm);
-    if (st.ok()) {
-      LOGI("Frequency offset set to %.2f ppm", ppm);
-    } else if (st.code == RV3032::Err::IN_PROGRESS) {
-      LOGI("Frequency offset %.2f ppm requested%s", ppm,
-           cooperative_suffix(st));
-    } else {
-      LOGE("setOffsetPpm() failed: %s", st.msg);
+    String token;
+    float ppm = 0.0f;
+    if (!parseExactTokens(args, &token, 1) ||
+        !cmd::parseFloatToken(token, ppm)) {
+      LOGE("Usage: offset [finite-ppm]");
+      return;
     }
+    RV3032::Status st = g_rtc.setOffsetPpm(ppm);
+    if (!operationAccepted("frequency offset", st)) {
+      LOGE("setOffsetPpm() failed: %s", st.msg);
+      return;
+    }
+    LOGI("Frequency offset %.2f ppm %s", ppm,
+         st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -829,25 +985,29 @@ static void cmd_timer(const String& args) {
     return;
   }
 
-  int ticks = 0;
-  int freq = 0;
-  int enable = 0;
-  if (sscanf(args.c_str(), "%d %d %d", &ticks, &freq, &enable) != 3 ||
-      ticks < 0 || ticks > 4095 || freq < 0 || freq > 3 ||
-      (enable != 0 && enable != 1)) {
-    LOGE("Usage: timer <ticks 0..4095> <freq 0..3> <en 0|1>");
+  String tokens[3];
+  uint16_t ticks = 0;
+  uint8_t freq = 0;
+  bool enable = false;
+  if (!parseExactTokens(args, tokens, 3) ||
+      !cmd::parseU16Token(tokens[0], ticks) || ticks < 1U || ticks > 4095U ||
+      !cmd::parseU8Token(tokens[1], freq) || freq > 3U ||
+      !cmd::parseBool01Token(tokens[2], enable)) {
+    LOGE("Usage: timer <ticks 1..4095> <freq 0..3> <en 0|1>");
     return;
   }
 
-  RV3032::Status st = g_rtc.setTimer(static_cast<uint16_t>(ticks),
+  RV3032::Status st = g_rtc.setTimer(ticks,
                                      static_cast<RV3032::TimerFrequency>(freq),
-                                     enable != 0);
-  if (!operation_accepted(st)) {
+                                     enable);
+  if (!operationAccepted("timer configuration", st)) {
     LOGE("setTimer() failed: %s", st.msg);
     return;
   }
-  LOGI("Timer requested: ticks=%d freq=%d enable=%d%s",
-       ticks, freq, enable, cooperative_suffix(st));
+  LOGI("Timer %s: ticks=%u freq=%u enable=%d",
+       st.inProgress() ? "accepted" : "completed",
+       static_cast<unsigned>(ticks), static_cast<unsigned>(freq),
+       enable ? 1 : 0);
 }
 
 static void cmd_evi(const String& args) {
@@ -865,66 +1025,60 @@ static void cmd_evi(const String& args) {
     return;
   }
 
-  const int split = args.indexOf(' ');
-  const String sub = (split >= 0) ? args.substring(0, split) : args;
-  String rest = (split >= 0) ? args.substring(split + 1) : "";
-  rest.trim();
+  String tokens[2];
+  if (!parseExactTokens(args, tokens, 2)) {
+    LOGE("Usage: evi <edge|debounce|overwrite> <value>");
+    return;
+  }
+  String sub = tokens[0];
+  sub.toLowerCase();
 
   if (sub == "edge") {
-    if (rest.length() == 0) {
-      cmd_evi("");
-      return;
-    }
-    const int v = rest.toInt();
-    if (v != 0 && v != 1) {
+    bool rising = false;
+    if (!cmd::parseBool01Token(tokens[1], rising)) {
       LOGE("Usage: evi edge [0|1]");
       return;
     }
-    RV3032::Status st = g_rtc.setEviEdge(v != 0);
-    if (!operation_accepted(st)) {
+    RV3032::Status st = g_rtc.setEviEdge(rising);
+    if (!operationAccepted("EVI edge", st)) {
       LOGE("setEviEdge() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI edge %s requested%s", v ? "rising" : "falling",
-         cooperative_suffix(st));
+    LOGI("EVI edge %s %s", rising ? "rising" : "falling",
+         st.inProgress() ? "accepted" : "completed");
     return;
   }
 
   if (sub == "debounce") {
-    if (rest.length() == 0) {
-      cmd_evi("");
-      return;
-    }
-    const int v = rest.toInt();
-    if (v < 0 || v > 3) {
+    uint8_t value = 0;
+    if (!cmd::parseU8Token(tokens[1], value) || value > 3U) {
       LOGE("Usage: evi debounce [0..3]");
       return;
     }
-    RV3032::Status st = g_rtc.setEviDebounce(static_cast<RV3032::EviDebounce>(v));
-    if (!operation_accepted(st)) {
+    RV3032::Status st = g_rtc.setEviDebounce(
+        static_cast<RV3032::EviDebounce>(value));
+    if (!operationAccepted("EVI debounce", st)) {
       LOGE("setEviDebounce() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI debounce %d requested%s", v, cooperative_suffix(st));
+    LOGI("EVI debounce %u %s", static_cast<unsigned>(value),
+         st.inProgress() ? "accepted" : "completed");
     return;
   }
 
   if (sub == "overwrite") {
-    if (rest.length() == 0) {
-      cmd_evi("");
-      return;
-    }
-    const int v = rest.toInt();
-    if (v != 0 && v != 1) {
+    bool overwrite = false;
+    if (!cmd::parseBool01Token(tokens[1], overwrite)) {
       LOGE("Usage: evi overwrite [0|1]");
       return;
     }
-    RV3032::Status st = g_rtc.setEviOverwrite(v != 0);
-    if (!operation_accepted(st)) {
+    RV3032::Status st = g_rtc.setEviOverwrite(overwrite);
+    if (!operationAccepted("EVI overwrite", st)) {
       LOGE("setEviOverwrite() failed: %s", st.msg);
       return;
     }
-    LOGI("EVI overwrite %d requested%s", v, cooperative_suffix(st));
+    LOGI("EVI overwrite %d %s", overwrite ? 1 : 0,
+         st.inProgress() ? "accepted" : "completed");
     return;
   }
 
@@ -953,24 +1107,24 @@ static void cmd_statusf() {
 
 static void cmd_status_clear(const String& args) {
   if (args.length() == 0) {
-    LOGE("Usage: status_clear <mask 0..0xFF>");
+    LOGE("Usage: status_clear <decimal mask 0..255>");
     return;
   }
 
-  const unsigned long parsed = strtoul(args.c_str(), nullptr, 0);
-  if (parsed > 0xFFUL) {
-    LOGE("Usage: status_clear <mask 0..0xFF>");
+  String token;
+  uint8_t mask = 0;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseU8Token(token, mask)) {
+    LOGE("Usage: status_clear <decimal mask 0..255>");
     return;
   }
-  const uint8_t mask = static_cast<uint8_t>(parsed);
-
   RV3032::Status st = g_rtc.clearStatus(mask);
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("Status flag clear", st)) {
     LOGE("clearStatus() failed: %s", st.msg);
     return;
   }
-  LOGI("Status clear requested with mask=0x%02X%s", mask,
-       cooperative_suffix(st));
+  LOGI("Status clear mask=0x%02X %s", mask,
+       st.inProgress() ? "accepted" : "completed");
 }
 
 static void cmd_reg(const String& args) {
@@ -981,28 +1135,18 @@ static void cmd_reg(const String& args) {
     return;
   }
 
-  const int split = trimmed.indexOf(' ');
-  const String addrTok = (split >= 0) ? trimmed.substring(0, split) : trimmed;
-  String valueTok = (split >= 0) ? trimmed.substring(split + 1) : "";
-  valueTok.trim();
-  String confirmTok;
-  const int valueSplit = valueTok.indexOf(' ');
-  if (valueSplit >= 0) {
-    confirmTok = valueTok.substring(valueSplit + 1);
-    valueTok = valueTok.substring(0, valueSplit);
-    valueTok.trim();
-    confirmTok.trim();
-    confirmTok.toLowerCase();
+  String addrTok;
+  if (!popToken(trimmed, addrTok)) {
+    LOGE("Usage: reg <addr> [value] [confirm]");
+    return;
   }
-
-  const unsigned long addrRaw = strtoul(addrTok.c_str(), nullptr, 0);
-  if (addrRaw > 0xFFUL) {
+  uint8_t reg = 0;
+  if (!cmd::parseRegisterToken(addrTok, reg)) {
     LOGE("Register address out of range");
     return;
   }
-  const uint8_t reg = static_cast<uint8_t>(addrRaw);
-
-  if (valueTok.length() == 0) {
+  String valueTok;
+  if (!popToken(trimmed, valueTok)) {
     uint8_t value = 0;
     RV3032::Status st = g_rtc.readRegister(reg, value);
     if (!st.ok()) {
@@ -1013,25 +1157,34 @@ static void cmd_reg(const String& args) {
     return;
   }
 
-  const unsigned long valueRaw = strtoul(valueTok.c_str(), nullptr, 0);
-  if (valueRaw > 0xFFUL) {
+  uint8_t value = 0;
+  if (!cmd::parseRegisterToken(valueTok, value)) {
     LOGE("Register value out of range");
     return;
   }
 
   const bool userRamReg = (reg >= RV3032::cmd::REG_USER_RAM_START &&
                            reg <= RV3032::cmd::REG_USER_RAM_END);
-  if (!userRamReg && confirmTok != "confirm") {
+  String confirmTok;
+  const bool hasConfirmation = popToken(trimmed, confirmTok);
+  String extra;
+  if (popToken(trimmed, extra)) {
+    LOGE("Usage: reg <addr> [value] [confirm]");
+    return;
+  }
+  confirmTok.toLowerCase();
+  if ((!userRamReg && (!hasConfirmation || confirmTok != "confirm")) ||
+      (userRamReg && hasConfirmation)) {
     LOGE("Register writes outside user RAM require: reg <addr> <value> confirm");
     return;
   }
 
-  RV3032::Status st = g_rtc.writeRegister(reg, static_cast<uint8_t>(valueRaw));
+  RV3032::Status st = g_rtc.writeRegister(reg, value);
   if (!st.ok()) {
     LOGE("writeRegister(0x%02X) failed: %s", reg, st.msg);
     return;
   }
-  LOGI("reg[0x%02X] <= 0x%02lX", reg, valueRaw);
+  LOGI("reg[0x%02X] <= 0x%02X", reg, value);
 }
 
 static void cmd_ram(const String& args) {
@@ -1040,14 +1193,14 @@ static void cmd_ram(const String& args) {
   uint8_t offset = 0;
   uint8_t len = 16;
 
-  if (pop_token(rest, token)) {
-    if (!parse_u8_token(token, offset) || offset >= 16) {
+  if (popToken(rest, token)) {
+    if (!cmd::parseU8Token(token, offset) || offset >= 16) {
       LOGE("Usage: ram [offset 0..15] [len 1..16]");
       return;
     }
     len = static_cast<uint8_t>(16U - offset);
-    if (pop_token(rest, token)) {
-      if (!parse_u8_token(token, len) || len == 0 || len > static_cast<uint8_t>(16U - offset)) {
+    if (popToken(rest, token)) {
+      if (!cmd::parseU8Token(token, len) || len == 0 || len > static_cast<uint8_t>(16U - offset)) {
         LOGE("Usage: ram [offset 0..15] [len 1..16]");
         return;
       }
@@ -1084,15 +1237,16 @@ static void cmd_ram_write(const String& args) {
   String rest = args;
   String token;
   uint8_t offset = 0;
-  if (!pop_token(rest, token) || !parse_u8_token(token, offset) || offset >= 16) {
+  if (!popToken(rest, token) || !cmd::parseU8Token(token, offset) || offset >= 16) {
     LOGE("Usage: ram_write <offset 0..15> <byte...>");
     return;
   }
 
   uint8_t values[16] = {};
   size_t len = 0;
-  while (pop_token(rest, token)) {
-    if (len >= static_cast<size_t>(16U - offset) || !parse_u8_token(token, values[len])) {
+  while (popToken(rest, token)) {
+    if (len >= static_cast<size_t>(16U - offset) ||
+        !cmd::parseU8Token(token, values[len])) {
       LOGE("Usage: ram_write <offset 0..15> <byte...>");
       return;
     }
@@ -1104,13 +1258,13 @@ static void cmd_ram_write(const String& args) {
   }
 
   RV3032::Status st = g_rtc.writeUserRam(offset, values, len);
-  if (!st.ok()) {
+  if (!operationAccepted("user RAM write", st)) {
     LOGE("writeUserRam() failed: %s", st.msg);
     return;
   }
-  LOGI("Wrote %u byte(s) to user RAM offset %u",
-       static_cast<unsigned>(len),
-       static_cast<unsigned>(offset));
+  LOGI("User RAM write of %u byte(s) at offset %u %s",
+       static_cast<unsigned>(len), static_cast<unsigned>(offset),
+       st.inProgress() ? "accepted" : "completed");
 }
 
 /**
@@ -1221,7 +1375,7 @@ static void cmd_eeprom() {
 }
 
 /**
- * @brief Handle 'backup' command - show or set battery-backup PMU settings.
+ * @brief Handle the read-only 'backup' battery-backup PMU diagnostic.
  */
 static void cmd_backup(const String& args) {
   String modeArg = args;
@@ -1277,27 +1431,30 @@ static void cmd_backup(const String& args) {
     return;
   }
 
-  RV3032::Status st = RV3032::Status::Ok();
   RV3032::BackupSwitchMode mode = RV3032::BackupSwitchMode::Off;
-  if (!parse_backup_mode(modeArg, mode)) {
-    LOGE("Expected backup [off|level|direct]");
+  if (modeArg == "direct") {
+    mode = RV3032::BackupSwitchMode::Direct;
+  } else if (modeArg == "level") {
+    mode = RV3032::BackupSwitchMode::Level;
+  } else if (modeArg != "off") {
+    LOGE("Usage: backup [status|off|direct|level]");
     return;
   }
 
-  st = g_rtc.setBackupSwitchMode(mode);
-  if (st.ok() || st.code == RV3032::Err::IN_PROGRESS) {
-    LOGI("Backup mode %s requested%s",
-         backup_mode_name(mode),
-         cooperative_suffix(st));
-  } else {
-    LOGE("setBackupSwitchMode() failed: %s", st.msg);
+  const RV3032::Status st =
+      g_rtc.startSetBackupSwitchModeJob(mode, millis());
+  if (!operationAccepted("backup configuration", st)) {
+    LOGE("startSetBackupSwitchModeJob() failed: %s", st.msg);
+    return;
   }
+  LOGI("Backup mode %s %s", backup_mode_name(mode),
+       st.inProgress() ? "accepted" : "completed");
 }
 
 static void cmd_primary_cell(const String& args) {
-  String confirmation = args;
-  confirmation.trim();
-  if (confirmation != "ensure CONFIRM-PRIMARY-CELL") {
+  String tokens[2];
+  if (!parseExactTokens(args, tokens, 2) || tokens[0] != "ensure" ||
+      tokens[1] != "CONFIRM-PRIMARY-CELL") {
     LOGE("Exact confirmation required: primary-cell ensure CONFIRM-PRIMARY-CELL");
     return;
   }
@@ -1348,10 +1505,11 @@ static void cmd_primary_cell(const String& args) {
  */
 static void cmd_clear_bsf() {
   RV3032::Status st = g_rtc.clearBackupSwitchFlag();
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("backup flag clear", st)) {
     LOGE("clearBackupSwitchFlag() failed: %s", st.msg);
   } else {
-    LOGI("Backup switchover flag clear requested%s", cooperative_suffix(st));
+    LOGI("Backup switchover flag clear %s",
+         st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -1360,10 +1518,11 @@ static void cmd_clear_bsf() {
  */
 static void cmd_clear_porf() {
   RV3032::Status st = g_rtc.clearPowerOnResetFlag();
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("power-on reset flag clear", st)) {
     LOGE("clearPowerOnResetFlag() failed: %s", st.msg);
   } else {
-    LOGI("Power-on reset flag clear requested%s", cooperative_suffix(st));
+    LOGI("Power-on reset flag clear %s",
+         st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -1373,10 +1532,11 @@ static void cmd_clear_porf() {
 static void cmd_clear_vlf() {
   RV3032::Status st = g_rtc.clearVoltageLowFlag();
   print_verbose_status("clearVoltageLowFlag", st);
-  if (!operation_accepted(st)) {
+  if (!operationAccepted("voltage-low flag clear", st)) {
     LOGE("clearVoltageLowFlag() failed: %s", st.msg);
   } else {
-    LOGI("Voltage low flag clear requested%s", cooperative_suffix(st));
+    LOGI("Voltage low flag clear %s",
+         st.inProgress() ? "accepted" : "completed");
   }
 }
 
@@ -1391,7 +1551,6 @@ static void cmd_drv() {
   RV3032::SettingsSnapshot snap;
   (void)g_rtc.getSettings(snap);
   const RV3032::DriverState state = snap.state;
-  const bool online = g_rtc.isOnline();
   const bool initialized = snap.initialized;
   const uint32_t totalOk = g_rtc.totalSuccess();
   const uint32_t totalFail = g_rtc.totalFailures();
@@ -1400,12 +1559,8 @@ static void cmd_drv() {
                                 ? (100.0f * static_cast<float>(totalOk) / static_cast<float>(total))
                                 : 0.0f;
   Serial.printf("State: %s%s%s\n",
-                stateColor(state, online, g_rtc.consecutiveFailures()),
+                stateColor(state),
                 stateToStr(state),
-                LOG_COLOR_RESET);
-  Serial.printf("isOnline: %s%s%s\n",
-                online ? LOG_COLOR_GREEN : LOG_COLOR_RED,
-                log_bool_str(online),
                 LOG_COLOR_RESET);
   Serial.printf("isInitialized: %s%s%s\n",
                 initialized ? LOG_COLOR_GREEN : LOG_COLOR_RED,
@@ -1492,10 +1647,10 @@ static void cmd_drv() {
 }
 
 /**
- * @brief Handle 'probe' command - probe device without health tracking.
+ * @brief Handle one raw 0x51 Status-register communication probe.
  */
 static void cmd_probe() {
-  Serial.println(F("Probing device (no health tracking)..."));
+  Serial.println(F("Probing address 0x51 Status-register communication (no health tracking)..."));
   
   // Capture health before
   uint8_t failsBefore = g_rtc.consecutiveFailures();
@@ -1510,7 +1665,7 @@ static void cmd_probe() {
   uint32_t failureAfter = g_rtc.totalFailures();
   
   if (st.ok()) {
-    LOGI("Probe OK - device responding");
+    LOGI("Probe OK - address 0x51 responded for this transaction; chip identity is not proven");
   } else {
     LOGE("Probe FAILED: %s (code=%s, detail=%ld)",
          st.msg, errToStr(st.code), static_cast<long>(st.detail));
@@ -1552,8 +1707,8 @@ static void cmd_recover() {
   }
   
   Serial.printf("State: %s%s%s -> %s%s%s\n",
-                stateColor(stateBefore, g_rtc.isOnline(), failsBefore), stateToStr(stateBefore), LOG_COLOR_RESET,
-                stateColor(stateAfter, g_rtc.isOnline(), failsAfter), stateToStr(stateAfter), LOG_COLOR_RESET);
+                stateColor(stateBefore), stateToStr(stateBefore), LOG_COLOR_RESET,
+                stateColor(stateAfter), stateToStr(stateAfter), LOG_COLOR_RESET);
   Serial.printf("Consecutive failures: %s%d%s -> %s%d%s\n",
                 goodIfZeroColor(failsBefore), failsBefore, LOG_COLOR_RESET,
                 goodIfZeroColor(failsAfter), failsAfter, LOG_COLOR_RESET);
@@ -1571,7 +1726,14 @@ static void cmd_verbose(const String& args) {
     return;
   }
   
-  g_verbose = (args.toInt() != 0);
+  String token;
+  bool verbose = false;
+  if (!parseExactTokens(args, &token, 1) ||
+      !cmd::parseBool01Token(token, verbose)) {
+    LOGE("Usage: verbose [0|1]");
+    return;
+  }
+  g_verbose = verbose;
   LOGI("Verbose mode: %s%s%s",
        onOffColor(g_verbose),
        g_verbose ? "ON" : "OFF",
@@ -1583,12 +1745,17 @@ static void cmd_verbose(const String& args) {
  * Tests I2C reliability and health tracking under load.
  */
 static void cmd_stress(const String& args) {
-  int iterations = 100;
+  uint32_t iterationCount = 100;
   if (args.length() > 0) {
-    iterations = args.toInt();
-    if (iterations < 1) iterations = 1;
-    if (iterations > 100000) iterations = 100000;
+    String token;
+    if (!parseExactTokens(args, &token, 1) ||
+        !cmd::parseU32Token(token, iterationCount) ||
+        iterationCount < 1U || iterationCount > 100000U) {
+      LOGE("Usage: stress [1..100000]");
+      return;
+    }
   }
+  const int iterations = static_cast<int>(iterationCount);
   
   Serial.printf("\n=== Stress Test: %d iterations ===\n", iterations);
   
@@ -1680,10 +1847,10 @@ static void cmd_stress(const String& args) {
                 failureMatch ? "OK" : "MISMATCH!",
                 LOG_COLOR_RESET);
   Serial.printf("Driver state: %s%s%s -> %s%s%s\n",
-                stateColor(stateBefore, g_rtc.isOnline(), g_rtc.consecutiveFailures()),
+                stateColor(stateBefore),
                 stateToStr(stateBefore),
                 LOG_COLOR_RESET,
-                stateColor(stateAfter, g_rtc.isOnline(), g_rtc.consecutiveFailures()),
+                stateColor(stateAfter),
                 stateToStr(stateAfter),
                 LOG_COLOR_RESET);
   Serial.printf("Consecutive failures: %d\n", g_rtc.consecutiveFailures());
@@ -1695,12 +1862,17 @@ static void cmd_stress(const String& args) {
  * Tests various API calls to exercise different code paths.
  */
 static void cmd_stress_mix(const String& args) {
-  int iterations = 50;
+  uint32_t iterationCount = 50;
   if (args.length() > 0) {
-    iterations = args.toInt();
-    if (iterations < 1) iterations = 1;
-    if (iterations > 100000) iterations = 100000;
+    String token;
+    if (!parseExactTokens(args, &token, 1) ||
+        !cmd::parseU32Token(token, iterationCount) ||
+        iterationCount < 1U || iterationCount > 100000U) {
+      LOGE("Usage: stress_mix [1..100000]");
+      return;
+    }
   }
+  const int iterations = static_cast<int>(iterationCount);
   
   Serial.printf("\n=== Mixed Operations Stress Test: %d iterations ===\n", iterations);
   
@@ -1838,7 +2010,7 @@ static void cmd_stress_mix(const String& args) {
                 LOG_COLOR_RESET);
   const RV3032::DriverState mixState = g_rtc.state();
   Serial.printf("Driver state: %s%s%s\n",
-                stateColor(mixState, g_rtc.isOnline(), g_rtc.consecutiveFailures()),
+                stateColor(mixState),
                 stateToStr(mixState),
                 LOG_COLOR_RESET);
   Serial.printf("Consecutive failures: %d\n", g_rtc.consecutiveFailures());
@@ -1962,7 +2134,8 @@ static void cmd_selftest() {
   if (g_rtc.state() == RV3032::DriverState::OFFLINE) {
     reportSkip("recover", "selftest is read-only; use recover command");
   }
-  reportCheck("isOnline", g_rtc.isOnline(), "");
+  reportCheck("driver state initialized",
+              g_rtc.state() != RV3032::DriverState::UNINIT, "");
 
   Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
                 goodIfNonZeroColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
@@ -1979,96 +2152,110 @@ static void process_command(const String& line) {
     return;
   }
 
-  const int spaceIdx = line.indexOf(' ');
-  const String cmd = (spaceIdx >= 0) ? line.substring(0, spaceIdx) : line;
-  const String args = (spaceIdx >= 0) ? line.substring(spaceIdx + 1) : "";
+  String remaining = line;
+  String command;
+  if (!popToken(remaining, command)) {
+    return;
+  }
+  command.toLowerCase();
+  remaining.trim();
+  const String args = remaining;
 
-  if (cmd == "help" || cmd == "?") {
-    print_help();
-  } else if (cmd == "version" || cmd == "ver") {
-    cmd_version();
-  } else if (cmd == "scan") {
-    bus_diag::scan();
-  } else if (cmd == "read") {
-    cmd_time();
-  } else if (cmd == "cfg" || cmd == "settings") {
-    cmd_drv();
-  } else if (cmd == "time") {
-    cmd_time();
-  } else if (cmd == "set") {
+  const auto noArguments = [&](const char* usage) {
+    if (args.length() == 0U) {
+      return true;
+    }
+    LOGE("Usage: %s", usage);
+    return false;
+  };
+
+  if (command == "help" || command == "?") {
+    if (noArguments("help")) print_help();
+  } else if (command == "version" || command == "ver") {
+    if (noArguments("version")) cmd_version();
+  } else if (command == "scan") {
+    if (noArguments("scan")) bus_diag::scan();
+  } else if (command == "read") {
+    if (noArguments("read")) cmd_time();
+  } else if (command == "cfg" || command == "settings") {
+    if (noArguments("cfg")) cmd_drv();
+  } else if (command == "time") {
+    if (noArguments("time")) cmd_time();
+  } else if (command == "set") {
     cmd_set(args);
-  } else if (cmd == "setbuild") {
-    cmd_setbuild();
-  } else if (cmd == "unix") {
+  } else if (command == "setbuild") {
+    if (noArguments("setbuild")) cmd_setbuild();
+  } else if (command == "unix") {
     cmd_unix(args);
-  } else if (cmd == "temp") {
-    cmd_temp();
-  } else if (cmd == "ts") {
+  } else if (command == "temp") {
+    if (noArguments("temp")) cmd_temp();
+  } else if (command == "ts") {
     cmd_ts(args);
-  } else if (cmd == "ts_reset") {
+  } else if (command == "ts_reset") {
     cmd_ts_reset(args);
-  } else if (cmd == "alarm") {
-    cmd_alarm();
-  } else if (cmd == "alarm_set") {
+  } else if (command == "alarm") {
+    if (noArguments("alarm")) cmd_alarm();
+  } else if (command == "alarm_set") {
     cmd_alarm_set(args);
-  } else if (cmd == "alarm_match") {
+  } else if (command == "alarm_match") {
     cmd_alarm_match(args);
-  } else if (cmd == "alarm_int") {
+  } else if (command == "alarm_int") {
     cmd_alarm_int(args);
-  } else if (cmd == "alarm_clear") {
-    cmd_alarm_clear();
-  } else if (cmd == "clkout") {
+  } else if (command == "alarm_clear") {
+    if (noArguments("alarm_clear")) cmd_alarm_clear();
+  } else if (command == "clkout") {
     cmd_clkout(args);
-  } else if (cmd == "clkout_freq") {
+  } else if (command == "clkout_freq") {
     cmd_clkout_freq(args);
-  } else if (cmd == "offset") {
+  } else if (command == "offset") {
     cmd_offset(args);
-  } else if (cmd == "timer") {
+  } else if (command == "timer") {
     cmd_timer(args);
-  } else if (cmd == "evi") {
+  } else if (command == "evi") {
     cmd_evi(args);
-  } else if (cmd == "status") {
-    cmd_status();
-  } else if (cmd == "statusf") {
-    cmd_statusf();
-  } else if (cmd == "status_clear") {
+  } else if (command == "status") {
+    if (noArguments("status")) cmd_status();
+  } else if (command == "statusf") {
+    if (noArguments("statusf")) cmd_statusf();
+  } else if (command == "status_clear") {
     cmd_status_clear(args);
-  } else if (cmd == "validity") {
-    cmd_validity();
-  } else if (cmd == "ram") {
+  } else if (command == "validity") {
+    if (noArguments("validity")) cmd_validity();
+  } else if (command == "ram") {
     cmd_ram(args);
-  } else if (cmd == "ram_write") {
+  } else if (command == "ram_write") {
     cmd_ram_write(args);
-  } else if (cmd == "reg") {
+  } else if (command == "reg") {
     cmd_reg(args);
-  } else if (cmd == "eeprom") {
-    cmd_eeprom();
-  } else if (cmd == "backup") {
+  } else if (command == "eeprom") {
+    if (noArguments("eeprom")) cmd_eeprom();
+  } else if (command == "backup") {
     cmd_backup(args);
-  } else if (cmd == "primary-cell") {
+  } else if (command == "primary-cell") {
     cmd_primary_cell(args);
-  } else if (cmd == "clear_porf") {
-    cmd_clear_porf();
-  } else if (cmd == "clear_vlf") {
-    cmd_clear_vlf();
-  } else if (cmd == "clear_bsf") {
-    cmd_clear_bsf();
-  } else if (cmd == "drv") {
-    cmd_drv();
-  } else if (cmd == "probe") {
-    cmd_probe();
-  } else if (cmd == "recover") {
-    cmd_recover();
-  } else if (cmd == "verbose") {
+  } else if (command == "clear_porf") {
+    if (noArguments("clear_porf")) cmd_clear_porf();
+  } else if (command == "clear_vlf") {
+    if (noArguments("clear_vlf")) cmd_clear_vlf();
+  } else if (command == "clear_bsf") {
+    if (noArguments("clear_bsf")) cmd_clear_bsf();
+  } else if (command == "drv") {
+    if (noArguments("drv")) cmd_drv();
+  } else if (command == "probe") {
+    if (noArguments("probe")) cmd_probe();
+  } else if (command == "recover") {
+    if (noArguments("recover")) cmd_recover();
+  } else if (command == "verbose") {
     cmd_verbose(args);
-  } else if (cmd == "stress") {
+  } else if (command == "stress") {
     cmd_stress(args);
-  } else if (cmd == "stress_mix") {
+  } else if (command == "stress_mix") {
     cmd_stress_mix(args);
-  } else if (cmd == "selftest") {
-    cmd_selftest();
+  } else if (command == "selftest") {
+    if (noArguments("selftest")) cmd_selftest();
   } else {
-    LOGW("Unknown command: '%s'. Type 'help' for available commands.", cmd.c_str());
+    LOGW("Unknown command: '%s'. Type 'help' for available commands.",
+         command.c_str());
   }
 }
 
@@ -2106,14 +2293,14 @@ void setup() {
     return;
   }
 
-  LOGI("RTC callbacks bound; probing device explicitly...");
+  LOGI("RTC callbacks bound; probing address 0x51 communication explicitly...");
   st = g_rtc.probe();
   if (!st.ok()) {
     LOGE("RTC probe failed: %s (code=%s, detail=%ld)",
          st.msg, errToStr(st.code), static_cast<long>(st.detail));
     return;
   }
-  LOGI("RTC probe successful; no backup chemistry or EEPROM policy was applied");
+  LOGI("RTC address communication succeeded; chip identity, backup chemistry, and EEPROM policy were not proven or applied");
 
   LOGI("Driver state: %s", stateToStr(g_rtc.state()));
   LOGI("Type 'help' for available commands");
@@ -2122,23 +2309,18 @@ void setup() {
 }
 
 void loop() {
-  g_rtc.tick(millis());
-
-  if (g_rtc.isJobBusy()) {
-    uint8_t used = 0;
-    const RV3032::Status jobStatus = g_rtc.pollJob(millis(), 1, used);
-    if (!jobStatus.ok() && !jobStatus.inProgress() &&
-        jobStatus.code != RV3032::Err::BUSY) {
-      LOGE("RTC cooperative job failed: %s (code=%s, detail=%ld)",
-           jobStatus.msg, errToStr(jobStatus.code),
-           static_cast<long>(jobStatus.detail));
-    }
+  if (g_pendingOperation.surface != PendingSurface::NONE) {
+    pollPendingOperation(millis());
+    delay(10);
+    return;
   }
 
-  const String line = read_line();
-  if (line.length() > 0) {
+  String line;
+  if (cli_shell::readLine(line)) {
     process_command(line);
-    cli::printPrompt();
+    if (g_pendingOperation.surface == PendingSurface::NONE) {
+      cli::printPrompt();
+    }
   }
 
   delay(10);

@@ -43,7 +43,8 @@ static constexpr uint8_t REG_MINUTES = 0x02;
 static constexpr uint8_t REG_HOURS = 0x03;
 
 /// @brief Weekday register (0x04, read/write-protectable)
-/// BCD: b7-b3=reserved, b2-b0 = user-assigned value 0..6.
+/// Binary: b7-b3=reserved, b2-b0 = user-assigned value 0..6. It is not BCD
+/// and is not required to match the calendar date.
 static constexpr uint8_t REG_WEEKDAY = 0x04;
 
 /// @brief Date/Day-of-Month register (0x05, read/write-protectable)
@@ -292,19 +293,24 @@ static constexpr uint8_t REG_ACTIVE_TREFERENCE0 = 0xC4;
 /// @brief Active temperature-reference 1 mirror (0xC5)
 static constexpr uint8_t REG_ACTIVE_TREFERENCE1 = 0xC5;
 
-/// @brief Active password mirror 0 (0xC6, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 0
+/// (0xC6, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD0 = 0xC6;
 
-/// @brief Active password mirror 1 (0xC7, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 1
+/// (0xC7, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD1 = 0xC7;
 
-/// @brief Active password mirror 2 (0xC8, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 2
+/// (0xC8, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD2 = 0xC8;
 
-/// @brief Active password mirror 3 (0xC9, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 3
+/// (0xC9, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD3 = 0xC9;
 
-/// @brief Active password-enable mirror (0xCA, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password enable
+/// (0xCA, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PW_ENABLE = 0xCA;
 
 // ========== User EEPROM (0xCB–0xEA) ==========
@@ -435,6 +441,8 @@ static constexpr uint8_t TEMP_CLKF_BIT = 1;
 static constexpr uint8_t TEMP_CLKF_MASK = 0x02;
 static constexpr uint8_t TEMP_BSF_BIT = 0;
 static constexpr uint8_t TEMP_BSF_MASK = 0x01;
+static constexpr uint8_t TEMP_LSB_W0C_MASK =
+    EEPROM_EEF_MASK | TEMP_CLKF_MASK | TEMP_BSF_MASK; // 0x0B
 static constexpr uint8_t EEPROM_CLEAR_EEF_VALUE = 0x03;
 static constexpr uint8_t PERSISTENT_READ_SENTINEL = 0x80;
 
