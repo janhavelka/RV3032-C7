@@ -105,6 +105,10 @@ between cooperative polls.
 - PMU C0 fields are NCLKE, BSM, TCR, and TCM. TCR and TCM are independent.
 - TCM `00` disables the trickle charger. BSM `10` selects level switching.
 
+Maintained code uses the canonical command-table names `PMU_NCLKE_MASK` for
+the active-low CLKOUT gate and `TS_EVI_OVERWRITE_BIT` for EVI timestamp
+overwrite. Secondary compatibility aliases are not part of the v3 surface.
+
 UIE is update-event enable rather than an interrupt-only gate. UIE=0 suppresses
 both new UF generation and the corresponding INT event; there is no
 UF-polling-only mode. Changing periodic configuration does not clear a UF that
@@ -150,8 +154,52 @@ applications must keep output at or below 52 MHz when those characteristics
 are required. The legacy enable getter reports direct NCLKE state, not possible
 interrupt-selected activity, and the legacy frequency getter rejects OS=1;
 complete mode inspection uses the typed CLKOUT configuration getter.
+Configuration verification compares all four implemented active bytes C0..C3
+and reports the exact first mismatching expected/observed byte before entering
+bounded safe-disable reconciliation.
 The typed CLKF helpers inspect and cooperatively clear the interrupt-controlled
 clock-output latch while preserving the neighboring EEF and BSF W0C flags.
+
+Factory-delivery and refresh facts from Application Manual Rev. 1.3 pages 45,
+47, 54, 56, 62-65, and 68-72:
+
+| Byte/register | Delivery value | Meaning |
+| --- | ---: | --- |
+| C0 EEPROM PMU/RAM mirror | `0x00` | NCLKE=0 directly enables CLKOUT; backup and charger are disabled; TCR=0.6 kohm |
+| C2 EEPROM CLKOUT1/RAM mirror | `0x00` | HFD[7:0]=0 |
+| C3 EEPROM CLKOUT2/RAM mirror | `0x00` | OS=0, FD=00, HFD[12:8]=0; XTAL 32.768 kHz is selected |
+| Control 2 (`0x11`) | `0x00` | CLKIE=0; interrupt-controlled output is disabled |
+| Clock Interrupt Mask (`0x14`) | `0x00` | No source or delay is selected |
+| EVI Control (`0x15`) | `0x00` | CLKDE=0; no post-STOP CLKOUT delay |
+
+HFD=0 represents 8.192 kHz, but it is inactive while OS=0. The STOP bit has no
+effect on XTAL 32.768 kHz or HF output; it synchronously stops only the 1024 Hz,
+64 Hz, and 1 Hz XTAL selections. The CLKOUT pin is forced LOW in VBACKUP and
+resumes its selected frequency after return to VDD.
+
+After power-up, the POR refresh copies stored configuration EEPROM values into
+the RAM mirrors in approximately 66 ms; EEbusy reports that operation. With
+EERD=0, the automatic refresh at date increment can also overwrite active-only
+changes. Writing a mirror activates it immediately but is not durable. A
+WRITE_ONE to EEPROM is durable but does not activate a different value by
+itself; the library restores the requested active mirror after verified generic
+persistence.
+
+The library maps CLKOUT persistence as follows:
+
+- `setClkoutEnabled()` queues C0 only;
+- `setClkoutFrequency()` queues C0, C2, and C3 and forces OS=0 while retaining
+  the HFD bits;
+- `setClkoutConfig()` queues C0, C2, and C3 exactly;
+- C1 is preserved during staged C0..C3 active writes but is not queued;
+- CLKIE, CLKF, Clock Interrupt Mask, CLKDE, and interrupt source selection are
+  active-only and reset independently of configuration EEPROM.
+
+Persistence is opt-in through `Config::enableEepromWrites`. Active proof comes
+from the ordinary configuration job; durable proof comes later from the generic
+EEPROM owner after compare-before-write, at most one WRITE_ONE per changed byte,
+direct readback, and verified restoration. These software proofs do not show a
+physical CLKOUT waveform or voltage-domain behavior.
 
 Offset C1 is a signed six-bit measured-error correction with an exact nominal
 step of `1000000 / (32768 * 128)` = 0.238418579 ppm. The

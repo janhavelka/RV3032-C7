@@ -56,9 +56,6 @@ static constexpr const char* VERSION = RV3032_VERSION_STRING;
 /// @brief Encoded version for numeric comparison: MAJOR*10000 + MINOR*100 + PATCH.
 static constexpr uint32_t VERSION_CODE = 30000;
 
-/// @brief Backward-compatible alias used by older repositories.
-static constexpr int VERSION_INT = 30000;
-
 /// @brief Build date string.
 static constexpr const char* BUILD_DATE = RV3032_BUILD_DATE;
 

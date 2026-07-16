@@ -36,6 +36,26 @@ cooperative-job contracts, Phase 3 integration, and the independent Phase 4
 closure audit. The Phase 4 evidence report records the complete device-free
 matrix and separates software proof from physical HIL.
 
+## Current post-hardening cleanup
+
+The maintained v3 tree consolidates terminal status, typed configuration
+results, register-bit access, persistent evidence, and cleanup-reserve
+calculation in their existing owners. Unused example facades, duplicate
+scanner recovery, dead test/logging support, compatibility aliases, and an
+unrelated consumer-project version-generator branch have been removed. The
+cooperative configuration and EEPROM state machines remain explicit because
+their distinct mutation, reconciliation, deadline, and cleanup evidence is a
+safety boundary rather than accidental duplication.
+
+The maintained CLKOUT references distinguish the factory-delivery
+C0/C2/C3=`0x00` selection (direct XTAL 32.768 kHz) from a device's later
+EEPROM-restored power-on state, and document the exact active and persistent
+register ownership.
+
+Historical changelog entries, prompts, and dated reports may still name APIs
+or helpers that existed in the release they describe. They are not evidence
+that those paths remain in the maintained source.
+
 ## Historical v2 prompts and reports
 
 The v2.0.0 implementation prompt is ordered as one shared contract followed by

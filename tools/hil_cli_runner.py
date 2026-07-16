@@ -14,7 +14,7 @@ import re
 import statistics
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -26,6 +26,15 @@ except ImportError as exc:  # pragma: no cover - exercised by operator env
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PROMPT = "> "
+FAILURE_PATTERNS = (
+    "[E]",
+    "FAILED",
+    "[FAIL]",
+    "MISMATCH",
+    "RTC init failed",
+    "Check I2C wiring",
+)
+NONZERO_FAILURE_RE = re.compile(r"\bFAIL\s*[:=]\s*[1-9]\d*")
 
 
 @dataclass(frozen=True)
@@ -209,6 +218,14 @@ def one_line(text: str, limit: int = 180) -> str:
     return cleaned[: limit - 3] + "..."
 
 
+def output_failure_reason(clean: str) -> str | None:
+    if any(token in clean for token in FAILURE_PATTERNS):
+        return "failure token found"
+    if NONZERO_FAILURE_RE.search(clean):
+        return "nonzero failure count found"
+    return None
+
+
 def classify_output(
     text: str,
     expected: Iterable[str],
@@ -219,40 +236,27 @@ def classify_output(
     for token in expected_error_tokens:
         if token and token in clean:
             return "UNKNOWN", "expected fixture-limited error: " + token
-    failure_patterns = (
-        "[E]",
-        "FAILED",
-        "[FAIL]",
-        "MISMATCH",
-        "RTC init failed",
-        "Check I2C wiring",
-    )
-    if any(token in clean for token in failure_patterns):
-        return "FAIL", "failure token found"
-    if re.search(r"\bFAIL\s*[:=]\s*[1-9]\d*", clean):
-        return "FAIL", "nonzero failure count found"
+    failure_reason = output_failure_reason(clean)
+    if failure_reason is not None:
+        return "FAIL", failure_reason
     missing = [token for token in expected if token and token not in clean]
     if missing:
         return ("UNKNOWN" if allow_unknown else "FAIL"), "missing expected token(s): " + ", ".join(missing)
     return "PASS", ""
 
 
-def read_available(port: serial.Serial, idle_timeout_s: float, hard_timeout_s: float, stop_on_prompt: bool) -> str:
+def read_until_prompt(port: serial.Serial, hard_timeout_s: float) -> str:
     start = time.monotonic()
-    last_rx = start
     chunks: list[bytes] = []
     while True:
         now = time.monotonic()
         waiting = port.in_waiting
         if waiting:
             chunks.append(port.read(waiting))
-            last_rx = now
             text = b"".join(chunks).decode("utf-8", errors="replace")
-            if stop_on_prompt and has_prompt(text):
+            if has_prompt(text):
                 return text
         if now - start >= hard_timeout_s:
-            return b"".join(chunks).decode("utf-8", errors="replace")
-        if chunks and not stop_on_prompt and now - last_rx >= idle_timeout_s:
             return b"".join(chunks).decode("utf-8", errors="replace")
         time.sleep(0.02)
 
@@ -261,17 +265,7 @@ def has_terminal_result(text: str, expected: Iterable[str], expected_error_token
     clean = strip_ansi(text)
     if any(token and token in clean for token in expected_error_tokens):
         return True
-    failure_patterns = (
-        "[E]",
-        "FAILED",
-        "[FAIL]",
-        "MISMATCH",
-        "RTC init failed",
-        "Check I2C wiring",
-    )
-    if any(token in clean for token in failure_patterns):
-        return True
-    if re.search(r"\bFAIL\s*[:=]\s*[1-9]\d*", clean):
+    if output_failure_reason(clean) is not None:
         return True
     return all(token in clean for token in expected if token)
 
@@ -358,21 +352,11 @@ class HilSession:
         start = time.monotonic()
         if settle_s > 0:
             time.sleep(settle_s)
-        text = read_available(
-            self.serial,
-            idle_timeout_s=self.default_idle_timeout_s,
-            hard_timeout_s=timeout_s,
-            stop_on_prompt=True,
-        )
+        text = read_until_prompt(self.serial, timeout_s)
         if not has_prompt(text):
             self.serial.write(b"\n")
             self.serial.flush()
-            text += read_available(
-                self.serial,
-                idle_timeout_s=self.default_idle_timeout_s,
-                hard_timeout_s=timeout_s,
-                stop_on_prompt=True,
-            )
+            text += read_until_prompt(self.serial, timeout_s)
         elapsed = time.monotonic() - start
         self._record("", text)
         return text, elapsed
@@ -451,6 +435,8 @@ def run_parser_self_test() -> int:
         ("ok", "Probe OK\nHealth tracking: unchanged\n> ", ("Probe OK",), False, "PASS"),
         ("missing", "Temperature: 21.5 C\n> ", ("Current RTC time",), True, "UNKNOWN"),
         ("failure", "[E] Probe FAILED: I2C timeout\n> ", ("Probe OK",), False, "FAIL"),
+        ("nonzero-failure-count", "Selftest result: pass=11 FAIL=1 skip=0\n> ",
+         ("Selftest result:",), False, "FAIL"),
         ("selftest", "[PASS] readTime\nSelftest result: pass=12 fail=0 skip=0\n> ", ("Selftest result:", "fail=0"), False, "PASS"),
         ("ram-acceptance-only", "[I] User RAM write accepted\n> ",
          ("user RAM write terminal status: OK",), False, "FAIL"),
@@ -460,6 +446,16 @@ def run_parser_self_test() -> int:
         got, _ = classify_output(text, expected, allow_unknown)
         if got != want:
             print(f"parser-self-test {name}: got {got}, expected {want}")
+            failed += 1
+    terminal_cases = (
+        ("expected-error", "I2C timeout", ("missing",), ("I2C timeout",), True),
+        ("failure-count", "FAIL=2", ("missing",), (), True),
+        ("incomplete", "still running", ("done",), (), False),
+    )
+    for name, text, expected, expected_errors, want in terminal_cases:
+        got = has_terminal_result(text, expected, expected_errors)
+        if got != want:
+            print(f"parser-self-test terminal-{name}: got {got}, expected {want}")
             failed += 1
     missing_authorization = argparse.Namespace(
         destructive_setup=True,
@@ -539,17 +535,7 @@ def run_soak(
         if deadline - time.monotonic() < template.timeout_s + 1.0:
             break
         index += 1
-        step = Step(
-            test_id=f"SOAK-{index:06d}",
-            area=template.area,
-            command=template.command,
-            expected=template.expected,
-            timeout_s=template.timeout_s,
-            idle_timeout_s=template.idle_timeout_s,
-            allow_unknown=template.allow_unknown,
-            expected_error_tokens=template.expected_error_tokens,
-            notes=template.notes,
-        )
+        step = replace(template, test_id=f"SOAK-{index:06d}")
         res = session.run_step(step)
         results.append(res)
         stats.command_counts[template.command] = stats.command_counts.get(template.command, 0) + 1
@@ -761,7 +747,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="COM27")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--timeout-s", type=float, default=5.0, help="Reserved compatibility option; per-step timeouts are used.")
     parser.add_argument("--idle-timeout-s", type=float, default=0.35)
     parser.add_argument("--boot-timeout-s", type=float, default=8.0)
     parser.add_argument("--boot-settle-s", type=float, default=1.0)

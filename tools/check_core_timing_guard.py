@@ -4,7 +4,6 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
-from typing import Dict
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCAN_DIRS = ("src", "include")
@@ -21,10 +20,6 @@ INCLUDE_ARDUINO_RE = re.compile(r'^\s*#\s*include\s*[<\"]Arduino\.h[>\"]', re.MU
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
-
-ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {}
-ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {}
-
 
 def strip_non_code(text: str) -> str:
     text = BLOCK_COMMENT_RE.sub("", text)
@@ -45,15 +40,15 @@ def collect_sources() -> list[pathlib.Path]:
 
 
 def main() -> int:
-    observed_calls: Dict[str, Dict[str, int]] = {}
-    observed_includes: Dict[str, int] = {}
+    observed_calls: dict[str, dict[str, int]] = {}
+    observed_includes: dict[str, int] = {}
 
     for path in collect_sources():
         rel = path.relative_to(ROOT).as_posix()
         raw = path.read_text(encoding="utf-8", errors="replace")
         code = strip_non_code(raw)
 
-        call_counts: Dict[str, int] = {}
+        call_counts: dict[str, int] = {}
         for call_name, pattern in FORBIDDEN_CALLS.items():
             count = len(pattern.findall(code))
             if count > 0:
@@ -74,6 +69,12 @@ def main() -> int:
         encoding="utf-8", errors="replace"
     )
     command_table = (ROOT / "include/RV3032/CommandTable.h").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    version_header = (ROOT / "include/RV3032/Version.h").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    version_generator = (ROOT / "scripts/generate_version.py").read_text(
         encoding="utf-8", errors="replace"
     )
     source = (ROOT / "src/RV3032.cpp").read_text(
@@ -120,7 +121,8 @@ def main() -> int:
         "remainingBefore(",
         "earlierDeadline(",
         "EEPROM_CLEANUP_READY_TIMEOUT_MS +",
-        "6U * _config.i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS",
+        "6U * i2cTimeoutMs + EEPROM_WRITE_SETTLE_MS",
+        "persistentCleanupReserveMs(",
         "Password registers are unsupported",
         "Err::INTERNAL_STATE_ERROR",
         "Err::TRANSPORT_CONTRACT_VIOLATION",
@@ -132,6 +134,17 @@ def main() -> int:
     for token in required_source_tokens:
         if token not in source:
             errors.append(f"missing Phase 1 source contract: {token!r}")
+
+    clkout_default_tokens = (
+        "PMU_DEFAULT_ON_DELIVERY = 0x00",
+        "CLKOUT1_DEFAULT_ON_DELIVERY = 0x00",
+        "CLKOUT2_DEFAULT_ON_DELIVERY = 0x00",
+    )
+    for token in clkout_default_tokens:
+        if token not in command_table:
+            errors.append(f"missing exact CLKOUT factory default: {token!r}")
+    if "constexpr uint8_t CLKOUT_PERSIST_INDEXES[] = {0, 2, 3};" not in source:
+        errors.append("CLKOUT persistence must contain exactly C0, C2, and C3")
 
     deleted_symbols = (
         "PasswordCredential",
@@ -166,11 +179,42 @@ def main() -> int:
         "Status RV3032::setBackupSwitchMode(",
         "ClkoutConfig clkoutConfig",
         "uint8_t clkoutGuard",
+        "completedStatus",
+        "registerUpdateRequiredMask",
+        "registerUpdateForbiddenMask",
+        "registerUpdateGuardedClear",
+        "registerUpdateGuardFailureIsBusy",
+        "firstVerified",
+        "firstVerifiedValid",
+        "_eepromLastStatus",
+        "startEepromUpdate",
+        "PRIMARY_CELL_WRITE_COMMAND_CAP",
+        "writeCommandAttempts",
     )
     production_contract = header + "\n" + source
     for token in deleted_symbols:
         if token in production_contract:
             errors.append(f"deleted Phase 1 symbol remains in production: {token}")
+
+    public_production_contract = (
+        production_contract + "\n" + command_table + "\n" + version_header
+    )
+    for token, owner in (
+        (r"\bTS_OVERWRITE_BIT\b", public_production_contract),
+        (r"\bPMU_CLKOUT_DISABLE\b", public_production_contract),
+        (r"\bVERSION_INT\b",
+         public_production_contract + "\n" + version_generator),
+    ):
+        if re.search(token, owner):
+            errors.append(f"removed compatibility alias remains: {token}")
+
+    for token in (
+        "DEPENDENCY_VERSION_TARGETS",
+        "_render_dependency_versions_header",
+        "DependencyVersions.h",
+    ):
+        if token in version_generator:
+            errors.append(f"unrelated dependency-version generator remains: {token}")
 
     for token in (
         "REG_PASSWORD0", "REG_PASSWORD1", "REG_PASSWORD2", "REG_PASSWORD3",
@@ -192,7 +236,7 @@ def main() -> int:
             return ""
         return source[start:end]
 
-    poll_job = function_body("Status RV3032::pollJob(", "void RV3032::finishJob(")
+    poll_job = function_body("Status RV3032::pollJob(", "Status RV3032::finishJob(")
     persistent = function_body(
         "Status RV3032::processPersistentJob(", "Status RV3032::processEeprom("
     )
@@ -226,7 +270,7 @@ def main() -> int:
         "Status RV3032::ensureRead(",
     )
     process_eeprom = function_body(
-        "Status RV3032::processEeprom(", "Status RV3032::startEepromUpdate("
+        "Status RV3032::processEeprom(", "bool RV3032::eepromQueueContains("
     )
     begin_body = function_body("Status RV3032::begin(", "Status RV3032::tick(")
     persistent_read_start = function_body(
@@ -262,12 +306,16 @@ def main() -> int:
             errors.append(f"{name} does not propagate mutable time into persistence")
 
     cleanup_formula = re.compile(
+        r"constexpr\s+uint32_t\s+persistentCleanupReserveMs\("
+        r"uint32_t\s+i2cTimeoutMs\)\s*\{\s*return\s+"
         r"EEPROM_CLEANUP_READY_TIMEOUT_MS\s*\+\s*"
-        r"6U\s*\*\s*(?:_config|config)\.i2cTimeoutMs\s*\+\s*"
-        r"EEPROM_WRITE_SETTLE_MS"
+        r"6U\s*\*\s*i2cTimeoutMs\s*\+\s*"
+        r"EEPROM_WRITE_SETTLE_MS\s*;\s*\}"
     )
-    if len(cleanup_formula.findall(source)) != 4:
-        errors.append("cleanup reserve is not derived at all four Phase 1 owners")
+    if not cleanup_formula.search(source):
+        errors.append("shared cleanup-reserve formula has drifted")
+    if source.count("persistentCleanupReserveMs(") != 5:
+        errors.append("all four cleanup-reserve owners must use the shared helper")
     if "GENERIC_EEPROM_OPERATION_TIMEOUT_MS - cleanupReserveMs" not in process_eeprom:
         errors.append("generic queue cutoff is not derived from its whole deadline")
     for name, body, timeout_name in (
@@ -531,7 +579,7 @@ def main() -> int:
     if not re.search(
         r"case JobState::IDLE:\s*default:\s*"
         r"st = Status::Error\(\s*Err::INTERNAL_STATE_ERROR,.*?"
-        r"finishJob\(st\);\s*return st;",
+        r"return finishJob\(st\);",
         poll_job,
         re.DOTALL,
     ):
@@ -575,7 +623,7 @@ def main() -> int:
             "Impossible state during configuration cleanup",
             "_job.configurationReport.finalState =\n"
             "              ConfigurationFinalState::UNKNOWN",
-            "_job.state = configurationCleanupState(_job.activeKind)",
+            "_job.state = configurationRecoveryState(_job.activeKind)",
             "_job.persistentCleanupRequired",
             "_job.state = JobState::PERSISTENT",
         )
@@ -696,42 +744,10 @@ def main() -> int:
                 )
 
     for rel, counts in observed_calls.items():
-        if rel not in ALLOWED_CALL_COUNTS:
-            errors.append(f"forbidden timing calls in unexpected file: {rel} -> {counts}")
-            continue
-        expected = ALLOWED_CALL_COUNTS[rel]
-        for call_name, count in counts.items():
-            exp = expected.get(call_name, 0)
-            if count != exp:
-                errors.append(
-                    f"timing call count mismatch in {rel}: {call_name} observed={count}, expected={exp}"
-                )
-
-    for rel, expected in ALLOWED_CALL_COUNTS.items():
-        observed = observed_calls.get(rel, {})
-        for call_name, exp in expected.items():
-            obs = observed.get(call_name, 0)
-            if obs != exp:
-                errors.append(
-                    f"timing call count mismatch in {rel}: {call_name} observed={obs}, expected={exp}"
-                )
-        unexpected_calls = set(observed.keys()) - set(expected.keys())
-        if unexpected_calls:
-            errors.append(f"unexpected timing call types in {rel}: {sorted(unexpected_calls)}")
+        errors.append(f"forbidden timing calls in {rel}: {counts}")
 
     for rel, count in observed_includes.items():
-        exp = ALLOWED_INCLUDE_COUNTS.get(rel, 0)
-        if count != exp:
-            errors.append(
-                f"Arduino include count mismatch in {rel}: observed={count}, expected={exp}"
-            )
-
-    for rel, exp in ALLOWED_INCLUDE_COUNTS.items():
-        obs = observed_includes.get(rel, 0)
-        if obs != exp:
-            errors.append(
-                f"Arduino include count mismatch in {rel}: observed={obs}, expected={exp}"
-            )
+        errors.append(f"forbidden Arduino include in {rel}: count={count}")
 
     if errors:
         print("Core timing guard FAILED:")

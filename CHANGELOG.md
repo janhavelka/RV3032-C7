@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-07-16
+
+### Added
+
+- Canonical factory-delivery constants for PMU/CLKOUT configuration bytes and
+  native regression coverage for active-only refresh loss, C0-only CLKOUT
+  enable persistence, and exact C0/C2/C3 full-configuration persistence.
+
 ### Removed
 
 - Password credentials, protection-management APIs, authentication state,
@@ -21,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The misleading `isOnline()` Boolean, the CLI's local truncating line reader,
   permissive numeric parsers, unconditional EEPROM poll, and inferred parallel
   job owner.
+- Unused example-only transport, bus, and health facades; the duplicate scanner
+  recovery path; dead logging/style and native-stub helpers; the unused HIL
+  compatibility timeout; the redundant native environment alias; and a
+  project-specific dependency-header generator that did not belong to this
+  library.
+- Obsolete `TS_OVERWRITE_BIT`, `PMU_CLKOUT_DISABLE`, and `VERSION_INT`
+  compatibility aliases; use the canonical vendor bit names and
+  `VERSION_CODE`.
 
 ### Changed
 
@@ -55,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Probe documentation now describes address-`0x51` Status communication rather
   than presence or identity. Version metadata is generated as `3.0.0` for the
   breaking v3 integration surface.
+- Cooperative terminal handling, configuration-result retrieval, register-bit
+  access, persistent evidence, cleanup-reserve calculation, and CLI diagnostic
+  formatting now reuse their existing single owners instead of parallel
+  bookkeeping.
 
 ### Fixed
 
@@ -85,6 +105,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cooperative RAM writes and all other asynchronous CLI operations now print
   terminal evidence only after completion, and unset timestamp blocks no
   longer print a fictitious zero date.
+- CLKOUT verification now checks all four implemented active-configuration
+  bytes without an out-of-range mismatch lookup and reports the exact first
+  mismatching expected/observed byte.
+- The example scanner now restores the application Wire timeout after its
+  bounded scan, and CLI health-rate formatting widens the independent wrapping
+  counters before summing them.
 - CLI/HIL timer input now enforces the public 1..4095-tick range, and HIL RAM
   checks require terminal success rather than accepting admission text.
 - The CLI retains EEPROM ownership after an item-level failure while later
@@ -92,6 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Maintained weekday, Status-write side-effect, callback-timeout, presence,
   health-counter, README polling, and cross-phase documentation now match the
   implemented v3 contracts.
+- CLKOUT documentation now distinguishes the factory-delivery 32.768 kHz
+  output from later EEPROM-restored power-on state, names the exact persistent
+  bytes for each setter, and records the POR/24-hour refresh and VBACKUP-low
+  behavior from Application Manual Rev. 1.3.
 
 ## [2.0.0] - 2026-07-14
 
@@ -374,7 +404,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0

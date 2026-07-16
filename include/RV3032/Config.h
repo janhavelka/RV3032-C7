@@ -118,7 +118,9 @@ struct Config {
   ///       true, supported EEPROM-backed config changes may queue persistence
   ///       after an explicit typed setter.
   ///       begin() never reads or mutates the device and never queues work.
-  ///       When false, config is RAM-only (faster, saves EEPROM wear).
+  ///       When false, config is RAM-only (faster, saves EEPROM wear) and may
+  ///       be replaced by the next POR, automatic date-increment, or software
+  ///       refresh from stored EEPROM.
   ///       Typed setters that need read-modify-write return IN_PROGRESS and must
   ///       first be advanced through pollJob(). Their resulting active bytes are
   ///       then queued for tick()/pollEeprom() persistence.

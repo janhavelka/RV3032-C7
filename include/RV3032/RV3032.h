@@ -217,7 +217,13 @@ enum class TrickleChargeResistance : uint8_t {
   KOHM_12 = 3, ///< 12 kohms.
 };
 
-/** @brief Complete active CLKOUT oscillator/frequency configuration. */
+/**
+ * @brief Complete active CLKOUT oscillator/frequency configuration.
+ * @note The value-initialized object matches the factory-delivery C0/C2/C3
+ *       selection: direct output enabled, XTAL mode at 32.768 kHz, and a
+ *       stored HF divider of 1 (8.192 kHz when HF mode is later selected).
+ *       It is a request value, not evidence of the current chip state.
+ */
 struct ClkoutConfig {
   bool enabled = true; ///< Direct NCLKE enable; interrupt-selected CLKOUT may still activate when false.
   bool highFrequencyMode = false; ///< True for programmable high-frequency mode.
@@ -1230,7 +1236,8 @@ class RV3032 {
    *                direct output is disabled.
    * @return IN_PROGRESS when the active update is admitted. pollJob() returns
    *         its terminal result and may then queue generic persistence.
-   * @note Persistent if Config::enableEepromWrites is true
+   * @note When Config::enableEepromWrites is true, exact requested C0 is
+   *       queued after active readback proof. C2/C3 are unchanged.
    * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
    *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
    *          getEepromStatus() reports a terminal status.
@@ -1252,7 +1259,9 @@ class RV3032 {
    * @param freq Desired output frequency
    * @return IN_PROGRESS when the active update is admitted. pollJob() returns
    *         its terminal result and may then queue generic persistence.
-   * @note Persistent if Config::enableEepromWrites is true
+   * @note When Config::enableEepromWrites is true, exact requested C0, C2,
+   *       and C3 targets are queued after active readback proof. Persistent
+   *       compare/readback avoids writing an already-equal EEPROM byte.
    * @note This legacy helper selects crystal-derived mode (OS=0). Use
    *       setClkoutConfig() for high-frequency OS/HFD configuration.
    * @note Returns BUSY without mutation while interrupt-controlled CLKOUT is
@@ -1275,8 +1284,9 @@ class RV3032 {
 
   /**
    * @brief Cooperatively configure the complete active CLKOUT state.
-   * @note Queues wear-limited generic persistence when
-   *       Config::enableEepromWrites is true; finish with tick()/pollEeprom().
+   * @note Queues exact C0, C2, and C3 targets for wear-limited generic
+   *       persistence when Config::enableEepromWrites is true; finish with
+   *       tick()/pollEeprom(). C1 is only preserved during the active burst.
    * @note Both crystal FD and high-frequency HFD fields are stored regardless
    *       of which OS mode is active, so later mode changes retain both values.
    * @note The cooperative sequence first proves interrupt-controlled CLKOUT is
@@ -1291,7 +1301,10 @@ class RV3032 {
    *          through 52 MHz. Board/application design must enforce that limit.
    */
   Status setClkoutConfig(const ClkoutConfig& config);
-  /** @brief Read complete active CLKOUT state in one burst. */
+  /**
+   * @brief Read complete active CLKOUT state in one burst.
+   * @note This reads RAM mirrors C0..C3, not durable EEPROM proof.
+   */
   Status getClkoutConfig(ClkoutConfig& config);
   /** @brief Cooperatively set active-only clock-output interrupt enable. */
   Status setClockInterruptEnabled(bool enabled);
@@ -1935,7 +1948,6 @@ class RV3032 {
     JobKind activeKind = JobKind::NONE;
     JobKind completedKind = JobKind::NONE;
     Status lastStatus = Status::Ok();
-    Status completedStatus = Status::Ok();
     ConfigurationJobReport configurationReport{};
     bool configurationCleanupWriteAttempted = false;
     Status persistentOperationStatus = Status::Ok();
@@ -1961,10 +1973,6 @@ class RV3032 {
     uint8_t registerUpdateClearMask = 0;
     uint8_t registerUpdateSetMask = 0;
     uint8_t registerUpdateValue = 0;
-    uint8_t registerUpdateRequiredMask = 0;
-    uint8_t registerUpdateForbiddenMask = 0;
-    bool registerUpdateGuardedClear = false;
-    bool registerUpdateGuardFailureIsBusy = false;
     bool persistRegisterUpdate = false;
     QuiescenceGuard quiescenceGuard{};
     JobState quiescenceNextState = JobState::IDLE;
@@ -1991,8 +1999,6 @@ class RV3032 {
     TimeSnapshot timeSnapshot{};
     VerifiedTimeSetReport verifiedSet{};
     uint8_t calendarBuf[7] = {0};
-    DateTime firstVerified{};
-    bool firstVerifiedValid = false;
     EepromState persistentState = EepromState::IDLE;
     uint8_t persistentAddress = 0;
     uint8_t persistentLength = 0;
@@ -2021,7 +2027,6 @@ class RV3032 {
   bool _initialized = false;
   EepromOp _eeprom;
   JobOp _job;
-  Status _eepromLastStatus = Status::Ok();
   Status _eepromOperationStatus = Status::Ok();
   Status _eepromCleanupStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
@@ -2082,9 +2087,10 @@ class RV3032 {
       const uint8_t* buf, size_t len,
       uint32_t& nowMs, uint32_t deadlineMs);
 
-  bool remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
-                       uint32_t& remainingMs);
-  uint32_t earlierDeadline(uint32_t nowMs, uint32_t first, uint32_t second);
+  static bool remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
+                              uint32_t& remainingMs);
+  static uint32_t earlierDeadline(uint32_t nowMs, uint32_t first,
+                                  uint32_t second);
   TimedTransferResult readRegsBefore(
       uint8_t reg, uint8_t* buf, size_t len,
       uint32_t& nowMs, uint32_t deadlineMs);
@@ -2105,7 +2111,7 @@ class RV3032 {
 
   // EEPROM operations
   Status processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
-  Status startEepromUpdate(uint8_t reg, uint8_t value);
+  Status eepromTerminalStatus() const;
   Status readEepromFlags(bool& busy, bool& failed);
   bool eepromQueueContains(uint8_t reg, uint8_t value) const;
   bool eepromQueuePush(uint8_t reg, uint8_t value);
@@ -2113,7 +2119,12 @@ class RV3032 {
   Status processPersistentJob(uint32_t& nowMs, bool& callbackUsed);
   Status startPersistentReadJob(uint8_t address, uint8_t length,
                                 uint32_t nowMs, uint32_t timeoutMs);
-  void finishJob(const Status& status);
+  Status getConfigurationJobResult(
+      JobKind kind, const char* inProgressMessage,
+      const char* unavailableMessage, ConfigurationJobReport& out) const;
+  uint32_t twoTransferJobMinimumTimeoutMs() const;
+  void exposePersistentEvidence();
+  Status finishJob(const Status& status);
   bool workIdle() const;
 
   // Health tracking (called only by tracked transport wrappers)
@@ -2124,6 +2135,10 @@ class RV3032 {
   Status updateRegisterSingle(uint8_t reg, uint8_t implementedMask,
                               uint8_t clearMask, uint8_t setMask,
                               const QuiescenceGuard& quiescenceGuard);
+  Status updateRegisterBit(uint8_t reg, uint8_t implementedMask,
+                           uint8_t bitMask, bool enabled,
+                           const QuiescenceGuard& quiescenceGuard);
+  Status readRegisterBit(uint8_t reg, uint8_t bitMask, bool& value);
   Status startTempLsbFlagClear(uint8_t targetMask);
   Status updateRegisterBlock(uint8_t reg, uint8_t length,
                              const uint8_t* implementedMasks,
@@ -2137,7 +2152,6 @@ class RV3032 {
   }
   Status readPersistentC0ForEnsure(uint32_t operationStart,
                                    uint8_t& value,
-                                   PrimaryCellConfigurationReport& report,
                                    bool& callbackReturnedLate);
   Status cleanupPrimaryCellEnsure(uint32_t operationStart,
                                   uint8_t control1Before,

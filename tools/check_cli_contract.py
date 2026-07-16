@@ -9,17 +9,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 REQUIRED_COMMON = [
     "BoardConfig.h",
-    "BuildConfig.h",
     "Log.h",
     "I2cTransport.h",
     "I2cScanner.h",
     "CommandHandler.h",
-    "TransportAdapter.h",
-    "BusDiag.h",
     "CliShell.h",
     "CliStyle.h",
-    "HealthView.h",
+]
+
+REMOVED_COMMON = [
+    "BuildConfig.h",
+    "BusDiag.h",
     "HealthDiag.h",
+    "HealthView.h",
+    "TransportAdapter.h",
 ]
 
 MANDATORY_COMMANDS = [
@@ -60,6 +63,8 @@ def main() -> int:
 
     for name in REQUIRED_COMMON:
         ensure_exists(common_dir / name, f"common helper {name}")
+    for name in REMOVED_COMMON:
+        ensure_missing(common_dir / name, f"removed common helper {name}")
 
     text = bringup_main.read_text(encoding="utf-8", errors="replace")
     command_text = (common_dir / "CommandHandler.h").read_text(

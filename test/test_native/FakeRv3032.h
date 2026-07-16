@@ -77,6 +77,9 @@ struct FakeRv3032 {
   uint8_t pendingData = 0;
 
   FakeRv3032() {
+    // The fixture starts with the project's primary-cell LSM policy, not the
+    // factory-delivery C0 value. NCLKE, C2, and C3 remain at their vendor
+    // delivery defaults, so direct 32.768 kHz CLKOUT is still selected.
     persistent[0] = RV3032::cmd::PMU_BSM_LEVEL;
     resetFromPersistent();
   }

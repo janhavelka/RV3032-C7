@@ -211,6 +211,20 @@ Addresses `0xC0..0xC5` are active configuration mirrors. Persistent
 configuration and the 32-byte user EEPROM are accessed indirectly through
 EEADDR, EEDATA, and EECMD. The part does not contain FRAM.
 
+For CLKOUT, C0 owns NCLKE and C2/C3 own HFD/OS/FD. At factory delivery, the
+CLKOUT bytes C0, C2, and C3 all equal `0x00`: direct 32.768 kHz XTAL output is
+selected, with HFD=0 retained as the inactive 8.192 kHz HF selection. POR
+copies stored EEPROM into the mirrors
+after approximately 66 ms, and the automatic date-increment refresh can later
+replace active-only values while EERD=0. CLKOUT is forced LOW in VBACKUP.
+
+`setClkoutEnabled()` hands only C0 to persistence. The legacy frequency and
+complete configuration jobs hand exactly C0, C2, and C3 to the queue after
+requested active-state proof; C1 is preserved in the active burst but is never
+a CLKOUT persistence item. CLKIE, CLKF, Clock Interrupt Mask, and CLKDE remain
+active-only. Ordinary job completion and generic EEPROM completion are separate
+terminal evidence boundaries.
+
 Generic writes are disabled by default. When enabled, an active configuration
 job can hand its resulting bytes to the fixed queue. If the EEPROM state
 machine is idle, another persistence-producing setter may be admitted while
@@ -320,6 +334,34 @@ EEADDR/EEDATA/EECMD, and persistent storage require typed APIs. Password ranges
 `0x39..0x3C` and `0xC6..0xCA` are unsupported and rejected before transport;
 password protection must be disabled for supported operation. A protected part
 requires out-of-band service.
+
+## Internal ownership and reuse
+
+Terminal bookkeeping has one owner: finishing a job stores its exact terminal
+`Status`, records the completed kind, and returns the same value to the caller.
+The five configuration-result getters share one availability/copy path, so a
+typed report and its returned terminal status cannot drift. Single-bit register
+read/update helpers likewise preserve the existing tracked transport and
+quiescence owners instead of duplicating read-modify-write policy in each API.
+
+Persistent work keeps one evidence-copy path for typed read/write reports and
+one terminal-precedence rule for the generic queue: cleanup failure has
+semantic precedence, then the first forward operation failure, then `OK`.
+Cleanup reserve arithmetic and two-transfer admission minima each have one
+calculation owner. These helpers consolidate bookkeeping only; they do not
+merge transport attempts or state transitions.
+
+The timer, periodic, backup, CLKOUT, temperature, generic EEPROM, and
+primary-cell flows deliberately remain explicit. Their state order identifies
+which write may have reached silicon, which readback is reconciliation, which
+deadline applies, and which evidence survives cleanup. Replacing those owners
+with a generic registry or retry framework would hide safety-significant
+differences.
+
+Example integration follows the same rule. The CLI directly composes the
+board, transport, scanner, parser, shell, style, and logging helpers. The
+scanner borrows one scoped Wire timeout and restores the application value; it
+does not own recovery or another bus abstraction.
 
 ## Memory and concurrency
 

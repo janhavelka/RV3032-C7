@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 import tarfile
 
@@ -51,14 +52,9 @@ REQUIRED_PACKAGE_FILES = [
     "examples/common/CliShell.h",
     "examples/common/CommandHandler.h",
     "examples/common/BoardConfig.h",
-    "examples/common/BuildConfig.h",
-    "examples/common/BusDiag.h",
     "examples/common/CliStyle.h",
-    "examples/common/HealthDiag.h",
-    "examples/common/HealthView.h",
     "examples/common/I2cScanner.h",
     "examples/common/Log.h",
-    "examples/common/TransportAdapter.h",
     "docs/README.md",
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
@@ -140,6 +136,7 @@ def check_source() -> int:
         docs_text = docs_index.read_text(encoding="utf-8", errors="replace")
         for token in (
             "Active Functional-Hardening Prompt Suite 06",
+            "Current post-hardening cleanup",
             "2026-07-14-full-library-functional-audit.md",
             "2026-07-15-functional-hardening-closure-audit.md",
             "historical where they",
@@ -178,9 +175,18 @@ def check_source() -> int:
             "const uint32_t now = nowMs(nullptr);",
             "chip identity",
             "wrap from `UINT32_MAX` to zero",
+            "The maintained example glue is intentionally small",
+            "generates only this library's version header",
+            "CLKOUT factory default and persistence",
+            "approximately 66 ms POR refresh",
+            "setClkoutEnabled()` queues exact C0",
+            "In VBACKUP power state the pin is LOW",
         ),
         "docs/ARCHITECTURE.md": (
             "Staged configuration and reconciliation",
+            "Internal ownership and reuse",
+            "Terminal bookkeeping has one owner",
+            "one terminal-precedence rule",
             "SAFE_DISABLED_VERIFIED",
             "readback-only reconciliation",
             "TIE=0",
@@ -190,6 +196,8 @@ def check_source() -> int:
             "short staging write",
             "PendingOperation",
             "cannot prove RV3032",
+            "C0, C2, and C3 all equal `0x00`",
+            "setClkoutEnabled()` hands only C0",
         ),
         "docs/DEVICE_REFERENCE.md": (
             "UF-polling-only mode",
@@ -197,6 +205,11 @@ def check_source() -> int:
             "Persistent content proof and access-state cleanup proof are independent",
             "It is not BCD",
             "An assertion after the guard read cannot be",
+            "PMU_NCLKE_MASK",
+            "TS_EVI_OVERWRITE_BIT",
+            "compares all four implemented active bytes C0..C3",
+            "CLKOUT pin is forced LOW in VBACKUP",
+            "queues C0, C2, and C3",
         ),
         "docs/IDF_PORT.md": (
             "Status tick(uint32_t nowMs)",
@@ -209,6 +222,10 @@ def check_source() -> int:
             "pollStatus = rtc.pollJob(now, 1, used);",
             "pollStatus = rtc.pollEeprom(now, 1, used);",
             "Choose exactly one surface per owner-loop iteration.",
+            "consumer dependency pins and application-version metadata",
+            "generator owns only the RV3032",
+            "CLKOUT persistence is a two-surface operation",
+            "poll the generic EEPROM surface",
         ),
     }
     for rel, tokens in maintained_contract_tokens.items():
@@ -226,8 +243,6 @@ def check_source() -> int:
         ROOT / "include/RV3032/RV3032.h",
         ROOT / "src/RV3032.cpp",
         ROOT / "examples/01_basic_bringup_cli/main.cpp",
-        ROOT / "examples/common/HealthDiag.h",
-        ROOT / "examples/common/HealthView.h",
         ROOT / "README.md",
         ROOT / "docs/README.md",
         ROOT / "docs/ARCHITECTURE.md",
@@ -242,6 +257,32 @@ def check_source() -> int:
             errors.append(
                 f"false presence/identity claim remains in {path.relative_to(ROOT)}"
             )
+
+    for path in maintained_paths[3:]:
+        contents = path.read_text(encoding="utf-8", errors="replace")
+        for token in (
+            "BuildConfig.h",
+            "BusDiag.h",
+            "HealthDiag.h",
+            "HealthView.h",
+            "TransportAdapter.h",
+            "DependencyVersions.h",
+        ):
+            if token in contents:
+                errors.append(
+                    f"removed cleanup surface {token!r} remains in "
+                    f"{path.relative_to(ROOT)}"
+                )
+        for token in (
+            r"\bTS_OVERWRITE_BIT\b",
+            r"\bPMU_CLKOUT_DISABLE\b",
+            r"\bVERSION_INT\b",
+        ):
+            if re.search(token, contents):
+                errors.append(
+                    f"removed compatibility alias {token!r} remains in "
+                    f"{path.relative_to(ROOT)}"
+                )
 
     public_header = (ROOT / "include/RV3032/RV3032.h").read_text(
         encoding="utf-8", errors="replace"

@@ -15,14 +15,13 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <cstdlib>
 #include <cstring>
 
 #include "examples/common/BoardConfig.h"
-#include "examples/common/BusDiag.h"
 #include "examples/common/CliShell.h"
 #include "examples/common/CommandHandler.h"
 #include "examples/common/I2cTransport.h"
+#include "examples/common/I2cScanner.h"
 #include "examples/common/CliStyle.h"
 #include "examples/common/Log.h"
 #include "RV3032/CommandTable.h"
@@ -102,25 +101,6 @@ static const char* stateColor(RV3032::DriverState state) {
   }
 }
 
-static const char* healthChangeColor(bool changed) {
-  return changed ? LOG_COLOR_RED : LOG_COLOR_GREEN;
-}
-
-static const char* goodIfZeroColor(uint32_t value) {
-  return (value == 0U) ? LOG_COLOR_GREEN : LOG_COLOR_RED;
-}
-
-static const char* goodIfNonZeroColor(uint32_t value) {
-  return (value > 0U) ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW;
-}
-
-static const char* skipCountColor(uint32_t value) {
-  return (value > 0U) ? LOG_COLOR_YELLOW : LOG_COLOR_RESET;
-}
-
-static const char* onOffColor(bool enabled) {
-  return enabled ? LOG_COLOR_GREEN : LOG_COLOR_RESET;
-}
 
 /**
  * @brief Convert Err enum to string.
@@ -195,7 +175,7 @@ static void printConfigurationReport(const char* name) {
   Serial.printf(
       "%s evidence: final=%s mutation_attempted=%s operation=%s detail=%ld cleanup=%s detail=%ld\n",
       name, configurationFinalStateToStr(report.finalState),
-      log_bool_str(report.mutationAttempted),
+      cli::boolText(report.mutationAttempted),
       errToStr(report.operationStatus.code),
       static_cast<long>(report.operationStatus.detail),
       errToStr(report.cleanupStatus.code),
@@ -277,7 +257,7 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
   Serial.println(F("  --- Verbose Status ---"));
   Serial.printf("  Operation: %s\n", op);
   Serial.printf("  Result: %s%s%s (code=%s, detail=%ld)\n",
-                LOG_COLOR_RESULT(st.ok()),
+                cli::resultColor(st.ok()),
                 st.ok() ? "OK" : "FAILED",
                 LOG_COLOR_RESET,
                 errToStr(st.code),
@@ -1312,7 +1292,7 @@ static void cmd_eeprom() {
   Serial.printf("Busy: %s\n", busy ? "true" : "false");
   RV3032::Status eepromSt = g_rtc.getEepromStatus();
   Serial.printf("Status: %s%s%s\n",
-                LOG_COLOR_RESULT(eepromSt.ok()),
+                cli::resultColor(eepromSt.ok()),
                 eepromSt.ok() ? "OK" : eepromSt.msg,
                 LOG_COLOR_RESET);
   Serial.printf("Generic queue items: %lu succeeded (%lu failed)\n",
@@ -1400,7 +1380,7 @@ static void cmd_backup(const String& args) {
     }
 
     const RV3032::BackupSwitchMode mode = backup_mode_from_pmu(pmu);
-    const bool clkoutDisabled = (pmu & RV3032::cmd::PMU_CLKOUT_DISABLE) != 0;
+    const bool clkoutDisabled = (pmu & RV3032::cmd::PMU_NCLKE_MASK) != 0;
     const bool trickleEnabled = (pmu & RV3032::cmd::PMU_TCM_MASK) != 0;
 
     Serial.println();
@@ -1412,10 +1392,10 @@ static void cmd_backup(const String& args) {
                   backup_mode_name(mode),
                   LOG_COLOR_RESET);
     Serial.printf("EEPROM persistence: %s busy=%s queue=%u\n",
-                  log_bool_str(snap.enableEepromWrites),
-                  log_bool_str(snap.eepromBusy),
+                  cli::boolText(snap.enableEepromWrites),
+                  cli::boolText(snap.eepromBusy),
                   static_cast<unsigned>(snap.eepromQueueDepth));
-    Serial.printf("CLKOUT disabled bit: %s\n", log_bool_str(clkoutDisabled));
+    Serial.printf("CLKOUT disabled bit: %s\n", cli::boolText(clkoutDisabled));
     Serial.printf("Trickle charger bits: 0x%X (%s)\n",
                    static_cast<unsigned>(pmu &
                                          (RV3032::cmd::PMU_TCR_MASK |
@@ -1492,12 +1472,12 @@ static void cmd_primary_cell(const String& args) {
                 static_cast<long>(report.operationStatus.detail),
                 errToStr(report.cleanupStatus.code),
                 static_cast<long>(report.cleanupStatus.detail),
-                log_bool_str(report.writeCommandAttempted),
-                log_bool_str(report.writeDurablyVerified),
-                log_bool_str(report.persistentTargetVerified),
-                log_bool_str(report.activeTargetVerified),
+                cli::boolText(report.writeCommandAttempted),
+                cli::boolText(report.writeDurablyVerified),
+                cli::boolText(report.persistentTargetVerified),
+                cli::boolText(report.activeTargetVerified),
                 report.activeAfter, report.control1After,
-                log_bool_str(report.autoRefreshHeldDisabledForSafety));
+                cli::boolText(report.autoRefreshHeldDisabledForSafety));
 }
 
 /**
@@ -1551,29 +1531,29 @@ static void cmd_drv() {
   RV3032::SettingsSnapshot snap;
   (void)g_rtc.getSettings(snap);
   const RV3032::DriverState state = snap.state;
-  const bool initialized = snap.initialized;
-  const uint32_t totalOk = g_rtc.totalSuccess();
-  const uint32_t totalFail = g_rtc.totalFailures();
-  const uint32_t total = totalOk + totalFail;
-  const float successRate = (total > 0U)
-                                ? (100.0f * static_cast<float>(totalOk) / static_cast<float>(total))
-                                : 0.0f;
+  const uint32_t totalOk = snap.totalSuccess;
+  const uint32_t totalFail = snap.totalFailures;
+  const uint64_t total =
+      static_cast<uint64_t>(totalOk) + static_cast<uint64_t>(totalFail);
+  const double successRate = total > 0U
+      ? 100.0 * static_cast<double>(totalOk) / static_cast<double>(total)
+      : 0.0;
   Serial.printf("State: %s%s%s\n",
                 stateColor(state),
                 stateToStr(state),
                 LOG_COLOR_RESET);
   Serial.printf("isInitialized: %s%s%s\n",
-                initialized ? LOG_COLOR_GREEN : LOG_COLOR_RED,
-                log_bool_str(initialized),
+                snap.initialized ? LOG_COLOR_GREEN : LOG_COLOR_RED,
+                cli::boolText(snap.initialized),
                 LOG_COLOR_RESET);
   Serial.printf("Config: addr=0x%02X i2cTimeout=%lu offlineThreshold=%u nowMs=%s\n",
                 static_cast<unsigned>(snap.i2cAddress),
                 static_cast<unsigned long>(snap.i2cTimeoutMs),
                 static_cast<unsigned>(snap.offlineThreshold),
-                log_bool_str(snap.hasNowMsHook));
+                cli::boolText(snap.hasNowMsHook));
   Serial.printf("EEPROM: busy=%s generic_persistence=%s timeout=%lu queue=%u queue_ok=%lu queue_fail=%lu\n",
-                log_bool_str(snap.eepromBusy),
-                log_bool_str(snap.enableEepromWrites),
+                cli::boolText(snap.eepromBusy),
+                cli::boolText(snap.enableEepromWrites),
                 static_cast<unsigned long>(snap.eepromTimeoutMs),
                 static_cast<unsigned>(snap.eepromQueueDepth),
                 static_cast<unsigned long>(snap.eepromWriteCount),
@@ -1582,15 +1562,15 @@ static void cmd_drv() {
   
   Serial.println(F("=== Counters ==="));
   Serial.printf("Consecutive Failures: %s%d%s\n",
-                goodIfZeroColor(g_rtc.consecutiveFailures()),
-                g_rtc.consecutiveFailures(),
+                cli::zeroGoodColor(snap.consecutiveFailures),
+                snap.consecutiveFailures,
                 LOG_COLOR_RESET);
   Serial.printf("Total Successes: %s%lu%s\n",
-                goodIfNonZeroColor(totalOk),
+                cli::nonZeroGoodColor(totalOk),
                 static_cast<unsigned long>(totalOk),
                 LOG_COLOR_RESET);
   Serial.printf("Total Failures: %s%lu%s\n",
-                goodIfZeroColor(totalFail),
+                cli::zeroGoodColor(totalFail),
                 static_cast<unsigned long>(totalFail),
                 LOG_COLOR_RESET);
   Serial.printf("Success rate: %s%.1f%%%s\n",
@@ -1601,9 +1581,9 @@ static void cmd_drv() {
   Serial.println();
   
   Serial.println(F("=== Timestamps ==="));
-  uint32_t now = millis();
-  uint32_t lastOk = g_rtc.lastOkMs();
-  uint32_t lastErr = g_rtc.lastErrorMs();
+  const uint32_t now = millis();
+  const uint32_t lastOk = snap.lastOkMs;
+  const uint32_t lastErr = snap.lastErrorMs;
   
   if (lastOk > 0) {
     Serial.printf("Last OK: %lu ms ago (at %lu ms)\n",
@@ -1623,9 +1603,9 @@ static void cmd_drv() {
   Serial.println();
   
   Serial.println(F("=== Last Error Details ==="));
-  RV3032::Status lastError = g_rtc.lastError();
+  const RV3032::Status lastError = snap.lastError;
   Serial.printf("Code: %s%s%s (%d)\n",
-                LOG_COLOR_RESULT(lastError.code == RV3032::Err::OK),
+                cli::resultColor(lastError.code == RV3032::Err::OK),
                 errToStr(lastError.code),
                 LOG_COLOR_RESET,
                 static_cast<int>(lastError.code));
@@ -1635,12 +1615,12 @@ static void cmd_drv() {
   
   Serial.println(F("=== EEPROM State ==="));
   Serial.printf("Busy: %s%s%s\n",
-                g_rtc.isEepromBusy() ? LOG_COLOR_YELLOW : LOG_COLOR_GREEN,
-                g_rtc.isEepromBusy() ? "true" : "false",
+                snap.eepromBusy ? LOG_COLOR_YELLOW : LOG_COLOR_GREEN,
+                snap.eepromBusy ? "true" : "false",
                 LOG_COLOR_RESET);
   RV3032::Status eepromSt = g_rtc.getEepromStatus();
   Serial.printf("Status: %s%s%s\n",
-                LOG_COLOR_RESULT(eepromSt.ok()),
+                cli::resultColor(eepromSt.ok()),
                 eepromSt.ok() ? "OK" : eepromSt.msg,
                 LOG_COLOR_RESET);
   Serial.println();
@@ -1677,7 +1657,7 @@ static void cmd_probe() {
                        (failureBefore != failureAfter);
   
   Serial.printf("Health tracking: %s%s%s\n",
-                healthChangeColor(healthChanged),
+                cli::resultColor(!healthChanged),
                 healthChanged ? "CHANGED (unexpected!)" : "unchanged (correct)",
                 LOG_COLOR_RESET);
 }
@@ -1710,8 +1690,8 @@ static void cmd_recover() {
                 stateColor(stateBefore), stateToStr(stateBefore), LOG_COLOR_RESET,
                 stateColor(stateAfter), stateToStr(stateAfter), LOG_COLOR_RESET);
   Serial.printf("Consecutive failures: %s%d%s -> %s%d%s\n",
-                goodIfZeroColor(failsBefore), failsBefore, LOG_COLOR_RESET,
-                goodIfZeroColor(failsAfter), failsAfter, LOG_COLOR_RESET);
+                cli::zeroGoodColor(failsBefore), failsBefore, LOG_COLOR_RESET,
+                cli::zeroGoodColor(failsAfter), failsAfter, LOG_COLOR_RESET);
 }
 
 /**
@@ -1720,7 +1700,7 @@ static void cmd_recover() {
 static void cmd_verbose(const String& args) {
   if (args.length() == 0) {
     Serial.printf("Verbose mode: %s%s%s\n",
-                  onOffColor(g_verbose),
+                  cli::enabledColor(g_verbose),
                   g_verbose ? "ON" : "OFF",
                   LOG_COLOR_RESET);
     return;
@@ -1735,7 +1715,7 @@ static void cmd_verbose(const String& args) {
   }
   g_verbose = verbose;
   LOGI("Verbose mode: %s%s%s",
-       onOffColor(g_verbose),
+       cli::enabledColor(g_verbose),
        g_verbose ? "ON" : "OFF",
        LOG_COLOR_RESET);
 }
@@ -1836,14 +1816,14 @@ static void cmd_stress(const String& args) {
                 static_cast<unsigned long>(successBefore),
                 static_cast<unsigned long>(successAfter),
                 static_cast<unsigned long>(expectedSuccess),
-                LOG_COLOR_RESULT(successMatch),
+                cli::resultColor(successMatch),
                 successMatch ? "OK" : "MISMATCH!",
                 LOG_COLOR_RESET);
   Serial.printf("Total failures: %lu -> %lu (expected %lu) %s%s%s\n",
                 static_cast<unsigned long>(failureBefore),
                 static_cast<unsigned long>(failureAfter),
                 static_cast<unsigned long>(expectedFailure),
-                LOG_COLOR_RESULT(failureMatch),
+                cli::resultColor(failureMatch),
                 failureMatch ? "OK" : "MISMATCH!",
                 LOG_COLOR_RESET);
   Serial.printf("Driver state: %s%s%s -> %s%s%s\n",
@@ -2031,7 +2011,7 @@ static void cmd_selftest() {
   auto report = [&](const char* name, SelftestOutcome outcome, const char* note) {
     const bool ok = (outcome == SelftestOutcome::PASS);
     const bool skip = (outcome == SelftestOutcome::SKIP);
-    const char* color = skip ? LOG_COLOR_YELLOW : LOG_COLOR_RESULT(ok);
+    const char* color = skip ? LOG_COLOR_YELLOW : cli::resultColor(ok);
     const char* tag = skip ? "SKIP" : (ok ? "PASS" : "FAIL");
     Serial.printf("  [%s%s%s] %s", color, tag, LOG_COLOR_RESET, name);
     if (note && note[0]) {
@@ -2065,9 +2045,9 @@ static void cmd_selftest() {
     reportSkip("probe responds", "driver not initialized");
     reportSkip("remaining checks", "selftest aborted");
     Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
-                  goodIfNonZeroColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
-                  goodIfZeroColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
-                  skipCountColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
+                  cli::nonZeroGoodColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
+                  cli::zeroGoodColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
+                  cli::warningIfNonZeroColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
     Serial.println();
     return;
   }
@@ -2138,9 +2118,9 @@ static void cmd_selftest() {
               g_rtc.state() != RV3032::DriverState::UNINIT, "");
 
   Serial.printf("Selftest result: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
-                goodIfNonZeroColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
-                goodIfZeroColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
-                skipCountColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
+                cli::nonZeroGoodColor(stats.pass), static_cast<unsigned long>(stats.pass), LOG_COLOR_RESET,
+                cli::zeroGoodColor(stats.fail), static_cast<unsigned long>(stats.fail), LOG_COLOR_RESET,
+                cli::warningIfNonZeroColor(stats.skip), static_cast<unsigned long>(stats.skip), LOG_COLOR_RESET);
   Serial.println();
 }
 
@@ -2174,7 +2154,7 @@ static void process_command(const String& line) {
   } else if (command == "version" || command == "ver") {
     if (noArguments("version")) cmd_version();
   } else if (command == "scan") {
-    if (noArguments("scan")) bus_diag::scan();
+    if (noArguments("scan")) i2c_scanner::scan(Wire);
   } else if (command == "read") {
     if (noArguments("read")) cmd_time();
   } else if (command == "cfg" || command == "settings") {

@@ -9,7 +9,8 @@
 | I2C max speed at VDD >= 2.0 V | 400 kHz | application manual, p. 139 |
 | I2C bus timeout | Communication from START to STOP must complete within 950 ms | application manual, p. 139 |
 | Power-on reset time | Typical 6 ms, max 10 ms in power-on AC table | application manual, p. 138 |
-| CLKOUT default | 32.768 kHz enabled by default delivery setting | application manual, p. 140 |
+| CLKOUT factory-delivery setting | C0/C2/C3=`0x00`: direct XTAL 32.768 kHz enabled; pin LOW in VBACKUP | application manual, pp. 45, 47, 54, 56, 62-65 |
+| Configuration POR refresh | Approximately 66 ms; stored EEPROM replaces C0..CA RAM mirrors | application manual, pp. 68-72 |
 | Offset correction LSB | 0.2384 ppm per step, range -32 to +31 steps | application manual, p. 118 |
 
 I2C timing highlights at 400 kHz: SCL low min 1.3 us, SCL high min 0.6 us, rise time max 300 ns, fall time max 300 ns, SDA setup min 100 ns, bus-free min 1.3 us. Source: application manual, p. 139.

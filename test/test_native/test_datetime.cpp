@@ -4300,6 +4300,127 @@ void test_alarm_timer_and_pmu_round_trips_are_cooperative() {
   TEST_ASSERT_EQUAL_UINT32(beforeInvalidEnums, fake.callbackCount);
 }
 
+void test_clkout_factory_defaults_and_persistence_contract() {
+  TEST_ASSERT_EQUAL_HEX8(0, RV3032::cmd::PMU_DEFAULT_ON_DELIVERY);
+  TEST_ASSERT_EQUAL_HEX8(0, RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY);
+  TEST_ASSERT_EQUAL_HEX8(0, RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY);
+
+  RV3032::ClkoutConfig defaults{};
+  TEST_ASSERT_TRUE(defaults.enabled);
+  TEST_ASSERT_FALSE(defaults.highFrequencyMode);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::ClkoutFrequency::Hz32768),
+      static_cast<uint8_t>(defaults.xtalFrequency));
+  TEST_ASSERT_EQUAL_UINT16(1, defaults.highFrequencyDivider);
+
+  constexpr uint8_t targetC0 = RV3032::cmd::PMU_NCLKE_MASK;
+  constexpr uint8_t targetC2 = 15;
+  constexpr uint8_t targetC3 = static_cast<uint8_t>(
+      RV3032::cmd::CLKOUT_OS_MASK |
+      (static_cast<uint8_t>(RV3032::ClkoutFrequency::Hz1024)
+       << RV3032::cmd::CLKOUT_FREQ_SHIFT));
+  RV3032::ClkoutConfig requested{};
+  requested.enabled = false;
+  requested.highFrequencyMode = true;
+  requested.xtalFrequency = RV3032::ClkoutFrequency::Hz1024;
+  requested.highFrequencyDivider = 16;
+
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = RV3032::cmd::PMU_DEFAULT_ON_DELIVERY;
+    fake.persistent[2] = RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY;
+    fake.persistent[3] = RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY;
+    fake.resetFromPersistent();
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(false)).ok());
+
+    RV3032::ClkoutConfig observed{};
+    TEST_ASSERT_TRUE(rtc.getClkoutConfig(observed).ok());
+    TEST_ASSERT_TRUE(observed.enabled);
+    TEST_ASSERT_FALSE(observed.highFrequencyMode);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RV3032::ClkoutFrequency::Hz32768),
+        static_cast<uint8_t>(observed.xtalFrequency));
+    TEST_ASSERT_EQUAL_UINT16(1, observed.highFrequencyDivider);
+
+    TEST_ASSERT_TRUE(rtc.setClkoutConfig(requested).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake, 1).ok());
+    TEST_ASSERT_EQUAL_UINT8(0, rtc.eepromQueueDepth());
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::PMU_DEFAULT_ON_DELIVERY,
+                           fake.persistent[0]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY,
+                           fake.persistent[2]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY,
+                           fake.persistent[3]);
+    TEST_ASSERT_EQUAL_HEX8(targetC0, fake.activeConfig[0]);
+    TEST_ASSERT_EQUAL_HEX8(targetC2, fake.activeConfig[2]);
+    TEST_ASSERT_EQUAL_HEX8(targetC3, fake.activeConfig[3]);
+
+    fake.dailyRefresh();
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::PMU_DEFAULT_ON_DELIVERY,
+                           fake.activeConfig[0]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY,
+                           fake.activeConfig[2]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY,
+                           fake.activeConfig[3]);
+  }
+
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = RV3032::cmd::PMU_DEFAULT_ON_DELIVERY;
+    fake.resetFromPersistent();
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(true)).ok());
+    TEST_ASSERT_TRUE(rtc.setClkoutEnabled(false).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake, 1).ok());
+    TEST_ASSERT_EQUAL_UINT8(1, rtc.eepromQueueDepth());
+    TEST_ASSERT_TRUE(pollEepromToCompletion(rtc, fake, 4).ok());
+    TEST_ASSERT_EQUAL_HEX8(targetC0, fake.persistent[0]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY,
+                           fake.persistent[2]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY,
+                           fake.persistent[3]);
+    TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
+  }
+
+  {
+    FakeRv3032 fake;
+    fake.persistent[0] = RV3032::cmd::PMU_DEFAULT_ON_DELIVERY;
+    fake.resetFromPersistent();
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(true)).ok());
+    TEST_ASSERT_TRUE(rtc.setClkoutConfig(requested).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake, 1).ok());
+    TEST_ASSERT_EQUAL_UINT8(3, rtc.eepromQueueDepth());
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::PMU_DEFAULT_ON_DELIVERY,
+                           fake.persistent[0]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT1_DEFAULT_ON_DELIVERY,
+                           fake.persistent[2]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::CLKOUT2_DEFAULT_ON_DELIVERY,
+                           fake.persistent[3]);
+
+    TEST_ASSERT_TRUE(pollEepromToCompletion(rtc, fake, 4).ok());
+    TEST_ASSERT_TRUE(rtc.getEepromStatus().ok());
+    TEST_ASSERT_EQUAL_HEX8(targetC0, fake.persistent[0]);
+    TEST_ASSERT_EQUAL_HEX8(targetC2, fake.persistent[2]);
+    TEST_ASSERT_EQUAL_HEX8(targetC3, fake.persistent[3]);
+    TEST_ASSERT_EQUAL_HEX8(targetC0, fake.activeConfig[0]);
+    TEST_ASSERT_EQUAL_HEX8(targetC2, fake.activeConfig[2]);
+    TEST_ASSERT_EQUAL_HEX8(targetC3, fake.activeConfig[3]);
+    TEST_ASSERT_EQUAL_UINT16(3, fake.writeOneAttempts);
+
+    fake.resetFromPersistent();
+    RV3032::ClkoutConfig observed{};
+    TEST_ASSERT_TRUE(rtc.getClkoutConfig(observed).ok());
+    TEST_ASSERT_FALSE(observed.enabled);
+    TEST_ASSERT_TRUE(observed.highFrequencyMode);
+    TEST_ASSERT_EQUAL_UINT8(
+        static_cast<uint8_t>(RV3032::ClkoutFrequency::Hz1024),
+        static_cast<uint8_t>(observed.xtalFrequency));
+    TEST_ASSERT_EQUAL_UINT16(16, observed.highFrequencyDivider);
+  }
+}
+
 void test_clkout_offset_temperature_and_event_round_trips() {
   FakeRv3032 fake;
   fake.activeConfig[1] = 0xC0;
@@ -7268,6 +7389,40 @@ void test_phase2_staged_cleanup_fault_matrix_and_caps() {
   }
 }
 
+void test_clkout_verification_reports_last_byte_mismatch_safely() {
+  FakeRv3032 fake;
+  fake.ignoreWriteOrdinal = 3;
+
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(fake.config(false)).ok());
+
+  RV3032::ClkoutConfig config{};
+  config.enabled = true;
+  config.highFrequencyMode = true;
+  config.xtalFrequency = RV3032::ClkoutFrequency::Hz32768;
+  config.highFrequencyDivider = 1;
+  TEST_ASSERT_TRUE(rtc.setClkoutConfig(config).inProgress());
+
+  const RV3032::Status terminal = pollJobToCompletion(rtc, fake, 1);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::REGISTER_WRITE_FAILED),
+      static_cast<uint8_t>(terminal.code));
+  TEST_ASSERT_EQUAL_STRING("CLKOUT verification failed", terminal.msg);
+  TEST_ASSERT_EQUAL_INT32(
+      static_cast<int32_t>(RV3032::cmd::CLKOUT_OS_MASK) << 8,
+      terminal.detail);
+  TEST_ASSERT_EQUAL_UINT32(8, fake.callbackCount);
+
+  RV3032::ConfigurationJobReport report{};
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::Err::REGISTER_WRITE_FAILED),
+      static_cast<uint8_t>(rtc.getSetClkoutConfigJobResult(report).code));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RV3032::ConfigurationFinalState::SAFE_DISABLED_VERIFIED),
+      static_cast<uint8_t>(report.finalState));
+  TEST_ASSERT_EQUAL_INT32(terminal.detail, report.operationStatus.detail);
+}
+
 void test_phase4_staged_safe_payloads_preserve_neighbor_bits() {
   const Phase2ConfigurationPath paths[] = {
       Phase2ConfigurationPath::TIMER,
@@ -8296,11 +8451,12 @@ void beginCliHarness(FakeRv3032& fake, bool enableEepromWrites) {
   TEST_ASSERT_TRUE(g_rtc.begin(fake.config(enableEepromWrites)).ok());
 }
 
-void driveCliPendingToTerminal(FakeRv3032& fake,
-                               uint32_t pollCap = 5000U) {
+void driveCliPending(
+    FakeRv3032& fake, PendingSurface stopAt = PendingSurface::NONE,
+    uint32_t pollCap = 5000U) {
   for (uint32_t poll = 0;
        poll < pollCap &&
-       g_pendingOperation.surface != PendingSurface::NONE;
+       g_pendingOperation.surface != stopAt;
        ++poll) {
     const uint32_t callbacksBefore = fake.callbackCount;
     pollPendingOperation(fake.nowMs);
@@ -8309,10 +8465,12 @@ void driveCliPendingToTerminal(FakeRv3032& fake,
     ++fake.nowMs;
     arduinoStubMillis = fake.nowMs;
   }
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::NONE),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(stopAt),
                           static_cast<uint8_t>(g_pendingOperation.surface));
-  TEST_ASSERT_FALSE(g_rtc.isJobBusy());
-  TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
+  if (stopAt == PendingSurface::NONE) {
+    TEST_ASSERT_FALSE(g_rtc.isJobBusy());
+    TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
+  }
 }
 
 void stageCliEepromQueue(FakeRv3032& fake) {
@@ -8400,7 +8558,7 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
   TEST_ASSERT_EQUAL(std::string::npos,
                     Serial.output().find("terminal status"));
   const uint32_t callbacksBefore = fake.callbackCount;
-  driveCliPendingToTerminal(fake);
+  driveCliPending(fake);
   TEST_ASSERT_EQUAL_UINT32(2, fake.callbackCount - callbacksBefore);
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
@@ -8411,7 +8569,7 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
   process_command(String(
       "ram_write 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"));
   failing.failOrdinal = failing.callbackCount + 1U;
-  driveCliPendingToTerminal(failing);
+  driveCliPending(failing);
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
       Serial.output().find("user RAM write terminal status: I2C_BUS"));
@@ -8424,17 +8582,7 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::ORDINARY_JOB),
                           static_cast<uint8_t>(g_pendingOperation.surface));
 
-  for (uint32_t poll = 0;
-       poll < 100U &&
-       g_pendingOperation.surface == PendingSurface::ORDINARY_JOB;
-       ++poll) {
-    const uint32_t callbacksBefore = success.callbackCount;
-    pollPendingOperation(success.nowMs);
-    TEST_ASSERT_LESS_OR_EQUAL_UINT32(
-        1U, success.callbackCount - callbacksBefore);
-    ++success.nowMs;
-    arduinoStubMillis = success.nowMs;
-  }
+  driveCliPending(success, PendingSurface::EEPROM, 100U);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::EEPROM),
                           static_cast<uint8_t>(g_pendingOperation.surface));
   TEST_ASSERT_TRUE(g_pendingOperation.ordinaryStatus.ok());
@@ -8448,7 +8596,7 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
       1U, success.callbackCount - callbacksBeforeBlockedLoop);
   Serial.resetInput();
 
-  driveCliPendingToTerminal(success);
+  driveCliPending(success);
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
       Serial.output().find("CLKOUT configuration terminal status: OK"));
@@ -8458,16 +8606,10 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
   FakeRv3032 persistentFailure;
   beginCliHarness(persistentFailure, true);
   process_command(String("clkout_freq 3"));
-  while (g_pendingOperation.surface == PendingSurface::ORDINARY_JOB) {
-    const uint32_t callbacksBefore = persistentFailure.callbackCount;
-    pollPendingOperation(persistentFailure.nowMs);
-    TEST_ASSERT_LESS_OR_EQUAL_UINT32(
-        1U, persistentFailure.callbackCount - callbacksBefore);
-    ++persistentFailure.nowMs;
-  }
+  driveCliPending(persistentFailure, PendingSurface::EEPROM);
   TEST_ASSERT_TRUE(g_pendingOperation.ordinaryStatus.ok());
   persistentFailure.failOrdinal = persistentFailure.callbackCount + 1U;
-  driveCliPendingToTerminal(persistentFailure);
+  driveCliPending(persistentFailure);
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
       Serial.output().find("CLKOUT configuration terminal status: OK"));
@@ -8482,13 +8624,7 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
     Serial.resetOutput();
     process_command(String("offset 2.0"));
     ordinaryFailure.failOrdinal = ordinaryFailure.callbackCount + 1U;
-    while (g_pendingOperation.surface == PendingSurface::ORDINARY_JOB) {
-      const uint32_t callbacksBefore = ordinaryFailure.callbackCount;
-      pollPendingOperation(ordinaryFailure.nowMs);
-      TEST_ASSERT_LESS_OR_EQUAL_UINT32(
-          1U, ordinaryFailure.callbackCount - callbacksBefore);
-      ++ordinaryFailure.nowMs;
-    }
+    driveCliPending(ordinaryFailure, PendingSurface::EEPROM);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_BUS),
                             static_cast<uint8_t>(
                                 g_pendingOperation.ordinaryStatus.code));
@@ -8498,7 +8634,7 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
     if (failPersistence) {
       ordinaryFailure.failOrdinal = ordinaryFailure.callbackCount + 1U;
     }
-    driveCliPendingToTerminal(ordinaryFailure);
+    driveCliPending(ordinaryFailure);
     TEST_ASSERT_NOT_EQUAL(
         std::string::npos,
         Serial.output().find("frequency offset terminal status: I2C_BUS"));
@@ -8845,6 +8981,14 @@ void test_phase3_wire_short_stage_release_and_initialization() {
   Wire.reset();
   TEST_ASSERT_TRUE(transport::initWire(1, 2, 400000, 37));
   TEST_ASSERT_EQUAL_UINT16(37, Wire.getTimeOut());
+
+  TwoWire scannerWire;
+  scannerWire.reset();
+  scannerWire.setTimeOut(37);
+  i2c_scanner::scan(scannerWire, 5);
+  TEST_ASSERT_EQUAL_UINT32(112, scannerWire.beginTransmissionCalls);
+  TEST_ASSERT_EQUAL_UINT32(112, scannerWire.endTransmissionCalls);
+  TEST_ASSERT_EQUAL_UINT16(37, scannerWire.getTimeOut());
 }
 
 void test_phase3_strict_cli_numeric_tokens_preserve_outputs() {
@@ -9019,6 +9163,7 @@ int main(int, char**) {
   RUN_TEST(test_static_calendar_and_status_utility_coverage);
   RUN_TEST(test_rebegin_rebinds_context_and_resets_only_lifecycle_latch);
   RUN_TEST(test_alarm_timer_and_pmu_round_trips_are_cooperative);
+  RUN_TEST(test_clkout_factory_defaults_and_persistence_contract);
   RUN_TEST(test_clkout_offset_temperature_and_event_round_trips);
   RUN_TEST(test_timestamp_stop_gp_and_ram_public_coverage);
   RUN_TEST(test_fake_refresh_initial_busy_and_acked_ignore_faults);
@@ -9043,6 +9188,7 @@ int main(int, char**) {
   RUN_TEST(test_phase2_backup_fault_timing_and_evidence_matrix);
   RUN_TEST(test_phase2_staged_fault_ordinals_getters_and_no_replay);
   RUN_TEST(test_phase2_staged_cleanup_fault_matrix_and_caps);
+  RUN_TEST(test_clkout_verification_reports_last_byte_mismatch_safely);
   RUN_TEST(test_phase4_staged_safe_payloads_preserve_neighbor_bits);
   RUN_TEST(test_phase2_configuration_reports_caps_and_safe_cleanup);
   RUN_TEST(test_phase2_quiescence_uie_and_tick_contracts);

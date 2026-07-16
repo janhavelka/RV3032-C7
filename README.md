@@ -219,6 +219,44 @@ are distinct from the library queue state returned by `isEepromBusy()`.
 `clearEepromErrorFlag()` explicitly acknowledges stale EEF through a guarded
 cooperative W0C operation without claiming that an earlier write was durable.
 
+### CLKOUT factory default and persistence
+
+The factory-delivery configuration bytes are C0=`0x00`, C2=`0x00`, and
+C3=`0x00`. That selects direct output (`NCLKE=0`), XTAL mode (`OS=0`), and
+FD=`00`, so CLKOUT is enabled at 32.768 kHz. HFD is also stored as zero, which
+would select 8.192 kHz if HF mode were later enabled. Control 2, Clock
+Interrupt Mask, and EVI Control reset to zero, so interrupt-controlled CLKOUT
+and its delays are initially disabled. In VBACKUP power state the pin is LOW.
+
+This is a delivery default, not an immutable reset policy. At power-up the chip
+copies its stored configuration EEPROM into the C0..CA RAM mirrors after the
+approximately 66 ms POR refresh. It also refreshes those mirrors automatically
+at date increment when EERD=0. Therefore an active-only CLKOUT change can be
+replaced by the next POR, automatic, or software refresh. Passive `begin()` and
+one-read `probe()` do not wait for this refresh; applications that depend on a
+custom persisted power-on configuration should observe EEbusy through
+`getEepromHardwareFlags()` before treating the mirrors as loaded.
+
+With `Config::enableEepromWrites=false`, all three CLKOUT setters change only
+the active RAM mirrors:
+
+- `setClkoutEnabled()` changes C0.NCLKE;
+- `setClkoutFrequency()` selects XTAL mode/FD while retaining the stored HFD;
+- `setClkoutConfig()` sets direct enable, OS, FD, and HFD.
+
+With persistence enabled, `setClkoutEnabled()` queues exact C0, while
+`setClkoutFrequency()` and `setClkoutConfig()` queue exact C0, C2, and C3 after
+active readback proof. C1 is preserved during the active four-byte burst but
+is not a CLKOUT persistence target. The ordinary job's terminal success proves
+the active mirrors only; the application must then drive `tick()` or
+`pollEeprom()` and require terminal `getEepromStatus()` success for durable
+readback proof. Compare-before-write avoids wearing an already-equal byte.
+
+CLKIE, CLKF, Clock Interrupt Mask (`0x14`), and CLKDE (`0x15`) are active-only
+controls/evidence and are not part of C0/C2/C3 persistence. Before changing
+frequency or mode, disable CLKIE and clear CLKF; the staged job otherwise
+returns `BUSY` without mutation.
+
 ## Cooperative configuration evidence
 
 Timer, periodic-update, backup, CLKOUT, and temperature-event jobs publish a
@@ -418,6 +456,13 @@ entries remain, so no queued work is orphaned.
 - `docs/` — architecture, device reference, adapter notes, reports, local PDFs
 - `test/test_native/` — native fake and unit/integration tests
 
+The maintained example glue is intentionally small: `BoardConfig.h`,
+`CliShell.h`, `CliStyle.h`, `CommandHandler.h`, `I2cScanner.h`,
+`I2cTransport.h`, and `Log.h`. The CLI composes those owners directly; there is
+no parallel transport, bus-diagnostic, or health facade. The scanner applies a
+temporary bounded Wire timeout and restores the application's previous value;
+it does not perform bus recovery.
+
 ## Verification
 
 ```powershell
@@ -451,7 +496,9 @@ mismatched scope before opening the serial port and records it in HIL results.
 ## Versioning
 
 `library.json` is the single version source. `include/RV3032/Version.h` is
-generated and must not be edited manually.
+generated and must not be edited manually. `scripts/generate_version.py`
+generates only this library's version header and build defines. Dependency-pin
+or application-version metadata belongs to the consuming project.
 
 ## License
 

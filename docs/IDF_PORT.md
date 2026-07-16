@@ -92,6 +92,14 @@ physical attempt and is never retried. Backup admission additionally uses
 `4 * i2cTimeoutMs + activationMs + 1`, with 2 ms for disabled-to-Direct and
 10 ms for disabled-to-Level, and waits after callback completion without I/O.
 
+CLKOUT persistence is a two-surface operation. Active job success proves C0,
+C2, and C3 mirrors only. When `enableEepromWrites` is true, keep ownership and
+poll the generic EEPROM surface until its separate terminal success. Enable-only
+changes queue C0; legacy-frequency and complete-configuration changes queue
+C0/C2/C3. On cold power-up, wait for EEbusy to clear before relying on a custom
+stored CLKOUT selection; the POR refresh takes approximately 66 ms. The pin is
+LOW in VBACKUP regardless of the selected frequency.
+
 Before live reconfiguration, the application owner uses `disable interrupt ->
 consume/clear flag if appropriate -> configure -> enable`. The corresponding
 TIE/AIE/EIE/BSIE guard returns `BUSY` without mutation. EIE=0 does not stop EVI
@@ -119,6 +127,10 @@ wait callback must yield the task; never implement it as a spin loop.
 - Call `end()` before rebinding; a second `begin()` is intentionally `BUSY`.
   `end()` performs zero I/O and abandons active local work, so reinitialize any
   affected product policy after abandoning persistent cleanup.
+- Keep consumer dependency pins and application-version metadata in the
+  consumer project. This repository's generator owns only the RV3032
+  `Version.h` and build metadata; an adapter must not turn it into a shared
+  application dependency registry.
 
 ## Local verification
 

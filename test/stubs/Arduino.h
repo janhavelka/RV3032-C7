@@ -36,7 +36,6 @@ static constexpr int HIGH = 1;
 
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
-inline int digitalRead(int) { return HIGH; }
 
 inline void yield() {}
 
@@ -75,10 +74,6 @@ class String {
     }
     _value = _value.substr(first, last - first);
   }
-  int indexOf(char needle) const {
-    const size_t position = _value.find(needle);
-    return position == std::string::npos ? -1 : static_cast<int>(position);
-  }
   String substring(size_t start) const {
     return start < _value.length() ? String(_value.substr(start)) : String();
   }
@@ -104,7 +99,6 @@ class String {
   bool operator==(const char* other) const {
     return _value == (other == nullptr ? "" : other);
   }
-  bool operator==(const String& other) const { return _value == other._value; }
   bool operator!=(const char* other) const { return !(*this == other); }
 
  private:

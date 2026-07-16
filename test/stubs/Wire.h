@@ -39,7 +39,6 @@ class TwoWire {
     endResultCount = 0;
     endResultIndex = 0;
     callCount = 0;
-    timeoutHistoryCount = 0;
     rxLength = 0;
     rxIndex = 0;
   }
@@ -48,20 +47,12 @@ class TwoWire {
     ++beginCalls;
     return beginResult;
   }
-  bool begin() {
-    ++beginCalls;
-    return beginResult;
-  }
-  void end() { transactionActive = false; }
   bool setClock(uint32_t) {
     ++setClockCalls;
     return setClockResult;
   }
   void setTimeOut(uint16_t timeoutMs) {
     configuredTimeoutMs = timeoutMs;
-    if (timeoutHistoryCount < MAX_LOG) {
-      timeoutHistory[timeoutHistoryCount++] = timeoutMs;
-    }
   }
   uint16_t getTimeOut() const { return configuredTimeoutMs; }
 
@@ -70,10 +61,6 @@ class TwoWire {
     transactionActive = true;
     record(Call::BEGIN_TRANSMISSION);
     arduinoStubMillis += beginDurationMs;
-  }
-  size_t write(uint8_t) {
-    const uint8_t value = 0;
-    return write(&value, 1U);
   }
   size_t write(const uint8_t*, size_t len) {
     ++writeCalls;
@@ -151,8 +138,6 @@ class TwoWire {
   Call calls[MAX_LOG] = {};
   uint16_t effectiveTimeouts[MAX_LOG] = {};
   size_t callCount = 0;
-  uint16_t timeoutHistory[MAX_LOG] = {};
-  size_t timeoutHistoryCount = 0;
   uint8_t rxData[128] = {};
   size_t rxLength = 0;
   size_t rxIndex = 0;
