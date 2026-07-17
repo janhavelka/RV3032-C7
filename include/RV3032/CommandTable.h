@@ -43,7 +43,8 @@ static constexpr uint8_t REG_MINUTES = 0x02;
 static constexpr uint8_t REG_HOURS = 0x03;
 
 /// @brief Weekday register (0x04, read/write-protectable)
-/// BCD: b7-b3=reserved, b2-b0 = user-assigned value 0..6.
+/// Binary: b7-b3=reserved, b2-b0 = user-assigned value 0..6. It is not BCD
+/// and is not required to match the calendar date.
 static constexpr uint8_t REG_WEEKDAY = 0x04;
 
 /// @brief Date/Day-of-Month register (0x05, read/write-protectable)
@@ -292,19 +293,24 @@ static constexpr uint8_t REG_ACTIVE_TREFERENCE0 = 0xC4;
 /// @brief Active temperature-reference 1 mirror (0xC5)
 static constexpr uint8_t REG_ACTIVE_TREFERENCE1 = 0xC5;
 
-/// @brief Active password mirror 0 (0xC6, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 0
+/// (0xC6, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD0 = 0xC6;
 
-/// @brief Active password mirror 1 (0xC7, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 1
+/// (0xC7, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD1 = 0xC7;
 
-/// @brief Active password mirror 2 (0xC8, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 2
+/// (0xC8, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD2 = 0xC8;
 
-/// @brief Active password mirror 3 (0xC9, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password byte 3
+/// (0xC9, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PASSWORD3 = 0xC9;
 
-/// @brief Active password-enable mirror (0xCA, write-only/read-zero)
+/// @brief Configuration-EEPROM RAM mirror for persistent password enable
+/// (0xCA, write-only/read-zero)
 static constexpr uint8_t REG_EEPROM_PW_ENABLE = 0xCA;
 
 // ========== User EEPROM (0xCB–0xEA) ==========
@@ -369,7 +375,6 @@ static constexpr uint8_t CTRL3_TLIE_BIT = 0;
 static constexpr uint8_t TS_TLOW_OVERWRITE_BIT = 0;   ///< TLow timestamp overwrite enable
 static constexpr uint8_t TS_THIGH_OVERWRITE_BIT = 1;  ///< THigh timestamp overwrite enable
 static constexpr uint8_t TS_EVI_OVERWRITE_BIT = 2;    ///< EVI timestamp overwrite enable
-static constexpr uint8_t TS_OVERWRITE_BIT = TS_EVI_OVERWRITE_BIT;  ///< Backward-compatible EVI alias
 static constexpr uint8_t TS_TLOW_RESET_BIT = 3;        ///< Reset TLow timestamp
 static constexpr uint8_t TS_THIGH_RESET_BIT = 4;       ///< Reset THigh timestamp
 static constexpr uint8_t TS_EVI_RESET_BIT = 5;         ///< Reset EVI timestamp
@@ -398,9 +403,10 @@ static constexpr uint8_t EVI_ESYN_BIT = 0;
 static constexpr uint8_t EVI_IMPLEMENTED_MASK = 0xF1;
 
 // Active/persistent PMU byte fields (C0)
+/// Factory-delivery C0 value: direct CLKOUT enabled, backup/charger disabled.
+static constexpr uint8_t PMU_DEFAULT_ON_DELIVERY = 0x00;
 static constexpr uint8_t PMU_IMPLEMENTED_MASK = 0x7F;
 static constexpr uint8_t PMU_NCLKE_MASK = 0x40;
-static constexpr uint8_t PMU_CLKOUT_DISABLE = PMU_NCLKE_MASK; ///< Legacy alias
 static constexpr uint8_t PMU_BSM_MASK = 0x30;         ///< Backup Switching Mode mask
 static constexpr uint8_t PMU_BSM_DISABLED = 0x00;
 static constexpr uint8_t PMU_BSM_DISABLED_ALT = 0x30; ///< Alternate disabled encoding
@@ -416,7 +422,11 @@ static constexpr uint8_t OFFSET_PORIE_MASK = 0x80;
 static constexpr uint8_t OFFSET_VLIE_MASK = 0x40;
 static constexpr uint8_t OFFSET_VALUE_MASK = 0x3F;
 
-// Active/persistent CLKOUT 2 byte fields (C3)
+// Active/persistent CLKOUT 1/2 byte fields (C2/C3)
+/// Factory-delivery C2 value: HFD[7:0] = 0 (stored HF selection 8.192 kHz).
+static constexpr uint8_t CLKOUT1_DEFAULT_ON_DELIVERY = 0x00;
+/// Factory-delivery C3 value: OS=0, FD=00, HFD[12:8]=0 (XTAL 32.768 kHz).
+static constexpr uint8_t CLKOUT2_DEFAULT_ON_DELIVERY = 0x00;
 static constexpr uint8_t CLKOUT_FREQ_MASK = 0x60;     ///< CLKOUT frequency select mask
 static constexpr uint8_t CLKOUT_FREQ_SHIFT = 5;       ///< CLKOUT frequency bit shift
 static constexpr uint8_t CLKOUT_OS_MASK = 0x80;
@@ -435,6 +445,8 @@ static constexpr uint8_t TEMP_CLKF_BIT = 1;
 static constexpr uint8_t TEMP_CLKF_MASK = 0x02;
 static constexpr uint8_t TEMP_BSF_BIT = 0;
 static constexpr uint8_t TEMP_BSF_MASK = 0x01;
+static constexpr uint8_t TEMP_LSB_W0C_MASK =
+    EEPROM_EEF_MASK | TEMP_CLKF_MASK | TEMP_BSF_MASK; // 0x0B
 static constexpr uint8_t EEPROM_CLEAR_EEF_VALUE = 0x03;
 static constexpr uint8_t PERSISTENT_READ_SENTINEL = 0x80;
 

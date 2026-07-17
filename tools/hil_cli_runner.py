@@ -14,7 +14,7 @@ import re
 import statistics
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -26,6 +26,15 @@ except ImportError as exc:  # pragma: no cover - exercised by operator env
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PROMPT = "> "
+FAILURE_PATTERNS = (
+    "[E]",
+    "FAILED",
+    "[FAIL]",
+    "MISMATCH",
+    "RTC init failed",
+    "Check I2C wiring",
+)
+NONZERO_FAILURE_RE = re.compile(r"\bFAIL\s*[:=]\s*[1-9]\d*")
 
 
 @dataclass(frozen=True)
@@ -70,7 +79,7 @@ class SoakStats:
 
 
 SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
-    Step("HIL-001", "boot", "", ("RTC probe successful", "Type 'help'"), timeout_s=8.0),
+    Step("HIL-001", "boot", "", ("RTC address communication succeeded", "Type 'help'"), timeout_s=8.0),
     Step("HIL-002", "identity", "version", ("RV3032 library version",)),
     Step("HIL-003", "cli", "help", ("RV3032-C7 CLI Help", "selftest")),
     Step("HIL-004", "bus", "scan", ("Scan complete",), timeout_s=15.0),
@@ -94,8 +103,7 @@ SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
         "ts tlow",
         ("timestamp",),
         allow_unknown=True,
-        expected_error_tokens=("Timestamp block contains invalid date/time",),
-        notes="No safe temperature-low stimulus fixture; empty timestamp block is a fixture limitation.",
+        notes="No safe temperature-low stimulus fixture; empty/unset is valid terminal evidence.",
     ),
     Step(
         "HIL-020",
@@ -103,8 +111,7 @@ SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
         "ts thigh",
         ("timestamp",),
         allow_unknown=True,
-        expected_error_tokens=("Timestamp block contains invalid date/time",),
-        notes="No safe temperature-high stimulus fixture; empty timestamp block is a fixture limitation.",
+        notes="No safe temperature-high stimulus fixture; empty/unset is valid terminal evidence.",
     ),
     Step(
         "HIL-021",
@@ -112,8 +119,7 @@ SAFE_FUNCTIONAL_STEPS: tuple[Step, ...] = (
         "ts evi",
         ("timestamp",),
         allow_unknown=True,
-        expected_error_tokens=("Timestamp block contains invalid date/time",),
-        notes="No external-event stimulus fixture; empty timestamp block is a fixture limitation.",
+        notes="No external-event stimulus fixture; empty/unset is valid terminal evidence.",
     ),
     Step("HIL-022", "ram", "ram 0 16", ("User RAM",), allow_unknown=True),
     Step("HIL-023", "register", "reg 0x0D", ("reg[0x0D]",), allow_unknown=True),
@@ -139,20 +145,112 @@ SOAK_COMMANDS: tuple[Step, ...] = (
 )
 
 INTENSIVE_SETUP_STEPS: tuple[Step, ...] = (
-    Step("HIL-D001", "destructive-setup", "setbuild", ("Time set to build timestamp",), timeout_s=5.0),
-    Step("HIL-D002", "destructive-setup", "clear_porf", ("Power-on reset flag cleared",), timeout_s=5.0),
-    Step("HIL-D003", "destructive-setup", "clear_vlf", ("Voltage low flag cleared",), timeout_s=5.0),
-    Step("HIL-D004", "destructive-setup", "clear_bsf", ("Backup switchover flag cleared",), timeout_s=5.0),
-    Step("HIL-D005", "destructive-setup", "primary-cell ensure CONFIRM-PRIMARY-CELL", ("Primary-cell ensure:",), timeout_s=10.0),
-    Step("HIL-D006", "destructive-setup", "alarm_int 0", ("Alarm interrupt disabled",), timeout_s=5.0),
-    Step("HIL-D007", "destructive-setup", "timer 0 2 0", ("Timer set",), timeout_s=5.0),
-    Step("HIL-D008", "destructive-setup", "clkout 0", ("Clock output disabled",), timeout_s=5.0),
-    Step("HIL-D009", "destructive-setup", "evi edge 0", ("EVI edge set",), timeout_s=5.0),
-    Step("HIL-D010", "destructive-setup", "evi debounce 0", ("EVI debounce set",), timeout_s=5.0),
-    Step("HIL-D011", "destructive-setup", "evi overwrite 0", ("EVI overwrite set",), timeout_s=5.0),
-    Step("HIL-D012", "destructive-setup", "offset 0.0", ("Frequency offset set",), timeout_s=5.0),
-    Step("HIL-D013", "destructive-setup", "ram_write 0 0xA5 0x5A 0x00 0xFF", ("Wrote 4 byte",), timeout_s=5.0),
+    Step("HIL-D001", "destructive-setup", "setbuild", ("Build timestamp calendar set completed",), timeout_s=5.0),
+    Step("HIL-D002", "destructive-setup", "clear_porf", ("power-on reset flag clear terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D003", "destructive-setup", "clear_vlf", ("voltage-low flag clear terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D004", "destructive-setup", "clear_bsf", ("backup flag clear terminal status: OK",), timeout_s=5.0),
+    Step(
+        "HIL-D005",
+        "destructive-setup",
+        "primary-cell ensure CONFIRM-PRIMARY-CELL",
+        (
+            "Primary-cell ensure:",
+            "status=OK",
+            "cleanup=verified",
+            "persistent_target_verified=yes",
+            "active_target_verified=yes",
+        ),
+        timeout_s=10.0,
+    ),
+    Step(
+        "HIL-D005A",
+        "destructive-setup",
+        "primary-cell ensure CONFIRM-PRIMARY-CELL",
+        ("status=PRIMARY_CELL_ALREADY_ATTEMPTED", "write_attempted=no"),
+        timeout_s=5.0,
+        notes="Same-lifecycle admission latch must reject a second attempt.",
+    ),
+    Step(
+        "HIL-D005B",
+        "destructive-setup",
+        "backup",
+        (
+            "Battery Backup",
+            "Backup mode: level",
+            "Trickle charger bits: 0x0 (off)",
+        ),
+        timeout_s=5.0,
+        notes="Primary-cell active readback: level switching with charging disabled.",
+    ),
+    Step(
+        "HIL-D005C",
+        "destructive-setup",
+        "backup level",
+        (
+            "backup configuration terminal status: OK",
+            "final=REQUESTED_VERIFIED",
+            "mutation_attempted=no",
+        ),
+        timeout_s=5.0,
+        notes="Already-selected level mode must complete without mutation.",
+    ),
+    Step(
+        "HIL-D005D",
+        "destructive-setup",
+        "backup off",
+        (
+            "backup configuration terminal status: OK",
+            "final=REQUESTED_VERIFIED",
+            "mutation_attempted=yes",
+        ),
+        timeout_s=5.0,
+        notes="VDD remains applied; persistent C0 is unchanged.",
+    ),
+    Step(
+        "HIL-D005E",
+        "destructive-setup",
+        "backup",
+        ("Backup mode: off", "Trickle charger bits: 0x0 (off)"),
+        timeout_s=5.0,
+        notes="Active off-mode readback with charging still disabled.",
+    ),
+    Step(
+        "HIL-D005F",
+        "destructive-setup",
+        "backup level",
+        (
+            "backup configuration terminal status: OK",
+            "final=REQUESTED_VERIFIED",
+            "mutation_attempted=yes",
+        ),
+        timeout_s=5.0,
+        notes="Restore the safe active primary-cell level mode.",
+    ),
+    Step(
+        "HIL-D005G",
+        "destructive-setup",
+        "backup",
+        ("Backup mode: level", "Trickle charger bits: 0x0 (off)"),
+        timeout_s=5.0,
+        notes="Restored level-mode readback with charging disabled.",
+    ),
+    Step("HIL-D006", "destructive-setup", "alarm_int 0", ("alarm interrupt terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D007", "destructive-setup", "timer 1 2 0", ("timer configuration terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D008", "destructive-setup", "clkout 0", ("CLKOUT disable terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D009", "destructive-setup", "evi edge 0", ("EVI edge terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D010", "destructive-setup", "evi debounce 0", ("EVI debounce terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D011", "destructive-setup", "evi overwrite 0", ("EVI overwrite terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D012", "destructive-setup", "offset 0.0", ("frequency offset terminal status: OK",), timeout_s=5.0),
+    Step("HIL-D013", "destructive-setup", "ram_write 0 165 90 0 255", ("User RAM write of 4 byte(s)", "completed"), timeout_s=5.0),
     Step("HIL-D014", "destructive-setup", "ram 0 4", ("User RAM offset 0 len 4",), timeout_s=5.0),
+    Step(
+        "HIL-D015",
+        "destructive-setup",
+        "backup",
+        ("Backup mode: level", "Trickle charger bits: 0x0 (off)"),
+        timeout_s=5.0,
+        notes="Primary-cell profile remained intact after the destructive setup mix.",
+    ),
 )
 
 INTENSIVE_SOAK_COMMANDS: tuple[Step, ...] = (
@@ -165,30 +263,30 @@ INTENSIVE_SOAK_COMMANDS: tuple[Step, ...] = (
     Step("ISOAK-probe", "intensive-soak", "probe", ("Probe OK",), timeout_s=5.0),
     Step("ISOAK-drv", "intensive-soak", "drv", ("Driver Health", "State:"), timeout_s=5.0),
     Step("ISOAK-backup", "intensive-soak", "backup", ("Battery Backup",), timeout_s=5.0),
-    Step("ISOAK-ramw0", "intensive-soak", "ram_write 0 0x55 0xAA 0x11 0x22", ("Wrote 4 byte",), timeout_s=5.0),
+    Step("ISOAK-ramw0", "intensive-soak", "ram_write 0 85 170 17 34", ("User RAM write of 4 byte(s)", "completed"), timeout_s=5.0),
     Step("ISOAK-ramr0", "intensive-soak", "ram 0 4", ("User RAM offset 0 len 4",), timeout_s=5.0),
-    Step("ISOAK-ramw4", "intensive-soak", "ram_write 4 0x33 0x44 0xCC 0xDD", ("Wrote 4 byte",), timeout_s=5.0),
+    Step("ISOAK-ramw4", "intensive-soak", "ram_write 4 51 68 204 221", ("User RAM write of 4 byte(s)", "completed"), timeout_s=5.0),
     Step("ISOAK-ramr4", "intensive-soak", "ram 4 4", ("User RAM offset 4 len 4",), timeout_s=5.0),
     Step("ISOAK-reg", "intensive-soak", "reg 0x0D", ("reg[0x0D]",), timeout_s=5.0),
     Step("ISOAK-alarm", "intensive-soak", "alarm", ("Alarm time",), timeout_s=5.0, allow_unknown=True),
-    Step("ISOAK-alarm-set", "intensive-soak", "alarm_set 30 15 10", ("Alarm time set",), timeout_s=5.0),
-    Step("ISOAK-alarm-match", "intensive-soak", "alarm_match 1 1 0", ("Alarm match set",), timeout_s=5.0),
-    Step("ISOAK-alarm-int-on", "intensive-soak", "alarm_int 1", ("Alarm interrupt enabled",), timeout_s=5.0),
-    Step("ISOAK-alarm-clear", "intensive-soak", "alarm_clear", ("Alarm flag cleared",), timeout_s=5.0),
-    Step("ISOAK-alarm-int-off", "intensive-soak", "alarm_int 0", ("Alarm interrupt disabled",), timeout_s=5.0),
-    Step("ISOAK-timer-on", "intensive-soak", "timer 64 2 1", ("Timer set",), timeout_s=5.0),
+    Step("ISOAK-alarm-set", "intensive-soak", "alarm_set 30 15 10", ("alarm time terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-alarm-match", "intensive-soak", "alarm_match 1 1 0", ("alarm match terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-alarm-int-on", "intensive-soak", "alarm_int 1", ("alarm interrupt terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-alarm-clear", "intensive-soak", "alarm_clear", ("alarm flag clear terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-alarm-int-off", "intensive-soak", "alarm_int 0", ("alarm interrupt terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-timer-on", "intensive-soak", "timer 64 2 1", ("timer configuration terminal status: OK",), timeout_s=5.0),
     Step("ISOAK-timer-read", "intensive-soak", "timer", ("Timer:",), timeout_s=5.0),
-    Step("ISOAK-timer-off", "intensive-soak", "timer 0 2 0", ("Timer set",), timeout_s=5.0),
-    Step("ISOAK-clkout-on", "intensive-soak", "clkout 1", ("Clock output enabled",), timeout_s=5.0),
-    Step("ISOAK-clkout-freq", "intensive-soak", "clkout_freq 3", ("Clock output frequency set",), timeout_s=5.0),
-    Step("ISOAK-clkout-off", "intensive-soak", "clkout 0", ("Clock output disabled",), timeout_s=5.0),
-    Step("ISOAK-offset-set", "intensive-soak", "offset 0.0", ("Frequency offset set",), timeout_s=5.0),
+    Step("ISOAK-timer-off", "intensive-soak", "timer 1 2 0", ("timer configuration terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-clkout-on", "intensive-soak", "clkout 1", ("CLKOUT enable terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-clkout-freq", "intensive-soak", "clkout_freq 3", ("CLKOUT configuration terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-clkout-off", "intensive-soak", "clkout 0", ("CLKOUT disable terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-offset-set", "intensive-soak", "offset 0.0", ("frequency offset terminal status: OK",), timeout_s=5.0),
     Step("ISOAK-offset-read", "intensive-soak", "offset", ("Frequency offset",), timeout_s=5.0),
-    Step("ISOAK-evi-edge", "intensive-soak", "evi edge 1", ("EVI edge set",), timeout_s=5.0),
-    Step("ISOAK-evi-debounce", "intensive-soak", "evi debounce 3", ("EVI debounce set",), timeout_s=5.0),
-    Step("ISOAK-evi-overwrite", "intensive-soak", "evi overwrite 1", ("EVI overwrite set",), timeout_s=5.0),
+    Step("ISOAK-evi-edge", "intensive-soak", "evi edge 1", ("EVI edge terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-evi-debounce", "intensive-soak", "evi debounce 3", ("EVI debounce terminal status: OK",), timeout_s=5.0),
+    Step("ISOAK-evi-overwrite", "intensive-soak", "evi overwrite 1", ("EVI overwrite terminal status: OK",), timeout_s=5.0),
     Step("ISOAK-evi-read", "intensive-soak", "evi", ("EVI:",), timeout_s=5.0),
-    Step("ISOAK-status-clear", "intensive-soak", "status_clear 0x0F", ("Status flags cleared",), timeout_s=5.0),
+    Step("ISOAK-status-clear", "intensive-soak", "status_clear 15", ("Status flag clear terminal status: OK",), timeout_s=5.0),
     Step("ISOAK-eeprom", "intensive-soak", "eeprom", ("EEPROM",), timeout_s=20.0, allow_unknown=True),
     Step("ISOAK-stress", "intensive-soak", "stress 25", ("OK", "FAIL: 0"), timeout_s=30.0),
     Step("ISOAK-mix", "intensive-soak", "stress_mix 25", ("Mixed Operations Stress Test", "FAIL=0"), timeout_s=30.0),
@@ -212,6 +310,14 @@ def one_line(text: str, limit: int = 180) -> str:
     return cleaned[: limit - 3] + "..."
 
 
+def output_failure_reason(clean: str) -> str | None:
+    if any(token in clean for token in FAILURE_PATTERNS):
+        return "failure token found"
+    if NONZERO_FAILURE_RE.search(clean):
+        return "nonzero failure count found"
+    return None
+
+
 def classify_output(
     text: str,
     expected: Iterable[str],
@@ -222,40 +328,27 @@ def classify_output(
     for token in expected_error_tokens:
         if token and token in clean:
             return "UNKNOWN", "expected fixture-limited error: " + token
-    failure_patterns = (
-        "[E]",
-        "FAILED",
-        "[FAIL]",
-        "MISMATCH",
-        "RTC init failed",
-        "Check I2C wiring",
-    )
-    if any(token in clean for token in failure_patterns):
-        return "FAIL", "failure token found"
-    if re.search(r"\bFAIL\s*[:=]\s*[1-9]\d*", clean):
-        return "FAIL", "nonzero failure count found"
+    failure_reason = output_failure_reason(clean)
+    if failure_reason is not None:
+        return "FAIL", failure_reason
     missing = [token for token in expected if token and token not in clean]
     if missing:
         return ("UNKNOWN" if allow_unknown else "FAIL"), "missing expected token(s): " + ", ".join(missing)
     return "PASS", ""
 
 
-def read_available(port: serial.Serial, idle_timeout_s: float, hard_timeout_s: float, stop_on_prompt: bool) -> str:
+def read_until_prompt(port: serial.Serial, hard_timeout_s: float) -> str:
     start = time.monotonic()
-    last_rx = start
     chunks: list[bytes] = []
     while True:
         now = time.monotonic()
         waiting = port.in_waiting
         if waiting:
             chunks.append(port.read(waiting))
-            last_rx = now
             text = b"".join(chunks).decode("utf-8", errors="replace")
-            if stop_on_prompt and has_prompt(text):
+            if has_prompt(text):
                 return text
         if now - start >= hard_timeout_s:
-            return b"".join(chunks).decode("utf-8", errors="replace")
-        if chunks and not stop_on_prompt and now - last_rx >= idle_timeout_s:
             return b"".join(chunks).decode("utf-8", errors="replace")
         time.sleep(0.02)
 
@@ -264,17 +357,7 @@ def has_terminal_result(text: str, expected: Iterable[str], expected_error_token
     clean = strip_ansi(text)
     if any(token and token in clean for token in expected_error_tokens):
         return True
-    failure_patterns = (
-        "[E]",
-        "FAILED",
-        "[FAIL]",
-        "MISMATCH",
-        "RTC init failed",
-        "Check I2C wiring",
-    )
-    if any(token in clean for token in failure_patterns):
-        return True
-    if re.search(r"\bFAIL\s*[:=]\s*[1-9]\d*", clean):
+    if output_failure_reason(clean) is not None:
         return True
     return all(token in clean for token in expected if token)
 
@@ -361,21 +444,11 @@ class HilSession:
         start = time.monotonic()
         if settle_s > 0:
             time.sleep(settle_s)
-        text = read_available(
-            self.serial,
-            idle_timeout_s=self.default_idle_timeout_s,
-            hard_timeout_s=timeout_s,
-            stop_on_prompt=True,
-        )
+        text = read_until_prompt(self.serial, timeout_s)
         if not has_prompt(text):
             self.serial.write(b"\n")
             self.serial.flush()
-            text += read_available(
-                self.serial,
-                idle_timeout_s=self.default_idle_timeout_s,
-                hard_timeout_s=timeout_s,
-                stop_on_prompt=True,
-            )
+            text += read_until_prompt(self.serial, timeout_s)
         elapsed = time.monotonic() - start
         self._record("", text)
         return text, elapsed
@@ -454,13 +527,27 @@ def run_parser_self_test() -> int:
         ("ok", "Probe OK\nHealth tracking: unchanged\n> ", ("Probe OK",), False, "PASS"),
         ("missing", "Temperature: 21.5 C\n> ", ("Current RTC time",), True, "UNKNOWN"),
         ("failure", "[E] Probe FAILED: I2C timeout\n> ", ("Probe OK",), False, "FAIL"),
+        ("nonzero-failure-count", "Selftest result: pass=11 FAIL=1 skip=0\n> ",
+         ("Selftest result:",), False, "FAIL"),
         ("selftest", "[PASS] readTime\nSelftest result: pass=12 fail=0 skip=0\n> ", ("Selftest result:", "fail=0"), False, "PASS"),
+        ("ram-acceptance-only", "[I] User RAM write accepted\n> ",
+         ("user RAM write terminal status: OK",), False, "FAIL"),
     )
     failed = 0
     for name, text, expected, allow_unknown, want in cases:
         got, _ = classify_output(text, expected, allow_unknown)
         if got != want:
             print(f"parser-self-test {name}: got {got}, expected {want}")
+            failed += 1
+    terminal_cases = (
+        ("expected-error", "I2C timeout", ("missing",), ("I2C timeout",), True),
+        ("failure-count", "FAIL=2", ("missing",), (), True),
+        ("incomplete", "still running", ("done",), (), False),
+    )
+    for name, text, expected, expected_errors, want in terminal_cases:
+        got = has_terminal_result(text, expected, expected_errors)
+        if got != want:
+            print(f"parser-self-test terminal-{name}: got {got}, expected {want}")
             failed += 1
     missing_authorization = argparse.Namespace(
         destructive_setup=True,
@@ -540,17 +627,7 @@ def run_soak(
         if deadline - time.monotonic() < template.timeout_s + 1.0:
             break
         index += 1
-        step = Step(
-            test_id=f"SOAK-{index:06d}",
-            area=template.area,
-            command=template.command,
-            expected=template.expected,
-            timeout_s=template.timeout_s,
-            idle_timeout_s=template.idle_timeout_s,
-            allow_unknown=template.allow_unknown,
-            expected_error_tokens=template.expected_error_tokens,
-            notes=template.notes,
-        )
+        step = replace(template, test_id=f"SOAK-{index:06d}")
         res = session.run_step(step)
         results.append(res)
         stats.command_counts[template.command] = stats.command_counts.get(template.command, 0) + 1
@@ -762,7 +839,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="COM27")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--timeout-s", type=float, default=5.0, help="Reserved compatibility option; per-step timeouts are used.")
     parser.add_argument("--idle-timeout-s", type=float, default=0.35)
     parser.add_argument("--boot-timeout-s", type=float, default=8.0)
     parser.add_argument("--boot-settle-s", type=float, default=1.0)

@@ -20,3 +20,10 @@ Register groups:
 | `0xCB-0xEA` | User EEPROM | 32 bytes nonvolatile user EEPROM. | application manual, p. 13 |
 
 The application manual marks gaps outside the listed groups as reserved; it does not assign functions or reset behavior to those addresses. Source: application manual, pp. 15-16.
+
+CLKOUT spans three configuration-mirror bytes rather than one contiguous
+CLKOUT-only block: C0 owns PMU.NCLKE, C2 owns HFD[7:0], and C3 owns OS, FD, and
+HFD[12:8]. Their factory-delivery EEPROM values are all `0x00`, selecting
+direct XTAL 32.768 kHz output while retaining HFD=0 as the inactive 8.192 kHz
+HF selection. C1 is the independent offset byte. Sources: application manual,
+pp. 45, 47, 54, 56, 62-63.

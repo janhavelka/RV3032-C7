@@ -32,7 +32,7 @@
  *   
  *   RV3032::Status st = rtc.begin(cfg);
  *   if (!st.ok()) return;
- *   st = rtc.probe();  // Explicit presence check; begin() performed no I2C.
+ *   st = rtc.probe();  // Explicit address-communication check; not identity.
  *   if (!st.ok()) return;
  *
  *   RV3032::DateTime observed{};
@@ -195,7 +195,7 @@ struct EviConfig {
   bool clkoutStopDelay = false;      ///< CLKDE delays CLKOUT switch-off after I2C STOP
 };
 
-/** @brief Periodic time-update interrupt cadence selected by Control 1 USEL. */
+/** @brief Periodic update-event cadence selected by Control 1 USEL. */
 enum class PeriodicUpdateFrequency : uint8_t {
   SECOND = 0, ///< Generate the periodic update event every second.
   MINUTE = 1, ///< Generate the periodic update event every minute.
@@ -217,7 +217,13 @@ enum class TrickleChargeResistance : uint8_t {
   KOHM_12 = 3, ///< 12 kohms.
 };
 
-/** @brief Complete active CLKOUT oscillator/frequency configuration. */
+/**
+ * @brief Complete active CLKOUT oscillator/frequency configuration.
+ * @note The value-initialized object matches the factory-delivery C0/C2/C3
+ *       selection: direct output enabled, XTAL mode at 32.768 kHz, and a
+ *       stored HF divider of 1 (8.192 kHz when HF mode is later selected).
+ *       It is a request value, not evidence of the current chip state.
+ */
 struct ClkoutConfig {
   bool enabled = true; ///< Direct NCLKE enable; interrupt-selected CLKOUT may still activate when false.
   bool highFrequencyMode = false; ///< True for programmable high-frequency mode.
@@ -268,15 +274,15 @@ struct TimeSnapshot {
 struct VerifiedTimeSetReport {
   DateTime requested{}; ///< Requested calendar, including its user-assigned weekday.
   DateTime verified{}; ///< Last accepted calendar readback.
-  Status calendarWriteStatus = Status::Ok(); ///< Exact callback result; meaningful only when calendarWriteAttempted is true.
-  Status statusWriteStatus = Status::Ok(); ///< Exact callback result; meaningful only when statusWriteAttempted is true.
+  Status calendarWriteStatus = Status::Ok(); ///< Exact normalized callback result; meaningful only when calendarWriteAttempted is true.
+  Status statusWriteStatus = Status::Ok(); ///< Exact normalized callback result; meaningful only when statusWriteAttempted is true.
   uint8_t statusBefore = 0; ///< Status observed before any mutation.
   uint8_t statusBeforeClear = 0; ///< Fresh pre-clear Status retained as side-effect evidence.
   uint8_t statusAfter = 0; ///< Status read back after the W0C write.
   bool calendarWriteAttempted = false; ///< True after the sole calendar write callback was invoked.
   bool statusWriteAttempted = false; ///< True after the sole Status write callback was invoked.
-  bool calendarWriteAmbiguous = false; ///< Calendar write callback failed and may have committed.
-  bool statusWriteAmbiguous = false; ///< Status write callback failed and may have committed.
+  bool calendarWriteAmbiguous = false; ///< Effective write instruction failed after dispatch and may have committed.
+  bool statusWriteAmbiguous = false; ///< Effective write instruction failed after dispatch and may have committed.
   bool verifiedAfterAmbiguousWrite = false; ///< Readback proved at least one ambiguous write committed as intended.
   bool verifiedValid = false; ///< `verified` contains an accepted calendar readback.
   bool statusBeforeValid = false; ///< `statusBefore` was read successfully.
@@ -300,14 +306,42 @@ static constexpr uint8_t USER_EEPROM_SIZE = 32; ///< Persistent user EEPROM size
 static constexpr uint8_t USER_EEPROM_JOB_MAX_BYTES = 16; ///< Per-job byte bound.
 static constexpr uint32_t READ_TIME_OPERATION_TIMEOUT_MS = 100; ///< Default snapshot deadline.
 static constexpr uint32_t SET_TIME_OPERATION_TIMEOUT_MS = 250; ///< Default verified-set deadline.
-static constexpr uint32_t MIN_SET_TIME_OPERATION_BUDGET_MS = 125; ///< Minimum accepted set deadline.
+static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MS = 250;
+static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MAX_MS = 1000;
+/// Reserved post-mutation verification interval; admission also needs margin.
+static constexpr uint32_t MIN_SET_TIME_OPERATION_BUDGET_MS = 125;
+
+/** @brief Verified terminal hardware state for a staged configuration job. */
+enum class ConfigurationFinalState : uint8_t {
+  UNCHANGED = 0, ///< No forward mutation was dispatched.
+  REQUESTED_VERIFIED = 1, ///< Exact requested implemented bits were read back.
+  SAFE_DISABLED_VERIFIED = 2, ///< The operation failed, but its safe gate was proven off.
+  UNKNOWN = 3 ///< Neither requested nor safe terminal state could be proven.
+};
+
+/**
+ * @brief Separate forward-operation and safe-state evidence.
+ *
+ * The first forward failure and first cleanup failure are retained separately.
+ * A failed or ambiguous requested write is never replayed. `mutationAttempted`
+ * means a forward mutating transport callback was actually dispatched; a
+ * cleanup write does not set it.
+ */
+struct ConfigurationJobReport {
+  Status operationStatus = Status::Ok(); ///< First forward-operation failure.
+  Status cleanupStatus = Status::Ok(); ///< First safe-state/reconciliation failure.
+  ConfigurationFinalState finalState = ConfigurationFinalState::UNCHANGED; ///< Proven terminal state.
+  bool mutationAttempted = false; ///< A forward mutating callback was dispatched.
+};
 
 /** @brief Typed result from persistent configuration or user EEPROM reads. */
 struct PersistentReadResult {
   uint8_t eepromAddress = 0; ///< First indirect EEPROM address read.
   uint8_t data[USER_EEPROM_JOB_MAX_BYTES] = {}; ///< Durably proven bytes.
-  uint8_t length = 0; ///< Number of result bytes.
-  bool persistentVerified = false; ///< True when every requested byte was proven.
+  uint8_t length = 0; ///< Number of durably proven result bytes.
+  Status operationStatus = Status::Ok(); ///< First forward operation failure.
+  Status cleanupStatus = Status::Ok(); ///< First access-state cleanup failure.
+  bool persistentVerified = false; ///< True when every requested byte was proven, even if cleanup later failed.
   bool cleanupVerified = false; ///< True when access-state cleanup was proven.
 };
 
@@ -315,30 +349,11 @@ struct PersistentReadResult {
 struct UserEepromWriteReport {
   uint8_t offset = 0; ///< User EEPROM offset requested.
   uint8_t requestedLength = 0; ///< Number of bytes requested.
-  uint8_t completedBytes = 0; ///< Bytes compared or written successfully.
+  uint8_t completedBytes = 0; ///< Bytes whose requested operation completed.
   uint8_t durablyVerifiedBytes = 0; ///< Bytes proven through READ_ONE.
+  Status operationStatus = Status::Ok(); ///< First forward operation failure.
+  Status cleanupStatus = Status::Ok(); ///< First access-state cleanup failure.
   bool cleanupVerified = false; ///< True when access-state cleanup was proven.
-};
-
-/** @brief Four-byte credential accepted only by typed password operations. */
-struct PasswordCredential {
-  uint8_t bytes[4] = {}; ///< Sensitive credential bytes; never returned by status APIs.
-};
-
-/** @brief Redacted evidence level for password-protection state. */
-enum class PasswordProtectionEvidence : uint8_t {
-  UNKNOWN = 0, ///< No durable or authentication evidence is available.
-  VERIFIED_DISABLED = 1, ///< Persistent disabled byte was proven.
-  VERIFIED_ENABLED = 2, ///< Persistent password and enabled byte were proven.
-  AUTHENTICATED = 3, ///< A protected operation proved credential acceptance.
-};
-
-/** @brief Credential-free password-protection evidence. */
-struct PasswordProtectionStatus {
-  PasswordProtectionEvidence evidence = PasswordProtectionEvidence::UNKNOWN; ///< Evidence level.
-  bool credentialAccepted = false; ///< True only when acceptance was proven.
-  bool persistentVerified = false; ///< True after direct persistent proof.
-  bool cleanupVerified = false; ///< True after access-state cleanup proof.
 };
 
 /** @brief Terminal semantic outcome of primary-cell provisioning. */
@@ -396,11 +411,12 @@ struct SettingsSnapshot {
   bool hasNowMsHook = false;                   ///< True when Config::nowMs is set
   bool hasWaitMsHook = false;                  ///< True when Config::waitMs is set
 
-  bool beginInProgress = false;                ///< Reserved; passive begin is never in progress
   bool enableEepromWrites = false;             ///< Persistent EEPROM writes enabled
   uint32_t eepromTimeoutMs = 0;                ///< EEPROM write timeout
   bool eepromBusy = false;                     ///< True while EEPROM state machine is active
   Status eepromLastStatus = Status::Ok();      ///< Last EEPROM state-machine status
+  Status eepromOperationStatus = Status::Ok(); ///< First forward failure in the current batch
+  Status eepromCleanupStatus = Status::Ok();   ///< First cleanup failure in the current batch
   uint32_t eepromWriteCount = 0;               ///< Successful generic queue items since begin()
   uint32_t eepromWriteFailures = 0;            ///< Failed generic queue items since begin()
   uint8_t eepromQueueDepth = 0;                ///< Pending EEPROM queue depth
@@ -456,32 +472,50 @@ struct EepromHardwareFlags {
 class RV3032 {
  public:
   /**
+   * @brief The driver object is neither copyable nor movable.
+   * @details It owns live fixed-capacity cooperative state and a borrowed
+   *          transport binding. Duplicating either could duplicate an
+   *          in-flight wear-limited mutation.
+   */
+  RV3032() = default;
+  RV3032(const RV3032&) = delete;
+  RV3032& operator=(const RV3032&) = delete;
+  RV3032(RV3032&&) = delete;
+  RV3032& operator=(RV3032&&) = delete;
+
+  /**
    * @brief Passively bind and validate configuration
    * 
    * @param config Hardware and behavior configuration
    * @return OK when callbacks are bound; BUSY on a second lifecycle begin
    * @note Performs zero transport/wait callbacks and does not prove presence,
    *       apply PMU policy, clear flags, or queue persistence. Call probe()
-   *       explicitly when presence evidence is required.
+   *       explicitly when address-communication evidence is required.
    */
   Status begin(const Config& config);
 
   /**
    * @brief Advance generic EEPROM persistence by at most one instruction
    * 
-   * @param now_ms Current monotonic time in milliseconds
+   * @param nowMs Current monotonic time in milliseconds
+   * @return NOT_INITIALIZED before begin(), BUSY while an ordinary job owns
+   *         the engine, or the exact progress/terminal result from
+   *         pollEeprom(nowMs, 1, ...).
    * @note Performs no work before begin(). It never advances an ordinary job,
    *       probes or recovers the device, or invokes primary-cell provisioning.
+   *       A cached terminal EEPROM failure is returned again until a new batch
+   *       or lifecycle reset; callers may explicitly discard the Status.
    */
-  void tick(uint32_t now_ms);
+  Status tick(uint32_t nowMs);
 
   /**
-   * @brief End an idle lifecycle with zero callbacks
+   * @brief End the lifecycle unconditionally with zero callbacks
    * 
-   * @note Idempotent while uninitialized. If queued/active EEPROM or budgeted
-   *       job work exists, this call preserves the initialized lifecycle and
-   *       operation state. Once idle, it clears callbacks, health, fixed work
-   *       state, and the primary-cell attempt latch.
+   * @note Queued and active work is abandoned. An already issued silicon write
+   *       cannot be undone. Abandoning persistent cleanup discards the saved
+   *       C0/Control 1 restoration snapshot; after rebinding, the application
+   *       must explicitly reinitialize affected product policy or follow its
+   *       documented power-cycle and reprovisioning procedure.
    */
   void end();
 
@@ -502,7 +536,7 @@ class RV3032 {
   // ===== Driver State and Health =====
 
   /**
-   * @brief Probe RTC device presence and identity
+   * @brief Probe address response and Status-register communication
    * 
    * Performs exactly one raw Status-register read.
    * Requires begin() so I2C callbacks are configured.
@@ -510,7 +544,10 @@ class RV3032 {
    * Does NOT update health tracking or driver state.
    * Can be called anytime after begin().
    * 
-   * @return OK if device present, DEVICE_NOT_FOUND on address NACK,
+   * @note A successful read proves communication for this transaction only.
+   *       It cannot prove silicon identity because another device may respond
+   *       at address 0x51 with readable register 0x0D.
+   * @return OK on address response and communication, DEVICE_NOT_FOUND on address NACK,
    *         or the original timeout/data-NACK/bus error on other failures.
    */
   Status probe();
@@ -533,15 +570,6 @@ class RV3032 {
    * @return UNINIT, READY, DEGRADED, or OFFLINE
    */
   DriverState driverState() const { return state(); }
-
-  /**
-   * @brief Check if device is operational
-   * @return true if READY or DEGRADED, false if UNINIT or OFFLINE
-   */
-  bool isOnline() const {
-    return _driverState == DriverState::READY ||
-           _driverState == DriverState::DEGRADED;
-  }
 
   /**
    * @brief Get cached configuration and runtime state without performing I2C.
@@ -580,13 +608,13 @@ class RV3032 {
 
   /**
    * @brief Get total failure count
-   * @return Total failures since begin() (wraps at UINT32_MAX)
+   * @return Total failures since begin() (wraps to zero after UINT32_MAX)
    */
   uint32_t totalFailures() const { return _totalFailures; }
 
   /**
    * @brief Get total success count
-   * @return Total successes since begin() (wraps at UINT32_MAX)
+   * @return Total successes since begin() (wraps to zero after UINT32_MAX)
    */
   uint32_t totalSuccess() const { return _totalSuccess; }
 
@@ -609,25 +637,29 @@ class RV3032 {
   /**
    * @brief Get status of the current or last generic persistence batch.
    * 
-   * @return IN_PROGRESS while generic work is active; otherwise the first
-   *         item error retained for the batch, or OK when all items succeeded.
+   * @return IN_PROGRESS while generic work is active; otherwise semantic
+   *         EEPROM_CLEANUP_FAILED when cleanup failed, the first forward item
+   *         error, or OK. Cleanup has terminal precedence.
    * @note An ordinary item failure is returned at that item boundary and later
    *       queued items remain available for a subsequent poll. Starting a new
    *       batch after the queue becomes idle clears the prior batch status.
+   *       SettingsSnapshot::eepromOperationStatus and eepromCleanupStatus
+   *       retain the exact independent first causes until that reset.
    */
   Status getEepromStatus() const;
 
   /**
    * @brief Get count of successful generic configuration-persistence items.
-   * @return Completed queue items, including compare-equal no-write outcomes.
-   * @note Does not count explicit user-EEPROM/password jobs or primary ensure.
+   * @return Completed queue items, including compare-equal no-write outcomes;
+   *         wraps to zero after UINT32_MAX.
+   * @note Does not count explicit user-EEPROM jobs or primary ensure.
    */
   uint32_t eepromWriteCount() const { return _eepromWriteCount; }
 
   /**
    * @brief Get count of failed generic configuration-persistence items.
-   * @return Failed generic queue items.
-   * @note Does not count explicit user-EEPROM/password jobs or primary ensure.
+   * @return Failed generic queue items; wraps to zero after UINT32_MAX.
+   * @note Does not count explicit user-EEPROM jobs or primary ensure.
    */
   uint32_t eepromWriteFailures() const { return _eepromWriteFailures; }
 
@@ -652,9 +684,8 @@ class RV3032 {
    *       remaining queue, and remains the batch status while later items are
    *       advanced by subsequent calls.
    * @warning A terminal EEPROM_CLEANUP_FAILED cancels remaining queued items;
-   *          no later item is allowed to run against unverified C0/C1 or
-   *          password-authorization state. Re-admission is an application
-   *          recovery-policy decision.
+   *          no later item is allowed to run against unverified C0/Control 1
+   *          state. Re-admission is an application recovery-policy decision.
    */
   Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
 
@@ -678,6 +709,38 @@ class RV3032 {
   Status getJobStatus() const;
 
   /**
+   * @brief Copy the completed timer configuration report.
+   * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
+   *         otherwise the exact terminal job Status after copying `out`.
+   */
+  Status getSetTimerJobResult(ConfigurationJobReport& out) const;
+  /**
+   * @brief Copy the completed periodic-update configuration report.
+   * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
+   *         otherwise the exact terminal job Status after copying `out`.
+   */
+  Status getSetPeriodicUpdateJobResult(ConfigurationJobReport& out) const;
+  /**
+   * @brief Copy the completed backup-switch configuration report.
+   * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
+   *         otherwise the exact terminal job Status after copying `out`.
+   */
+  Status getSetBackupSwitchModeJobResult(ConfigurationJobReport& out) const;
+  /**
+   * @brief Copy the completed CLKOUT configuration report.
+   * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
+   *         otherwise the exact terminal job Status after copying `out`.
+   */
+  Status getSetClkoutConfigJobResult(ConfigurationJobReport& out) const;
+  /**
+   * @brief Copy the completed temperature-event configuration report.
+   * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
+   *         otherwise the exact terminal job Status after copying `out`.
+   */
+  Status getSetTemperatureEventConfigJobResult(
+      ConfigurationJobReport& out) const;
+
+  /**
    * @brief Start a budgeted periodic countdown timer configuration job.
    *
    * @param ticks Timer preset (1-4095). The vendor defines 0 as a non-running
@@ -687,7 +750,9 @@ class RV3032 {
    * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
    *         INVALID_PARAM for invalid values, or NOT_INITIALIZED before begin().
    * @note Timer High writes bits 3:0 and writes reserved bits 7:4 as zero.
-   *       One register read or write is one instruction.
+   *       Requires TIE=0 before any write. Use this caller sequence: disable
+   *       interrupt -> consume/clear flag if appropriate -> configure ->
+   *       enable. One register read or write is one instruction.
    */
   Status startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable);
 
@@ -700,8 +765,8 @@ class RV3032 {
    * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
    *         INVALID_PARAM outside user RAM, or NOT_INITIALIZED before begin().
    * @note Computes `(current & ~clearMask) | setMask`, then writes the result through
-   *       pollJob(). Status, control, calendar, password, EEPROM-command, and
-   *       reserved registers are deliberately not accepted by this compatibility API.
+   *       pollJob(). Status, control, calendar, unsupported password ranges,
+   *       EEPROM-command, and reserved registers are deliberately not accepted.
    */
   Status startRegisterUpdateJob(uint8_t reg, uint8_t clearMask, uint8_t setMask);
 
@@ -729,6 +794,10 @@ class RV3032 {
    *         status is EEPROM_CLEANUP_FAILED rather than an unqualified timeout.
    * @note A zero budget performs no I2C and returns the current progress or
    *       terminal status.
+   * @warning If INTERNAL_STATE_ERROR follows an already-issued staged
+   *          mutation and no existing reconciliation path applies, the final
+   *          hardware state is unverified. Reinspect and reinitialize the
+   *          affected product policy before deployment.
    */
   Status pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
 
@@ -741,7 +810,9 @@ class RV3032 {
    * `timeValid=false`.
    *
    * @param nowMs Current application monotonic time.
-   * @param operationTimeoutMs Whole-operation timeout in `1..1000` ms.
+   * @param operationTimeoutMs Whole-operation timeout through `1000` ms. The
+   *        minimum is 2 ms with a clock hook. Without one it is derived from
+   *        the two callback bounds so every admitted job can dispatch both.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    */
   Status startReadTimeSnapshotJob(
@@ -770,7 +841,10 @@ class RV3032 {
    *
    * @param value Requested calendar value; `weekday` must be in 0..6.
    * @param nowMs Current application monotonic time.
-   * @param operationTimeoutMs Whole-operation timeout in `126..1000` ms.
+   * @param operationTimeoutMs Whole-operation timeout through `1000` ms. The
+   *        minimum is 127 ms with a clock hook. Without one it is derived from
+   *        the seven callback bounds and the shared mutation cutoff so every
+   *        admitted job can dispatch both forward writes.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    */
   Status startSetTimeAndClearInvalidFlagsVerifiedJob(
@@ -790,10 +864,12 @@ class RV3032 {
 
   /**
    * @brief Start an explicit, directly verified configuration EEPROM read.
-   * @param reg Typed C0..C5 configuration EEPROM selector. Password bytes are
-   *            deliberately excluded and require the typed protection flow.
+   * @param reg Typed C0..C5 configuration EEPROM selector. Password registers
+   *            are unsupported and deliberately excluded.
    * @param nowMs Current monotonic time.
-   * @param operationTimeoutMs Whole-operation timeout in `50..10000` ms.
+   * @param operationTimeoutMs Whole-operation timeout in the derived minimum
+   *       through `10000` ms. The minimum is cleanup reserve plus one forward
+   *       callback timeout plus one millisecond.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    * @note The start call performs zero I2C. Reads remain available when generic
    *       writes are disabled, but direct access temporarily changes EERD and
@@ -802,13 +878,14 @@ class RV3032 {
   Status startReadConfigurationEepromJob(
       ConfigurationEepromRegister reg,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = 250);
+      uint32_t operationTimeoutMs = 1000);
   /**
    * @brief Start an indirect, directly verified user EEPROM read job.
    * @param offset Public user EEPROM offset in `0..31`.
    * @param length Byte count in `1..16`; the range must not cross offset 31.
    * @param nowMs Current monotonic time.
-   * @param operationTimeoutMs Whole-operation timeout in `50..10000` ms.
+   * @param operationTimeoutMs Whole-operation timeout in the derived minimum
+   *       through `10000` ms.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    * @note The start call performs zero I2C. Each reported byte is proven by an
    *       adaptive two-READ_ONE sequence; cleanup is also verified.
@@ -824,7 +901,8 @@ class RV3032 {
    * @param data Source bytes; copied into fixed driver storage on admission.
    * @param length Byte count in `1..16`; the range must not cross offset 31.
    * @param nowMs Current monotonic time.
-   * @param operationTimeoutMs Whole-operation timeout in `301..10000` ms.
+   * @param operationTimeoutMs Whole-operation timeout in the derived minimum
+   *       through `10000` ms.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    * @note Requires Config::enableEepromWrites. Every changed byte permits at
    *       most one WRITE_ONE command and requires direct persistent readback.
@@ -918,8 +996,11 @@ class RV3032 {
    * @param date Alarm date (day of month, 1-31), or 0 to restore the vendor
    *             deactivated comparator state (Date Alarm 00 with AE_D=0).
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Active-only; no EEPROM is involved. Does not enable matching or
-   *       interrupt. Use setAlarmMatch() and enableAlarmInterrupt().
+   * @note Requires AIE=0 and performs zero writes when AIE is set. Use this
+   *       caller sequence: disable interrupt -> consume/clear flag if
+   *       appropriate -> configure -> enable. Active-only; no EEPROM is
+   *       involved. Does not enable matching or interrupt. Use setAlarmMatch()
+   *       and enableAlarmInterrupt().
    */
   Status setAlarmTime(uint8_t minute, uint8_t hour, uint8_t date);
 
@@ -930,7 +1011,10 @@ class RV3032 {
    * @param matchHour Enable hour matching
    * @param matchDate Enable date matching
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Active-only; no EEPROM is involved.
+   * @note Requires AIE=0 and performs zero writes when AIE is set. Use this
+   *       caller sequence: disable interrupt -> consume/clear flag if
+   *       appropriate -> configure -> enable. Active-only; no EEPROM is
+   *       involved.
    * @warning Passing false for all three fields sets every AE bit. Per the
    *          vendor truth table this generates an alarm event every minute; it
    *          does not deactivate the comparator. Use setAlarmTime(..., ..., 0)
@@ -960,6 +1044,10 @@ class RV3032 {
    * 
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
    * @note Active-only Status W0C operation.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
    */
   Status clearAlarmFlag();
 
@@ -992,7 +1080,11 @@ class RV3032 {
    * @return IN_PROGRESS when admitted; INVALID_PARAM for invalid input.
    *         pollJob() returns the terminal transport result.
    * @note Timer period = ticks / freq. Example: 60 ticks at Hz1 = 60 seconds
-   *       Timer configuration is active-only.
+   *       Timer configuration is active-only. It requires TIE=0; use this
+   *       caller sequence: disable interrupt -> consume/clear flag if
+   *       appropriate -> configure -> enable. Success is verified within six
+   *       callbacks; bounded safe-disable reconciliation uses at most nine.
+   *       Inspect getSetTimerJobResult() for exact terminal-state evidence.
    */
   Status setTimer(uint16_t ticks, TimerFrequency freq, bool enable);
 
@@ -1013,33 +1105,72 @@ class RV3032 {
   Status getTimerInterruptEnabled(bool& enabled);
   /** @brief Read the timer flag without clearing it. */
   Status getTimerFlag(bool& triggered);
-  /** @brief Cooperatively clear TF, subject to Status side-effect guards; active-only. */
+  /**
+   * @brief Cooperatively clear TF; active-only.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
+   */
   Status clearTimerFlag();
 
-  /** @brief Cooperatively configure active-only periodic update cadence and interrupt. */
-  Status setPeriodicUpdate(PeriodicUpdateFrequency frequency, bool interruptEnabled);
-  /** @brief Read periodic update cadence and interrupt state in one transfer. */
-  Status getPeriodicUpdate(PeriodicUpdateFrequency& frequency, bool& interruptEnabled);
-  /** @brief Read UF without clearing it. */
+  /**
+   * @brief Cooperatively configure periodic update-event generation.
+   * @param frequency One-second or one-minute cadence.
+   * @param updateEventEnabled UIE state. False suppresses both new UF flags
+   *        and the INT event; the device has no UF-polling-only mode.
+   * @note The requested controls are read back exactly before persistence is
+   *       admitted. Success uses at most five callbacks; bounded safe-disable
+   *       reconciliation uses at most eight. Inspect
+   *       getSetPeriodicUpdateJobResult() for terminal-state evidence.
+   */
+  Status setPeriodicUpdate(
+      PeriodicUpdateFrequency frequency, bool updateEventEnabled);
+  /** @brief Read periodic update cadence and update-event enable state. */
+  Status getPeriodicUpdate(
+      PeriodicUpdateFrequency& frequency, bool& updateEventEnabled);
+  /**
+   * @brief Read UF without clearing it.
+   * @note A newly generated UF cannot be observed while UIE=0 because UIE
+   *       disables update-event generation as well as the INT event.
+   */
   Status getPeriodicUpdateFlag(bool& triggered);
-  /** @brief Cooperatively clear UF, subject to Status side-effect guards; active-only. */
+  /**
+   * @brief Cooperatively clear UF; active-only.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
+   */
   Status clearPeriodicUpdateFlag();
 
   // ===== Power Management / Backup Operations =====
 
   /**
-   * @brief Set backup switchover mode.
-   *
-   * @param mode Off, Level, or Direct switchover mode
-   * @return IN_PROGRESS when the active update is admitted. pollJob() returns
-   *         its terminal result and may then queue generic persistence.
-   * @note Persistent if Config::enableEepromWrites is true. This preserves
-   *       existing trickle-charger and CLKOUT PMU bits.
-   * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
-   *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
-   *          getEepromStatus() reports a terminal status.
+   * @brief Start a verified cooperative backup-switchover configuration.
+   * @param mode Off (`00`), Direct (`01`), or Level (`10`). Hardware `11`
+   *        is also observed as disabled.
+   * @param nowMs Current monotonic time.
+   * @param operationTimeoutMs Exclusive whole-operation deadline. Admission
+   *        requires `4 * i2cTimeoutMs + activationMs + 1`, through 1000 ms.
+   * @return IN_PROGRESS when admitted or a zero-I/O admission error.
+   * @note Requires BSIE=0, preserves all implemented non-BSM PMU bits, issues
+   *       at most one PMU write, verifies active readback, then waits 2 ms for
+   *       disabled-to-Direct or 10 ms for disabled-to-Level. Persistence is
+   *       queued only after verified requested state and activation settle.
+   *       Use this caller sequence: disable interrupt -> consume/clear flag if
+   *       appropriate -> configure -> enable.
+   *       The complete job uses at most four callbacks. After a write attempt
+   *       it reconciles by readback only; it never issues a cleanup PMU write
+   *       or replays the requested mutation. Inspect
+   *       getSetBackupSwitchModeJobResult() for exact evidence.
+   * @warning Register proof does not prove retention, electrical topology, or
+   *          voltage safety. Follow the vendor backup-source restrictions.
    */
-  Status setBackupSwitchMode(BackupSwitchMode mode);
+  Status startSetBackupSwitchModeJob(
+      BackupSwitchMode mode,
+      uint32_t nowMs,
+      uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS);
 
   /**
    * @brief Read backup switchover mode from the PMU register.
@@ -1105,7 +1236,8 @@ class RV3032 {
    *                direct output is disabled.
    * @return IN_PROGRESS when the active update is admitted. pollJob() returns
    *         its terminal result and may then queue generic persistence.
-   * @note Persistent if Config::enableEepromWrites is true
+   * @note When Config::enableEepromWrites is true, exact requested C0 is
+   *       queued after active readback proof. C2/C3 are unchanged.
    * @warning When EEPROM persistence is enabled, this schedules a wear-limited,
    *          deadline-driven EEPROM commit. Call tick() or pollEeprom() until
    *          getEepromStatus() reports a terminal status.
@@ -1127,7 +1259,9 @@ class RV3032 {
    * @param freq Desired output frequency
    * @return IN_PROGRESS when the active update is admitted. pollJob() returns
    *         its terminal result and may then queue generic persistence.
-   * @note Persistent if Config::enableEepromWrites is true
+   * @note When Config::enableEepromWrites is true, exact requested C0, C2,
+   *       and C3 targets are queued after active readback proof. Persistent
+   *       compare/readback avoids writing an already-equal EEPROM byte.
    * @note This legacy helper selects crystal-derived mode (OS=0). Use
    *       setClkoutConfig() for high-frequency OS/HFD configuration.
    * @note Returns BUSY without mutation while interrupt-controlled CLKOUT is
@@ -1150,19 +1284,27 @@ class RV3032 {
 
   /**
    * @brief Cooperatively configure the complete active CLKOUT state.
-   * @note Queues wear-limited generic persistence when
-   *       Config::enableEepromWrites is true; finish with tick()/pollEeprom().
+   * @note Queues exact C0, C2, and C3 targets for wear-limited generic
+   *       persistence when Config::enableEepromWrites is true; finish with
+   *       tick()/pollEeprom(). C1 is only preserved during the active burst.
    * @note Both crystal FD and high-frequency HFD fields are stored regardless
    *       of which OS mode is active, so later mode changes retain both values.
    * @note The cooperative sequence first proves interrupt-controlled CLKOUT is
    *       disabled/inactive, stops direct output, changes C2/C3, then restores
    *       the requested direct NCLKE state. Otherwise it returns BUSY before mutation.
+   *       The safe gate is the exact preserved PMU byte with NCLKE=1. Success
+   *       uses at most five callbacks; bounded safe-disable reconciliation
+   *       uses at most eight. Persistence is admitted only after exact active
+   *       readback proof. Inspect getSetClkoutConfigJobResult().
    * @warning The register encodes dividers through 8192 (67.108864 MHz), but
    *          the vendor guarantees CLKOUT electrical characteristics only
    *          through 52 MHz. Board/application design must enforce that limit.
    */
   Status setClkoutConfig(const ClkoutConfig& config);
-  /** @brief Read complete active CLKOUT state in one burst. */
+  /**
+   * @brief Read complete active CLKOUT state in one burst.
+   * @note This reads RAM mirrors C0..C3, not durable EEPROM proof.
+   */
   Status getClkoutConfig(ClkoutConfig& config);
   /** @brief Cooperatively set active-only clock-output interrupt enable. */
   Status setClockInterruptEnabled(bool enabled);
@@ -1249,6 +1391,9 @@ class RV3032 {
    * @note Active-only. The job disables temperature detection/interrupts before
    *       changing overwrite/threshold fields, then enables interrupts before
    *       detection. It does not implicitly clear flags or reset timestamps.
+   *       Its safe gate proves THE/TLE/THIE/TLIE all zero. Success uses at most
+   *       seven callbacks; bounded safe-disable reconciliation uses at most
+   *       ten. Inspect getSetTemperatureEventConfigJobResult().
    */
   Status setTemperatureEventConfig(const TemperatureEventConfig& config);
   /** @brief Read temperature thresholds/events/interrupts in one burst. */
@@ -1268,7 +1413,11 @@ class RV3032 {
   Status getTemperatureFlags(bool& lowTriggered, bool& highTriggered);
   /** @brief Cooperatively clear both active-only THF and TLF together. */
   Status clearTemperatureFlags();
-  /** @brief Start a two-sample coherent temperature-read job. */
+  /**
+   * @brief Start a two-sample coherent temperature-read job.
+   * @note The timeout maximum is 1000 ms. The minimum is 2 ms with a clock
+   *       hook; without one it is derived from the two callback bounds.
+   */
   Status startReadCoherentTemperatureJob(
       uint32_t nowMs, uint32_t operationTimeoutMs = 100);
   /** @brief Copy the completed coherent temperature result. */
@@ -1282,7 +1431,12 @@ class RV3032 {
    * 
    * @param rising true for rising edge, false for falling edge
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Active-only; no EEPROM is involved.
+   * @note Requires EIE=0. Use this caller sequence: disable interrupt ->
+   *       consume/clear flag if appropriate -> configure -> enable.
+   *       EIE=0 suppresses signaling but does not stop timestamp capture, so
+   *       an external edge can still occur during configuration. This is
+   *       vendor-recommended hardening, not physically reproduced-fault proof.
+   *       Active-only; no EEPROM is involved.
    */
   Status setEviEdge(bool rising);
 
@@ -1291,7 +1445,12 @@ class RV3032 {
    * 
    * @param debounce Debounce filter setting
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Active-only; no EEPROM is involved.
+   * @note Requires EIE=0. Use this caller sequence: disable interrupt ->
+   *       consume/clear flag if appropriate -> configure -> enable.
+   *       EIE=0 suppresses signaling but does not stop timestamp capture, so
+   *       an external edge can still occur during configuration. This is
+   *       vendor-recommended hardening, not physically reproduced-fault proof.
+   *       Active-only; no EEPROM is involved.
    */
   Status setEviDebounce(EviDebounce debounce);
 
@@ -1300,7 +1459,12 @@ class RV3032 {
    * 
    * @param enable true to allow overwrite, false to preserve first event
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Active-only; no EEPROM is involved.
+   * @note Requires EIE=0. Use this caller sequence: disable interrupt ->
+   *       consume/clear flag if appropriate -> configure -> enable.
+   *       EIE=0 suppresses signaling but does not stop timestamp capture, so
+   *       an external edge can still occur during configuration. This is
+   *       vendor-recommended hardening, not physically reproduced-fault proof.
+   *       Active-only; no EEPROM is involved.
    */
   Status setEviOverwrite(bool enable);
 
@@ -1318,9 +1482,22 @@ class RV3032 {
   Status getEventInterruptEnabled(bool& enabled);
   /** @brief Read EVF without clearing it. */
   Status getEventFlag(bool& triggered);
-  /** @brief Cooperatively clear EVF, subject to Status side-effect guards. */
+  /**
+   * @brief Cooperatively clear EVF.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
+   */
   Status clearEventFlag(); ///< Active-only Status W0C operation.
-  /** @brief Cooperatively set event-input synchronization. */
+  /**
+   * @brief Cooperatively set event-input synchronization.
+   * @note Requires EIE=0. Use this caller sequence: disable interrupt ->
+   *       consume/clear flag if appropriate -> configure -> enable. EIE=0
+   *       suppresses signaling but does not stop timestamp capture, so an
+   *       external edge can still occur. This is vendor-recommended
+   *       hardening, not physically reproduced-fault proof.
+   */
   Status setEventSynchronizationEnabled(bool enabled); ///< Active-only ESYN arm/disarm.
   /** @brief Read event-input synchronization enable (ESYN). */
   Status getEventSynchronizationEnabled(bool& enabled);
@@ -1342,20 +1519,6 @@ class RV3032 {
   Status setGeneralPurposeBits(bool gp0, bool gp1); ///< Active-only GP0/GP1 update.
   /** @brief Read Control 1 GP0 and Control 2 GP1 in one burst. */
   Status getGeneralPurposeBits(bool& gp0, bool& gp1);
-
-  /// Load exactly one caller-supplied credential into the write-only active
-  /// password input registers. No guessing, retry, credential readback, or
-  /// retained credential storage is provided by the library.
-  Status unlockPasswordProtection(const PasswordCredential& credential);
-  /** @brief Start a durable, redacted password-protection configuration job. */
-  Status startConfigurePasswordProtectionJob(
-      const PasswordCredential& currentCredential,
-      const PasswordCredential& newCredential,
-      bool enable,
-      uint32_t nowMs,
-      uint32_t operationTimeoutMs = 4000);
-  /** @brief Return credential-free password-protection evidence. */
-  Status getPasswordProtectionStatus(PasswordProtectionStatus& status) const;
 
   /**
    * @brief Read and decode a hardware timestamp block.
@@ -1379,6 +1542,11 @@ class RV3032 {
    *          not clear EVF. Because EVR may remain set and another written 1
    *          may not reset again, the cooperative EVI path emits a preserved
    *          0-to-1 pulse when necessary.
+   * @note For the EVI source, EIE must be zero. Use this caller sequence:
+   *       disable interrupt -> consume/clear flag if appropriate -> configure
+   *       -> enable. EIE=0 suppresses signaling but does not stop capture; an
+   *       external edge can still occur. This is vendor-recommended hardening,
+   *       not physically reproduced-fault proof.
    */
   Status resetTimestamp(TimestampSource source); ///< Active-only timestamp reset.
 
@@ -1397,12 +1565,12 @@ class RV3032 {
    * 
    * @param mask Bit mask of flags to clear (1=clear, 0=leave unchanged)
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
-   * @note Writing STATUS clears THF/TLF regardless of mask (datasheet behavior).
-   *       If THF/TLF are currently set but omitted from mask, this returns
-   *       INVALID_PARAM instead of clearing them implicitly.
-   *       This is an active-only Status W0C operation.
-   * @warning Clears latched status flags. Call only after the application has
-   *          handled the corresponding fault/event state.
+   * @note This is an active-only Status W0C operation.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved. Call only after the
+   *          application handled the corresponding fault/event state.
    */
   Status clearStatus(uint8_t mask);
 
@@ -1429,6 +1597,10 @@ class RV3032 {
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
    * @note PORF indicates a power-up event occurred. Once confirmed the time is correct,
    *       clear this active-only flag to indicate time validity.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
    */
   Status clearPowerOnResetFlag();
 
@@ -1438,6 +1610,10 @@ class RV3032 {
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
    * @note VLF is set when a low-voltage event occurs. Once verified, clear this
    *       active-only flag.
+   * @warning Any Status-register write clears THF and TLF in silicon. If
+   *          either omitted flag is already set at the guard read, the
+   *          operation returns INVALID_PARAM without writing. An assertion
+   *          after the guard read cannot be preserved.
    */
   Status clearVoltageLowFlag();
 
@@ -1446,7 +1622,8 @@ class RV3032 {
    * 
    * @return IN_PROGRESS when admitted; pollJob() returns the terminal result.
    * @note Must be cleared while VDD is present (per datasheet). Returns BUSY
-   *       without writing when EEF, EEbusy, or CLKF are set in the same register.
+   *       without writing only while EEbusy is set. The fixed W0C payload
+   *       preserves EEF, CLKF, and the temperature fraction.
    *       This is an active-only TEMP_LSB W0C operation.
    */
   Status clearBackupSwitchFlag();
@@ -1502,7 +1679,7 @@ class RV3032 {
    * @param reg Register address
    * @param[out] value Register value read
    * @return Status::Ok() on success, error otherwise
-   * @note Validates that reg is in a reviewed direct read range. Password,
+   * @note Validates that reg is in a reviewed direct read range. Unsupported password,
    *       EEPROM staging/command, indirect EEPROM, and reserved gaps are rejected.
    *       This is a diagnostic/control helper using tracked I2C bounded by
    *       Config::i2cTimeoutMs; prefer typed APIs for normal time, alarm,
@@ -1518,7 +1695,7 @@ class RV3032 {
    * @param value Value to write
    * @return Status::Ok() on success, error otherwise
    * @note Uses a reviewed per-register direct-write allowlist. Status,
-   *       control, password, EEPROM staging/command, indirect EEPROM,
+   *       control, unsupported password, EEPROM staging/command, indirect EEPROM,
    *       read-only, and reserved registers are rejected before I2C.
    *       This is a diagnostic/control helper using one tracked I2C write
    *       bounded by Config::i2cTimeoutMs; it is not the managed EEPROM
@@ -1575,157 +1752,170 @@ class RV3032 {
    * @param year Full year (e.g., 2026)
    * @param month Month (1-12)
    * @param day Day of month (1-31)
-   * @return Weekday (0-6, where 0=Sunday)
+   * @param[out] weekday Weekday (0-6, where 0=Sunday)
+   * @return OK on success; INVALID_DATETIME without changing weekday on failure
    */
-  static uint8_t computeWeekday(uint16_t year, uint8_t month, uint8_t day);
+  static Status computeWeekday(
+      uint16_t year, uint8_t month, uint8_t day, uint8_t& weekday);
 
   /**
    * @brief Parse compiler build date/time into DateTime
    * 
    * @param[out] out Structure to receive parsed date/time
-   * @return true if parsing successful, false otherwise
-   * @warning Time is in UTC of build machine. May need timezone adjustment.
+   * @return OK on success; INVALID_DATETIME without changing out on failure
+   * @warning Compiler macros contain build-environment time with no timezone
+   *          indication. Apply product timezone policy explicitly.
    */
-  static bool parseBuildTime(DateTime& out);
-
-  /**
-   * @brief Convert BCD value to binary
-   * 
-   * @param bcd BCD-encoded value
-   * @return Binary value
-   */
-  static uint8_t bcdToBinary(uint8_t bcd);
-
-  /**
-   * @brief Convert binary value to BCD
-   * 
-   * @param bin Binary value
-   * @return BCD-encoded value
-   */
-  static uint8_t binaryToBcd(uint8_t bin);
+  static Status parseBuildTime(DateTime& out);
 
   /**
    * @brief Convert Unix timestamp to DateTime
    * 
-   * @param ts Unix timestamp (seconds since epoch)
+   * @param timestamp Unix timestamp (seconds since epoch)
    * @param[out] out DateTime result
-   * @return true on success, false if out of range
+   * @return OK on success; INVALID_DATETIME without changing out on failure
+   * @note Accepts exactly 946684800..4102444799 UTC: 2000-01-01 00:00:00
+   *       through 2099-12-31 23:59:59.
    */
-  static bool unixToDateTime(uint32_t ts, DateTime& out);
+  static Status unixToDateTime(uint32_t timestamp, DateTime& out);
 
   /**
    * @brief Convert DateTime to Unix timestamp
    * 
    * @param time DateTime to convert
-   * @param[out] out Unix timestamp result
-   * @return true on success, false if DateTime invalid
+   * @param[out] timestamp Unix timestamp result
+   * @return OK on success; INVALID_DATETIME without changing timestamp on failure
+   * @note Accepts exactly 2000-01-01 00:00:00 through
+   *       2099-12-31 23:59:59 in the library's UTC conversion domain.
    */
-  static bool dateTimeToUnix(const DateTime& time, uint32_t& out);
+  static Status dateTimeToUnix(const DateTime& time, uint32_t& timestamp);
 
  private:
   enum class EepromState : uint8_t {
-    Idle,
-    ReadControl1,
-    EnableEerd,
-    VerifyEerd,
-    WaitReady,
-    ReadActiveC0,
-    WriteSafeC0,
-    VerifySafeC0,
-    WriteAddr,
-    VerifyAddr,
-    WriteSentinel1,
-    VerifySentinel1,
-    PreReadBusy1,
-    ReadCmd1,
-    WaitRead1,
-    PollRead1,
-    ReadData1,
-    WriteSentinel2,
-    VerifySentinel2,
-    PreReadBusy2,
-    ReadCmd2,
-    WaitRead2,
-    PollRead2,
-    ReadData2,
-    ComparePersistent,
-    ClearEef,
-    VerifyEef,
-    WriteData,
-    VerifyData,
-    WaitReadyPreCmd,
-    WriteCmd,
-    WaitWriteSettle,
-    WaitReadyPostCmd,
-    VerifyWriteFlags,
-    BeginVerifyPersistent,
-    CleanupWaitReady,
-    RestoreSelectedActive,
-    VerifySelectedActive,
-    RestoreActive,
-    VerifyActive,
-    RestoreControl1,
-    VerifyControl1,
-    Settle,
-    WritePassword,
-    ApplyPassword,
-    ApplyPasswordBytes,
-    ApplyPasswordCredential,
-    FinalizePasswordEnable,
-    CleanupLockPassword
+    IDLE,
+    READ_CONTROL1,
+    ENABLE_EERD,
+    VERIFY_EERD,
+    WAIT_READY,
+    READ_ACTIVE_C0,
+    WRITE_SAFE_C0,
+    VERIFY_SAFE_C0,
+    WRITE_ADDR,
+    VERIFY_ADDR,
+    WRITE_SENTINEL1,
+    VERIFY_SENTINEL1,
+    PRE_READ_BUSY1,
+    READ_CMD1,
+    WAIT_READ1,
+    POLL_READ1,
+    READ_DATA1,
+    WRITE_SENTINEL2,
+    VERIFY_SENTINEL2,
+    PRE_READ_BUSY2,
+    READ_CMD2,
+    WAIT_READ2,
+    POLL_READ2,
+    READ_DATA2,
+    CLEAR_EEF,
+    VERIFY_EEF,
+    WRITE_DATA,
+    VERIFY_DATA,
+    WAIT_READY_PRE_CMD,
+    WRITE_CMD,
+    WAIT_WRITE_SETTLE,
+    WAIT_READY_POST_CMD,
+    CLEANUP_WAIT_READY,
+    RESTORE_SELECTED_ACTIVE,
+    VERIFY_SELECTED_ACTIVE,
+    RESTORE_ACTIVE,
+    VERIFY_ACTIVE,
+    RESTORE_CONTROL1,
+    VERIFY_CONTROL1,
+    SETTLE
   };
 
   enum class JobKind : uint8_t {
-    None,
-    SetTimer,
-    RegisterUpdate,
-    WriteUserRam,
-    ReadCoherentTemperature,
-    ReadTimeSnapshot,
-    SetTimeVerified,
-    PersistentRead,
-    UserEepromWrite,
-    PasswordProtection,
+    NONE,
+    SET_TIMER,
+    SET_PERIODIC_UPDATE,
+    SET_BACKUP_SWITCH_MODE,
+    SET_CLKOUT_CONFIG,
+    SET_TEMPERATURE_EVENT_CONFIG,
+    REGISTER_UPDATE,
+    TEMP_LSB_FLAG_CLEAR,
+    WRITE_USER_RAM,
+    READ_COHERENT_TEMPERATURE,
+    READ_TIME_SNAPSHOT,
+    SET_TIME_VERIFIED,
+    PERSISTENT_READ,
+    USER_EEPROM_WRITE
   };
 
   enum class JobState : uint8_t {
-    Idle,
-    SetTimerReadControl1,
-    SetTimerReadTimerHigh,
-    SetTimerWriteControl1,
-    SetTimerWriteLow,
-    SetTimerWriteHigh,
-    SetTimerWriteFinalControl1,
-    RegisterUpdateRead,
-    RegisterUpdateWrite,
-    EviResetRead,
-    EviResetWriteClear,
-    EviResetWriteSet,
-    RegisterBlockUpdateRead,
-    RegisterBlockUpdateWrite,
-    ClkoutReadActive,
-    ClkoutReadGuards,
-    ClkoutWriteStoppedConfig,
-    ClkoutWriteFinalPmu,
-    TemperatureConfigRead,
-    TemperatureConfigWriteDisabled,
-    TemperatureConfigWriteTimestampControl,
-    TemperatureConfigWriteThresholds,
-    TemperatureConfigWriteInterrupts,
-    TemperatureConfigWriteDetection,
-    WriteUserRamChunk,
-    ReadTemperatureFirst,
-    ReadTemperatureSecond,
-    ReadTimeStatus,
-    ReadTimeCalendar,
-    SetTimeReadStatusBefore,
-    SetTimeWriteCalendar,
-    SetTimeVerifyCalendar,
-    SetTimeReadStatusBeforeClear,
-    SetTimeWriteStatus,
-    SetTimeReadStatusAfter,
-    SetTimeReadFinalCalendar,
-    Persistent
+    IDLE,
+    TIMER_READ_CONTROL2_GUARD,
+    TIMER_READ_CONTROL1,
+    TIMER_WRITE_SAFE_CONTROL1,
+    TIMER_WRITE_PRESET,
+    TIMER_WRITE_FINAL_CONTROL1,
+    TIMER_VERIFY,
+    TIMER_CLEANUP_READ,
+    TIMER_CLEANUP_WRITE,
+    TIMER_CLEANUP_VERIFY,
+    PERIODIC_READ_CONTROLS,
+    PERIODIC_WRITE_SAFE_CONTROL2,
+    PERIODIC_WRITE_USEL,
+    PERIODIC_WRITE_FINAL_CONTROL2,
+    PERIODIC_VERIFY,
+    PERIODIC_CLEANUP_READ,
+    PERIODIC_CLEANUP_WRITE,
+    PERIODIC_CLEANUP_VERIFY,
+    BACKUP_READ_CONTROL3,
+    BACKUP_READ_PMU,
+    BACKUP_WRITE_PMU,
+    BACKUP_VERIFY_PMU,
+    BACKUP_WAIT_ACTIVATION,
+    REGISTER_UPDATE_READ,
+    REGISTER_UPDATE_WRITE,
+    REGISTER_UPDATE_READ_QUIESCENCE,
+    TEMP_LSB_CLEAR_READ,
+    TEMP_LSB_CLEAR_WRITE,
+    EVI_RESET_READ,
+    EVI_RESET_WRITE_CLEAR,
+    EVI_RESET_WRITE_SET,
+    REGISTER_BLOCK_UPDATE_READ,
+    REGISTER_BLOCK_UPDATE_WRITE,
+    CLKOUT_READ_ACTIVE,
+    CLKOUT_READ_GUARDS,
+    CLKOUT_WRITE_SAFE_CONFIG,
+    CLKOUT_WRITE_FINAL_PMU,
+    CLKOUT_VERIFY,
+    CLKOUT_CLEANUP_READ,
+    CLKOUT_CLEANUP_WRITE,
+    CLKOUT_CLEANUP_VERIFY,
+    TEMPERATURE_READ_CONFIG,
+    TEMPERATURE_WRITE_SAFE_CONTROL3,
+    TEMPERATURE_WRITE_TIMESTAMP_CONTROL,
+    TEMPERATURE_WRITE_THRESHOLDS,
+    TEMPERATURE_WRITE_INTERRUPTS,
+    TEMPERATURE_WRITE_DETECTION,
+    TEMPERATURE_VERIFY,
+    TEMPERATURE_CLEANUP_READ,
+    TEMPERATURE_CLEANUP_WRITE,
+    TEMPERATURE_CLEANUP_VERIFY,
+    WRITE_USER_RAM_CHUNK,
+    READ_TEMPERATURE_FIRST,
+    READ_TEMPERATURE_SECOND,
+    READ_TIME_STATUS,
+    READ_TIME_CALENDAR,
+    SET_TIME_READ_STATUS_BEFORE,
+    SET_TIME_WRITE_CALENDAR,
+    SET_TIME_VERIFY_CALENDAR,
+    SET_TIME_READ_STATUS_BEFORE_CLEAR,
+    SET_TIME_WRITE_STATUS,
+    SET_TIME_READ_STATUS_AFTER,
+    SET_TIME_READ_FINAL_CALENDAR,
+    PERSISTENT
   };
 
   struct EepromWrite {
@@ -1733,11 +1923,16 @@ class RV3032 {
     uint8_t value = 0;
   };
 
+  struct QuiescenceGuard {
+    uint8_t reg = 0;
+    uint8_t forbiddenMask = 0;
+  };
+
   static constexpr size_t kEepromQueueSize = 8;  // Fixed-size queue (no heap allocation)
   static constexpr size_t kJobUserRamBufferSize = 16;
 
   struct EepromOp {
-    EepromState state = EepromState::Idle;
+    EepromState state = EepromState::IDLE;
     uint8_t reg = 0;
     uint8_t value = 0;
     
@@ -1749,41 +1944,52 @@ class RV3032 {
   };
 
   struct JobOp {
-    JobState state = JobState::Idle;
-    JobKind activeKind = JobKind::None;
-    JobKind completedKind = JobKind::None;
+    JobState state = JobState::IDLE;
+    JobKind activeKind = JobKind::NONE;
+    JobKind completedKind = JobKind::NONE;
     Status lastStatus = Status::Ok();
-    Status completedStatus = Status::Ok();
+    ConfigurationJobReport configurationReport{};
+    bool configurationCleanupWriteAttempted = false;
+    Status persistentOperationStatus = Status::Ok();
     Status persistentCleanupStatus = Status::Ok();
     uint32_t deadlineMs = 0;
     uint32_t mutationCutoffMs = 0;
     bool deadlineActive = false;
     bool mutationCutoffActive = false;
-    uint16_t timerTicks = 0;
-    TimerFrequency timerFreq = TimerFrequency::Hz4096;
-    bool timerEnable = false;
-    uint8_t timerControl1 = 0;
-    uint8_t timerFinalControl1 = 0;
-    uint8_t timerHigh = 0;
+    uint8_t timerOriginalControl1 = 0;
+    uint8_t timerSafeControl1 = 0;
+    uint8_t timerTargetControl1 = 0;
+    uint8_t timerTargetPreset[2] = {};
+    uint8_t periodicOriginal[2] = {};
+    uint8_t periodicTarget[2] = {};
+    uint8_t periodicSafeControl2 = 0;
+    uint8_t backupOriginalPmu = 0;
+    uint8_t backupTargetPmu = 0;
+    uint32_t backupWriteCompletedMs = 0;
+    uint32_t backupActivationNotBeforeMs = 0;
+    bool backupActivationRequired = false;
     uint8_t registerUpdateReg = 0;
     uint8_t registerUpdateImplementedMask = 0xFF;
     uint8_t registerUpdateClearMask = 0;
     uint8_t registerUpdateSetMask = 0;
     uint8_t registerUpdateValue = 0;
-    uint8_t registerUpdateRequiredMask = 0;
-    uint8_t registerUpdateForbiddenMask = 0;
-    bool registerUpdateGuardedClear = false;
-    bool registerUpdateGuardFailureIsBusy = false;
     bool persistRegisterUpdate = false;
+    QuiescenceGuard quiescenceGuard{};
+    JobState quiescenceNextState = JobState::IDLE;
+    uint8_t tempLsbClearMask = 0;
     uint8_t registerBlockReg = 0;
     uint8_t registerBlockLen = 0;
     uint8_t registerBlockValues[8] = {0};
     uint8_t registerBlockClear[8] = {0};
     uint8_t registerBlockSet[8] = {0};
     uint8_t registerBlockImplemented[8] = {0};
-    ClkoutConfig clkoutConfig{};
-    uint8_t clkoutGuard[4] = {0};
+    uint8_t clkoutOriginal[4] = {};
+    uint8_t clkoutTarget[4] = {};
+    uint8_t clkoutSafePmu = 0;
     bool clkoutLegacyFrequency = false;
+    uint8_t temperatureOriginal[6] = {};
+    uint8_t temperatureTarget[6] = {};
+    uint8_t temperatureSafeControl3 = 0;
     uint8_t userRamOffset = 0;
     uint8_t userRamLen = 0;
     uint8_t userRamWritten = 0;
@@ -1793,9 +1999,7 @@ class RV3032 {
     TimeSnapshot timeSnapshot{};
     VerifiedTimeSetReport verifiedSet{};
     uint8_t calendarBuf[7] = {0};
-    DateTime firstVerified{};
-    bool firstVerifiedValid = false;
-    EepromState persistentState = EepromState::Idle;
+    EepromState persistentState = EepromState::IDLE;
     uint8_t persistentAddress = 0;
     uint8_t persistentLength = 0;
     uint8_t persistentIndex = 0;
@@ -1814,26 +2018,20 @@ class RV3032 {
     bool persistentWriteMode = false;
     bool persistentWriteAttempted = false;
     bool persistentCleanupRequired = false;
+    bool persistentCleanupProofPossible = true;
     PersistentReadResult persistentRead{};
     UserEepromWriteReport userEepromWrite{};
-    bool persistentUseAddressList = false;
-    uint8_t persistentAddresses[6] = {0};
-    PasswordCredential currentCredential{};
-    PasswordCredential newCredential{};
-    bool passwordEnable = false;
-    bool passwordAuthorizationMayBeActive = false;
   };
 
   Config _config;
   bool _initialized = false;
-  bool _beginInProgress = false;
   EepromOp _eeprom;
   JobOp _job;
-  Status _eepromLastStatus = Status::Ok();
+  Status _eepromOperationStatus = Status::Ok();
+  Status _eepromCleanupStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
   uint32_t _eepromWriteFailures = 0;
   bool _primaryCellEnsureAttempted = false;
-  PasswordProtectionStatus _passwordStatus{};
 
   // Driver state and health tracking
   DriverState _driverState = DriverState::UNINIT;
@@ -1844,14 +2042,33 @@ class RV3032 {
   uint32_t _totalFailures = 0;         ///< Total failures since begin()
   uint32_t _totalSuccess = 0;          ///< Total successes since begin()
   
+  struct RawTransferResult {
+    Status status = Status::Ok();
+    bool callbackInvoked = false;
+  };
+
+  struct TimedTransferResult {
+    Status status = Status::Ok();
+    Status callbackStatus = Status::Ok();
+    uint32_t completedAtMs = 0;
+    bool callbackInvoked = false;
+    bool deadlineCrossed = false;
+    bool callbackTimeoutViolated = false;
+  };
+
+  static Status normalizeTransportResult(const Status& status);
+  static bool intersectsUnsupportedPasswordRange(uint8_t reg, size_t len);
+
   // Raw I2C transport (no health tracking). Probe uses it directly; tracked
   // wrappers delegate through it before updating health.
-  Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
-  Status _i2cWriteRaw(const uint8_t* buf, size_t len);
-  Status _i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen,
-                          uint8_t* rxBuf, size_t rxLen,
-                          uint32_t timeoutMs);
-  Status _i2cWriteRaw(const uint8_t* buf, size_t len, uint32_t timeoutMs);
+  RawTransferResult _i2cWriteReadRaw(
+      const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
+  RawTransferResult _i2cWriteRaw(const uint8_t* buf, size_t len);
+  RawTransferResult _i2cWriteReadRaw(
+      const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen,
+      uint32_t timeoutMs);
+  RawTransferResult _i2cWriteRaw(
+      const uint8_t* buf, size_t len, uint32_t timeoutMs);
 
   // Tracked I2C transport (with health tracking) - for normal operations
   Status _i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen);
@@ -1861,8 +2078,31 @@ class RV3032 {
                                      uint32_t timeoutMs);
   Status _i2cWriteTrackedTimeout(const uint8_t* buf, size_t len,
                                  uint32_t timeoutMs);
+  Status _i2cWriteReadPresenceTracked(
+      const uint8_t* tx, size_t txLen, uint8_t* rx, size_t rxLen);
+  TimedTransferResult _i2cWriteReadTrackedBefore(
+      const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen,
+      uint32_t& nowMs, uint32_t deadlineMs);
+  TimedTransferResult _i2cWriteTrackedBefore(
+      const uint8_t* buf, size_t len,
+      uint32_t& nowMs, uint32_t deadlineMs);
+
+  static bool remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
+                              uint32_t& remainingMs);
+  static uint32_t earlierDeadline(uint32_t nowMs, uint32_t first,
+                                  uint32_t second);
+  TimedTransferResult readRegsBefore(
+      uint8_t reg, uint8_t* buf, size_t len,
+      uint32_t& nowMs, uint32_t deadlineMs);
+  TimedTransferResult writeRegsBefore(
+      uint8_t reg, const uint8_t* buf, size_t len,
+      uint32_t& nowMs, uint32_t deadlineMs);
 
   // Register-level I2C helpers (use tracked transport internally)
+  Status validateReadRegsRequest(
+      uint8_t reg, const uint8_t* buf, size_t len) const;
+  Status validateWriteRegsRequest(
+      uint8_t reg, const uint8_t* buf, size_t len) const;
   Status readRegs(uint8_t reg, uint8_t* buf, size_t len);
   Status writeRegs(uint8_t reg, const uint8_t* buf, size_t len);
   
@@ -1871,15 +2111,20 @@ class RV3032 {
 
   // EEPROM operations
   Status processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
-  Status startEepromUpdate(uint8_t reg, uint8_t value);
+  Status eepromTerminalStatus() const;
   Status readEepromFlags(bool& busy, bool& failed);
   bool eepromQueueContains(uint8_t reg, uint8_t value) const;
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
-  Status processPersistentJob(uint32_t nowMs, bool& callbackUsed);
+  Status processPersistentJob(uint32_t& nowMs, bool& callbackUsed);
   Status startPersistentReadJob(uint8_t address, uint8_t length,
                                 uint32_t nowMs, uint32_t timeoutMs);
-  void finishJob(const Status& status);
+  Status getConfigurationJobResult(
+      JobKind kind, const char* inProgressMessage,
+      const char* unavailableMessage, ConfigurationJobReport& out) const;
+  uint32_t twoTransferJobMinimumTimeoutMs() const;
+  void exposePersistentEvidence();
+  Status finishJob(const Status& status);
   bool workIdle() const;
 
   // Health tracking (called only by tracked transport wrappers)
@@ -1888,14 +2133,25 @@ class RV3032 {
   void _resetRuntimeState();
 
   Status updateRegisterSingle(uint8_t reg, uint8_t implementedMask,
-                              uint8_t clearMask, uint8_t setMask);
+                              uint8_t clearMask, uint8_t setMask,
+                              const QuiescenceGuard& quiescenceGuard);
+  Status updateRegisterBit(uint8_t reg, uint8_t implementedMask,
+                           uint8_t bitMask, bool enabled,
+                           const QuiescenceGuard& quiescenceGuard);
+  Status readRegisterBit(uint8_t reg, uint8_t bitMask, bool& value);
+  Status startTempLsbFlagClear(uint8_t targetMask);
   Status updateRegisterBlock(uint8_t reg, uint8_t length,
                              const uint8_t* implementedMasks,
                              const uint8_t* clearMasks,
-                             const uint8_t* setMasks);
+                             const uint8_t* setMasks,
+                             const QuiescenceGuard& quiescenceGuard);
+  static constexpr int32_t registerMismatchDetail(
+      uint8_t expected, uint8_t observed) {
+    return (static_cast<int32_t>(expected) << 8) |
+           static_cast<int32_t>(observed);
+  }
   Status readPersistentC0ForEnsure(uint32_t operationStart,
                                    uint8_t& value,
-                                   PrimaryCellConfigurationReport& report,
                                    bool& callbackReturnedLate);
   Status cleanupPrimaryCellEnsure(uint32_t operationStart,
                                   uint8_t control1Before,
@@ -1938,6 +2194,8 @@ class RV3032 {
   static uint8_t daysInMonth(uint16_t year, uint8_t month);
   static uint32_t dateToDays(uint16_t year, uint8_t month, uint8_t day);
   static bool unixToDate(uint32_t ts, DateTime& out);
+  static uint8_t weekdayFromValidDate(
+      uint16_t year, uint8_t month, uint8_t day);
 };
 
 }  // namespace RV3032

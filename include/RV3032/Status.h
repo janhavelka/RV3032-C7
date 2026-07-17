@@ -36,14 +36,17 @@ enum class Err : uint8_t {
   EEPROM_CLEANUP_FAILED = 19,  ///< Safe EEPROM access-state cleanup failed
   PRIMARY_CELL_ALREADY_ATTEMPTED = 20, ///< Ensure already called this lifecycle
   JOB_RESULT_UNAVAILABLE = 21, ///< Requested typed job result is unavailable
-  INCOHERENT_DATA = 22         ///< Repeated hardware samples did not agree
+  INCOHERENT_DATA = 22,        ///< Repeated hardware samples did not agree
+  CONFIGURATION_CLEANUP_FAILED = 23, ///< Staged configuration cleanup could not be proven
+  TRANSPORT_CONTRACT_VIOLATION = 24, ///< Transport callback returned an illegal status code
+  INTERNAL_STATE_ERROR = 25    ///< An impossible internal state was reached
 };
 
 /**
  * @struct Status
  * @brief Status result from library operations
  * 
- * All library functions return Status to indicate success or failure.
+ * All fallible operations return Status to indicate success or failure.
  * Check status.ok() to determine if operation succeeded.
  */
 struct Status {

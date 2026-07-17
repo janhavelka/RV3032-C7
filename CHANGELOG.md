@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A reusable `esp32s3hil` environment and autonomous real-device harness for
+  lifecycle, calendar, RAM, control, persistent-read, bounded EEPROM-write,
+  health-state, and restoration coverage.
+
+### Fixed
+
+- ESP32 example I2C initialization now supplies the requested clock to the
+  single `Wire.begin()` call. This avoids a live ESP32-S3 bus being rejected
+  when a redundant follow-up `Wire.setClock()` reports failure.
+- Intensive HIL runner expectations now distinguish synchronous four-byte RAM
+  completion from the full 16-byte cooperative RAM job's terminal wording.
+- Destructive HIL primary-cell coverage now requires semantic success and
+  cleanup proof, verifies the same-lifecycle admission latch, and confirms
+  level/off/level cooperative transitions with the trickle charger disabled,
+  plus final primary-profile preservation after the mutation mix.
+
+## [3.0.0] - 2026-07-16
+
+### Added
+
+- Canonical factory-delivery constants for PMU/CLKOUT configuration bytes and
+  native regression coverage for active-only refresh loss, C0-only CLKOUT
+  enable persistence, and exact C0/C2/C3 full-configuration persistence.
+
+### Removed
+
+- Password credentials, protection-management APIs, authentication state,
+  address-list persistence machinery, and their fake/test workflows. The full
+  silicon register constants remain for reference; both password ranges now
+  fail closed before I/O.
+- Unchecked public BCD conversions, dead lifecycle fields/states, and the
+  saturating lifetime-counter implementation.
+- The synchronous/generic backup setter, generic-register classification for
+  staged periodic/CLKOUT/temperature jobs, and superseded partial-failure and
+  separate timer-byte state paths.
+- The misleading `isOnline()` Boolean, the CLI's local truncating line reader,
+  permissive numeric parsers, unconditional EEPROM poll, and inferred parallel
+  job owner.
+- Unused example-only transport, bus, and health facades; the duplicate scanner
+  recovery path; dead logging/style and native-stub helpers; the unused HIL
+  compatibility timeout; the redundant native environment alias; and a
+  project-specific dependency-header generator that did not belong to this
+  library.
+- Obsolete `TS_OVERWRITE_BIT`, `PMU_CLKOUT_DISABLE`, and `VERSION_INT`
+  compatibility aliases; use the canonical vendor bit names and
+  `VERSION_CODE`.
+
+### Changed
+
+- Transport callbacks now have a closed I2C-only status domain and explicit
+  attempted-transfer evidence. Cooperative transfers clip timeouts, check the
+  earliest exclusive deadline again at completion, and conservatively charge
+  the supplied timeout when no clock hook exists. Multi-transfer admission now
+  rejects budgets that cannot dispatch every required callback under that
+  accounting, with zero I/O.
+- `end()` now performs unconditional zero-I/O teardown, and live driver objects
+  are noncopyable and nonmovable.
+- Public weekday/build/Unix conversions now return `Status`, validate the full
+  supported domain, and preserve output arguments on failure.
+- Generic persistence derives its cleanup reserve from six callback bounds plus
+  ready/settle time; health lifetime counters wrap to zero after `UINT32_MAX`.
+- Backup-mode configuration is now a four-callback cooperative job with
+  explicit PMU encoding/readback, BSIE admission, readback-only reconciliation,
+  and 2 ms/10 ms activation not-before boundaries.
+- Timer, periodic-update, CLKOUT, and temperature-event configuration now use
+  distinct bounded state owners and return `ConfigurationJobReport` evidence
+  for requested, safe-disabled, unchanged, or unknown terminal state.
+- `tick()` now returns the exact one-instruction EEPROM polling result.
+- Persistent typed results and generic queue diagnostics now retain forward
+  operation failure, cleanup failure, durable proof, and partial progress as
+  separate evidence.
+- The Arduino-ESP32 3.2.0 example platform is pinned. Its Wire adapter applies
+  one complete-callback deadline, restores the previous Wire timeout, and
+  returns only the transport callback's closed I2C status domain.
+- The example CLI now has one overflow-discarding reader, strict range-checked
+  tokens, exact argument counts, and one fixed pending owner through ordinary
+  jobs and optional EEPROM persistence.
+- Probe documentation now describes address-`0x51` Status communication rather
+  than presence or identity. Version metadata is generated as `3.0.0` for the
+  breaking v3 integration surface.
+- Cooperative terminal handling, configuration-result retrieval, register-bit
+  access, persistent evidence, cleanup-reserve calculation, and CLI diagnostic
+  formatting now reuse their existing single owners instead of parallel
+  bookkeeping.
+
+### Fixed
+
+- EEF/CLKF/BSF clearing now uses one two-state W0C owner with fixed preservation
+  payloads, preventing a neighboring flag asserted between polls from being
+  erased.
+- Invalid callback statuses can no longer leave a cooperative engine stuck,
+  post-callback deadline overruns cannot report success, `recover()` caches the
+  same address-NACK mapping it returns, and impossible states return
+  `INTERNAL_STATE_ERROR` with bounded persistent cleanup where required.
+- Persistent whole-deadline handling now preserves a higher-precedence
+  transport-contract or callback-timeout failure instead of replacing it with
+  a generic operation timeout.
+- Live timer/alarm/EVI/backup reconfiguration now checks TIE/AIE/EIE/BSIE before
+  mutation. Periodic UIE now consistently means update-event enable: UIE=0
+  creates neither a new UF nor the INT event.
+- Ambiguous staged writes are never replayed; post-mutation failures enter one
+  operation-specific bounded safe-state or backup reconciliation owner, and
+  configuration persistence is admitted only after requested-state proof.
+- A later EEPROM access-state cleanup failure no longer erases established
+  durable content proof or overwrites the first forward operation failure.
+- Entering persistent cleanup now makes access-state proof mandatory, so a
+  late or non-dispatched restore reports semantic `EEPROM_CLEANUP_FAILED`
+  instead of degrading to an ordinary operation timeout.
+- Short Wire staging now emits one bounded final STOP instead of leaking the
+  transaction owner; Wire initialization reports `begin()`/`setClock()`
+  failure instead of continuing.
+- Cooperative RAM writes and all other asynchronous CLI operations now print
+  terminal evidence only after completion, and unset timestamp blocks no
+  longer print a fictitious zero date.
+- CLKOUT verification now checks all four implemented active-configuration
+  bytes without an out-of-range mismatch lookup and reports the exact first
+  mismatching expected/observed byte.
+- The example scanner now restores the application Wire timeout after its
+  bounded scan, and CLI health-rate formatting widens the independent wrapping
+  counters before summing them.
+- CLI/HIL timer input now enforces the public 1..4095-tick range, and HIL RAM
+  checks require terminal success rather than accepting admission text.
+- The CLI retains EEPROM ownership after an item-level failure while later
+  fixed-queue entries remain, preventing untracked persistence work.
+- Maintained weekday, Status-write side-effect, callback-timeout, presence,
+  health-counter, README polling, and cross-phase documentation now match the
+  implemented v3 contracts.
+- CLKOUT documentation now distinguishes the factory-delivery 32.768 kHz
+  output from later EEPROM-restored power-on state, names the exact persistent
+  bytes for each setter, and records the POR/24-hour refresh and VBACKUP-low
+  behavior from Application Manual Rev. 1.3.
+
 ## [2.0.0] - 2026-07-14
 
 ### Added
@@ -288,7 +422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0
