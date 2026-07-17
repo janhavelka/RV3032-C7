@@ -7,31 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- A reusable `esp32s3hil` environment and autonomous real-device harness for
-  lifecycle, calendar, RAM, control, persistent-read, bounded EEPROM-write,
-  health-state, and restoration coverage.
-
-### Fixed
-
-- ESP32 example I2C initialization now supplies the requested clock to the
-  single `Wire.begin()` call. This avoids a live ESP32-S3 bus being rejected
-  when a redundant follow-up `Wire.setClock()` reports failure.
-- Intensive HIL runner expectations now distinguish synchronous four-byte RAM
-  completion from the full 16-byte cooperative RAM job's terminal wording.
-- Destructive HIL primary-cell coverage now requires semantic success and
-  cleanup proof, verifies the same-lifecycle admission latch, and confirms
-  level/off/level cooperative transitions with the trickle charger disabled,
-  plus final primary-profile preservation after the mutation mix.
-
-## [3.0.0] - 2026-07-16
+## [3.0.0] - 2026-07-17
 
 ### Added
 
 - Canonical factory-delivery constants for PMU/CLKOUT configuration bytes and
   native regression coverage for active-only refresh loss, C0-only CLKOUT
   enable persistence, and exact C0/C2/C3 full-configuration persistence.
+- A reusable `esp32s3hil` environment and autonomous real-device harness for
+  lifecycle, calendar, RAM, control, persistent-read, bounded EEPROM-write,
+  health-state, and restoration coverage.
 
 ### Removed
 
@@ -96,6 +81,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32 example I2C initialization now supplies the requested clock to the
+  single `Wire.begin()` call. This avoids a live ESP32-S3 bus being rejected
+  when a redundant follow-up `Wire.setClock()` reports failure.
+- Intensive HIL runner expectations now distinguish synchronous four-byte RAM
+  completion from the full 16-byte cooperative RAM job's terminal wording.
+- Destructive HIL primary-cell coverage now requires semantic success and
+  cleanup proof, verifies the same-lifecycle admission latch, and confirms
+  level/off/level cooperative transitions with the trickle charger disabled,
+  plus final primary-profile preservation after the mutation mix.
 - EEF/CLKF/BSF clearing now uses one two-state W0C owner with fixed preservation
   payloads, preventing a neighboring flag asserted between polls from being
   erased.
