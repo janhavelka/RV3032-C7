@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A reusable `esp32s3hil` environment and autonomous real-device harness for
+  lifecycle, calendar, RAM, control, persistent-read, bounded EEPROM-write,
+  health-state, and restoration coverage.
+
+### Fixed
+
+- ESP32 example I2C initialization now supplies the requested clock to the
+  single `Wire.begin()` call. This avoids a live ESP32-S3 bus being rejected
+  when a redundant follow-up `Wire.setClock()` reports failure.
+- Intensive HIL runner expectations now distinguish synchronous four-byte RAM
+  completion from the full 16-byte cooperative RAM job's terminal wording.
+- Destructive HIL primary-cell coverage now requires semantic success and
+  cleanup proof, verifies the same-lifecycle admission latch, and confirms
+  level/off/level cooperative transitions with the trickle charger disabled,
+  plus final primary-profile preservation after the mutation mix.
+
 ## [3.0.0] - 2026-07-16
 
 ### Added

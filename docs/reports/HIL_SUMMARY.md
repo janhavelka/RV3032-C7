@@ -4,7 +4,87 @@ This file keeps the durable hardware-in-the-loop evidence. Raw runner JSON,
 step tables, stdout/stderr captures, and full serial transcripts are not kept in
 the repository because they are large generated artifacts.
 
-## Fixture
+## Current v3.0.0 COM20 Evidence
+
+### Fixture
+
+| Item | Value |
+|---|---|
+| Date | `2026-07-16` through `2026-07-17` |
+| Port | `COM20` |
+| Board/target | ESP32-S3 revision 0.2, PlatformIO `esp32s3dev` / `esp32s3hil` |
+| MCU MAC | `1c:db:d4:80:c9:40` |
+| RTC address | `0x51` |
+| Backup-cell chemistry | Operator-confirmed non-rechargeable primary cells |
+| Other detected I2C addresses | `0x50`, `0x3C` |
+| I2C pins/clock | SDA `GPIO8`, SCL `GPIO9`, `400000` Hz |
+| I2C callback timeout | `50` ms |
+| Firmware/library | `3.0.0`, base commit `5122db2` plus the uncommitted HIL fixes documented below |
+| Power scope | No power removal or VDD-off step |
+
+### Results
+
+| Run | Result | Evidence |
+|---|---:|---|
+| Post-fix functional plus short stress | 28 PASS, 0 FAIL | Probe, health, time/Unix/temperature, status, alarm/timer/CLKOUT/EVI, timestamps, RAM/registers, 16-case selftest, and two 50-operation stress blocks. |
+| Autonomous exhaustive HIL | 157 PASS, 0 FAIL, 1 SKIP | 783 read callbacks, 436 write callbacks, 1219 total callbacks, and four intentionally bounded `WRITE_ONE` commands in the clean run. |
+| Maximum read stress | 100000 PASS, 0 FAIL | 33.106 s, 3020.6 operations/s, 324 us minimum / 543 us maximum / 325 us average. |
+| Maximum mixed stress | 100000 PASS, 0 FAIL | 23.818 s, 4198.5 operations/s; seven public read paths split evenly. |
+| Intensive soak | 21460 device-command PASS, 34 host-framing rows, 0 UNKNOWN | 3574.125 s, 37-command mix, maximum consecutive classified failures `1`. All 34 incomplete captures were completed in the immediately following row and contained no device error token. |
+| Post-soak functional plus short stress | 28 PASS, 0 FAIL | Driver READY, Status `0x00`, PORF/VLF/BSF clear, valid advancing calendar, selftest 16/16, and both 50-operation stress blocks clean. |
+| Authorized primary-cell run | 51 PASS, 0 FAIL | Persistent C0 was already the exact `0x20` target, so no `WRITE_ONE` was issued. Persistent and active targets plus cleanup were verified; the second same-lifecycle call was rejected; active level no-op and level/off/level mutation paths were verified with charger-off readback; the profile survived the setup mix; selftest was 16/16 and both 50-operation stress blocks passed. |
+| Native fault-injection regression | 111 PASS, 0 FAIL | Deadline, wrap, retry/reconciliation, bounded-budget, EEPROM, primary-cell, register-mask, transport-domain, and CLI contracts. |
+
+The intensive soak ran 21,494 commands: 34 commands in the mix ran 581 times
+each, while `selftest`, `stress 25`, and `stress_mix 25` ran 580
+times each. Its 34 raw runner failures were 13 `selftest`, 12 second RAM-write,
+five `clkout_freq 3`, three `probe`, and one `clkout 0` capture. Each response
+tail appeared at the start of the next command capture. The transcript contained
+no RTC/I2C timeout, NACK, bus error, `DEGRADED`, `OFFLINE`, nonzero stress
+failure count, or selftest failure.
+
+The autonomous harness changed and restored user EEPROM byte 31 and persistent
+offset C1 once per pass, with compare-equal checks proving zero `WRITE_ONE`
+commands. Two harness passes were executed, so the complete campaign issued
+eight `WRITE_ONE` commands: four user-byte change/restores and four C1
+change/restores. Generic persistence remained disabled throughout the soak.
+The later authorized primary-cell runs found persistent C0 already equal to
+the exact target and issued no additional `WRITE_ONE` command.
+
+### Exclusions
+
+- No power removal, VDD-off backfeed, backup-retention, or power-cycle test was
+  performed, per the requested no-power-removal scope.
+- The primary-cell operation ran on the continuously USB-powered nominal 3.3 V
+  fixture after chemistry confirmation. The rail was not independently
+  measured, and VDD-off topology was not exercised. Direct-switch mode was not
+  tested because it is unsafe for this primary-cell fixture near VDD.
+- No deliberate physical disconnect, bus short, external temperature limit,
+  or EVI stimulus was applied. Owner-level NACK injection on target and the
+  native fault matrix covered software handling without disturbing the bus.
+
+### Findings and Repository Changes
+
+- The first fresh image found `0x51` on the bus but the CLI stopped before
+  `RV3032::begin()`: the example initialized `Wire` and then treated a failed
+  redundant `setClock()` as fatal. Passing the frequency to the single
+  `Wire.begin(sda, scl, frequency)` call fixed COM20 and retained ESP32-S2/S3
+  builds and native coverage.
+- The intensive runner expected cooperative 16-byte RAM terminal wording for
+  synchronous four-byte writes. The expectation now matches the actual public
+  completion surface; a 431-check regression then passed with zero failures.
+- The destructive runner previously accepted any primary-cell report header.
+  It now requires `status=OK`, persistent-target and active-target proof, and
+  verified cleanup, then checks the no-write second-call latch, safe active
+  level/off/level paths, and active level/charger state after the remaining
+  setup commands.
+- The reusable target harness is in `test/test_hil/main.cpp`, selected by the
+  `esp32s3hil` PlatformIO environment. The native environment is explicitly
+  filtered to `test_native` so target firmware is not linked as a Windows test.
+
+## Historical v1.5.0 Evidence
+
+### Fixture
 
 | Item | Value |
 |---|---|
@@ -31,7 +111,7 @@ Fixture limits:
 - The 48-hour run allowed destructive CLI operations because this was a test
   fixture, not a preserved deployment.
 
-## Runs
+### Runs
 
 | Date | Run | Duration | PASS | FAIL | UNKNOWN | Notes |
 |---|---|---:|---:|---:|---:|---|
@@ -40,7 +120,7 @@ Fixture limits:
 | 2026-06-29 | Post-48-hour health | single pass | 27 | 0 | 2 | Confirms device and driver were still responsive after the 48-hour soak. |
 | 2026-06-29 | Final runner regression | 109.265 s soak | 148 | 0 | 2 | Verifies the final bounded serial resync change in the runner. |
 
-## Intensive 48-Hour Coverage
+### Intensive 48-Hour Coverage
 
 The 48-hour loop repeatedly exercised 37 CLI commands:
 

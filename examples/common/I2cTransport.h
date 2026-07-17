@@ -279,10 +279,7 @@ inline bool initWire(int sda, int scl, uint32_t freq = 400000,
   delayMicroseconds(5);
 #endif
 
-  if (!Wire.begin(sda, scl)) {
-    return false;
-  }
-  if (!Wire.setClock(freq)) {
+  if (!Wire.begin(sda, scl, freq)) {
     return false;
   }
   Wire.setTimeOut(timeoutMs);

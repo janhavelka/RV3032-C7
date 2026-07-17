@@ -8972,14 +8972,10 @@ void test_phase3_wire_short_stage_release_and_initialization() {
   TEST_ASSERT_EQUAL_UINT16(50, Wire.getTimeOut());
 
   Wire.reset();
-  Wire.setClockResult = false;
-  TEST_ASSERT_FALSE(transport::initWire(1, 2, 400000, 37));
-  TEST_ASSERT_EQUAL_UINT32(1, Wire.beginCalls);
-  TEST_ASSERT_EQUAL_UINT32(1, Wire.setClockCalls);
-  TEST_ASSERT_EQUAL_UINT16(50, Wire.getTimeOut());
-
-  Wire.reset();
   TEST_ASSERT_TRUE(transport::initWire(1, 2, 400000, 37));
+  TEST_ASSERT_EQUAL_UINT32(1, Wire.beginCalls);
+  TEST_ASSERT_EQUAL_UINT32(400000, Wire.beginFrequency);
+  TEST_ASSERT_EQUAL_UINT32(0, Wire.setClockCalls);
   TEST_ASSERT_EQUAL_UINT16(37, Wire.getTimeOut());
 
   TwoWire scannerWire;

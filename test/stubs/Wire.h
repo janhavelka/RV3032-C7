@@ -21,6 +21,7 @@ class TwoWire {
     beginResult = true;
     setClockResult = true;
     beginCalls = 0;
+    beginFrequency = 0;
     setClockCalls = 0;
     beginTransmissionCalls = 0;
     writeCalls = 0;
@@ -45,6 +46,12 @@ class TwoWire {
 
   bool begin(int, int) {
     ++beginCalls;
+    return beginResult;
+  }
+
+  bool begin(int, int, uint32_t frequency) {
+    ++beginCalls;
+    beginFrequency = frequency;
     return beginResult;
   }
   bool setClock(uint32_t) {
@@ -117,6 +124,7 @@ class TwoWire {
   bool beginResult = true;
   bool setClockResult = true;
   uint32_t beginCalls = 0;
+  uint32_t beginFrequency = 0;
   uint32_t setClockCalls = 0;
   uint32_t beginTransmissionCalls = 0;
   uint32_t writeCalls = 0;
