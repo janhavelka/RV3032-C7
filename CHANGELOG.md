@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A reusable `esp32s3hil_persistence` environment for two-cycle configuration
+  EEPROM HIL: stage typed alternate settings, verify persistent and active
+  bytes after reboot, restore the exact original bytes, and verify them after a
+  second reboot.
+- COM20 physical main-power-loss evidence with primary-cell RTC retention,
+  backup-switch flagging, application reboot, and post-return stress coverage.
+- COM20 configuration persistence evidence across two additional physical
+  main-power cycles, including exact C0-C5 verification and restoration.
+
 ## [3.0.0] - 2026-07-17
 
 ### Added
