@@ -62,7 +62,11 @@ RV3032::Status ownerWriteRead(uint8_t address, const uint8_t* tx,
 
 uint32_t nowMs(void*) { return millis(); }
 
-void waitMs(uint32_t durationMs, void*) { delay(durationMs); }
+void waitMs(uint32_t durationMs, void*) {
+  // Give the scheduler-relative delay one guard tick so the monotonic wait
+  // contract cannot be shortened by the entry tick phase.
+  delay(durationMs + 1U);
+}
 
 void report(const char* name, bool passed, const RV3032::Status* status = nullptr) {
   if (passed) {

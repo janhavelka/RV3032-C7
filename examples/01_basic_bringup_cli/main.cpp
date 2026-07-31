@@ -75,7 +75,9 @@ static uint32_t rtc_now_ms(void*) {
 }
 
 static void rtc_wait_ms(uint32_t delayMs, void*) {
-  delay(delayMs);
+  // Arduino-ESP32 delay() is tick-relative and can return just under the
+  // requested monotonic duration when entered near a tick boundary.
+  delay(delayMs + 1U);
 }
 
 /**
@@ -427,8 +429,8 @@ static void print_help() {
   cli::printHelpItem("alarm_int [0|1]", "Disable/enable alarm interrupt (no args = show)");
   cli::printHelpItem("alarm_clear", "Clear alarm flag");
   cli::printHelpItem("timer", "Show timer config");
-  cli::printHelpItem("timer <ticks 1..4095> <freq 0..3> <en 0|1>",
-                     "Set timer");
+  cli::printHelpItem("timer <ticks 0..4095> <freq 0..3> <en 0|1>",
+                     "Set timer; ticks=0 requires en=0");
 
   cli::printHelpSection("Clock And Event");
   cli::printHelpItem("clkout [0|1]", "Disable/enable clock output (no args = show)");
@@ -980,10 +982,11 @@ static void cmd_timer(const String& args) {
   uint8_t freq = 0;
   bool enable = false;
   if (!parseExactTokens(args, tokens, 3) ||
-      !cmd::parseU16Token(tokens[0], ticks) || ticks < 1U || ticks > 4095U ||
-      !cmd::parseU8Token(tokens[1], freq) || freq > 3U ||
-      !cmd::parseBool01Token(tokens[2], enable)) {
-    LOGE("Usage: timer <ticks 1..4095> <freq 0..3> <en 0|1>");
+      !cmd::parseU16Token(tokens[0], ticks) ||
+      !cmd::parseU8Token(tokens[1], freq) ||
+      !cmd::parseBool01Token(tokens[2], enable) || ticks > 4095U ||
+      (ticks == 0U && enable) || freq > 3U) {
+    LOGE("Usage: timer <ticks 0..4095> <freq 0..3> <en 0|1>; ticks=0 requires en=0");
     return;
   }
 

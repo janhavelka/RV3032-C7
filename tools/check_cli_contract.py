@@ -88,6 +88,7 @@ def main() -> int:
         "primary-cell ensure CONFIRM-PRIMARY-CELL",
         "cfg.enableEepromWrites = false",
         "cfg.waitMs = rtc_wait_ms",
+        "delay(delayMs + 1U)",
         "g_rtc.probe()",
         "PendingSurface::ORDINARY_JOB",
         "PendingSurface::EEPROM",
@@ -106,7 +107,7 @@ def main() -> int:
         "cleanup_status=",
         "persistent_target_verified=",
         "active_target_verified=",
-        "timer <ticks 1..4095>",
+        "timer <ticks 0..4095>",
     ]
     for token in required_contract:
         if token not in text:
@@ -206,8 +207,6 @@ def main() -> int:
     ):
         if token not in hil_text:
             fail(f"truthful HIL terminal-evidence token missing: {token!r}")
-    if '"timer 0 2 0"' in hil_text:
-        fail("HIL runner retains timer ticks=0 contrary to the public range")
     for token in (
         "--authorization-port",
         "--authorization-module",

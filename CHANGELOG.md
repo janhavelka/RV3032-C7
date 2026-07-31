@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Library packaging now excludes local `dist/` and `tmp/` trees so generated
   archives cannot be nested inside published packages.
+- Ignore and exclude the bare ESP-IDF component manifests that PIOArduino can
+  generate at the project root while its framework package is being repaired;
+  this Arduino-only library does not publish those transient files.
+- The ESP32 example and HIL wait adapters now add one scheduler guard tick so
+  the primary-cell operation's vendor settle interval cannot be shortened by
+  Arduino-ESP32's tick-relative `delay()` implementation.
+- A disabled timer can now use the vendor-defined non-running zero preset, so
+  `getTimer()` output from a valid inactive device can be restored exactly;
+  enabling the timer with a zero preset remains rejected before I/O.
 
 ## [3.0.0] - 2026-07-17
 

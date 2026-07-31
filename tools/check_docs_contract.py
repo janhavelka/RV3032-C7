@@ -77,6 +77,8 @@ REQUIRED_PACKAGE_FILES = [
 REQUIRED_EXPORT_EXCLUDES = [
     ".venv/**",
     "dist/**",
+    "idf_component.yml",
+    "idf_component.yml.orig",
     "tmp/**",
     "OPTION_A_PROPOSAL.txt",
     "build_output.txt",
@@ -382,7 +384,12 @@ def check_package(archive: pathlib.Path) -> int:
                     "dist/", "tmp/",
                 )):
                     forbidden.append(candidate)
-                if candidate in ("OPTION_A_PROPOSAL.txt", "build_output.txt"):
+                if candidate in (
+                    "OPTION_A_PROPOSAL.txt",
+                    "build_output.txt",
+                    "idf_component.yml",
+                    "idf_component.yml.orig",
+                ):
                     forbidden.append(candidate)
 
     for rel in REQUIRED_PACKAGE_FILES:

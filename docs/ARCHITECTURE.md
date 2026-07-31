@@ -64,7 +64,8 @@ read-only recovery, and physical phases. The application must arrange an
 uncontended shared-bus owner before dispatch. `i2cTimeoutMs` is constrained to
 1..100 ms. `nowMs` provides wrap-safe health and operation time. `waitMs` is a
 yielding application wait used only by the explicit primary-cell ensure
-operation; it must sleep or yield and must not spin.
+operation; it must not return before the requested monotonic duration, must
+sleep or yield, and must not spin.
 
 The example Wire adapter, validated with Arduino-ESP32 3.3.11, applies only the
 remaining part of one callback deadline before each potentially blocking phase

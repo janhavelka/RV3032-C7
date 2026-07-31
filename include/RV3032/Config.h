@@ -66,6 +66,10 @@ using NowMsFn = uint32_t (*)(void* user);
 
 /// Sleeping/yielding millisecond wait callback used only by the explicit
 /// synchronous primary-cell ensure operation.
+/// @note The callback must not return before delayMs monotonic milliseconds
+///       have elapsed. A scheduler-based delay may therefore need one guard
+///       tick because entering a relative tick delay just before the next tick
+///       can otherwise sleep for less than requested.
 /// @warning The callback must not busy-spin or perform I2C work.
 using WaitMsFn = void (*)(uint32_t delayMs, void* user);
 
@@ -94,7 +98,8 @@ struct Config {
   NowMsFn nowMs = nullptr;
 
   /// @brief Sleeping/yielding wait source (optional for cooperative use).
-  /// @note Required by ensurePrimaryCellConfiguration(); must not spin or use I2C.
+  /// @note Required by ensurePrimaryCellConfiguration(); must honor the full
+  ///       requested monotonic duration and must not spin or use I2C.
   WaitMsFn waitMs = nullptr;
 
   /// @brief User context passed to timing callbacks.

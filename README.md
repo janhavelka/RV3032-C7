@@ -62,7 +62,11 @@ issues at most one write-one command per byte, and directly verifies durability.
 RV3032::RV3032 rtc;
 
 static uint32_t nowMs(void*) { return millis(); }
-static void waitMs(uint32_t delayMs, void*) { delay(delayMs); }
+static void waitMs(uint32_t delayMs, void*) {
+  // Arduino-ESP32 delay() is relative to scheduler ticks. One guard tick
+  // prevents a near-boundary call from returning before delayMs has elapsed.
+  delay(delayMs + 1U);
+}
 
 void setup() {
   RV3032::Config cfg{};
@@ -97,8 +101,8 @@ void loop() {
 ```
 
 `waitMs` is optional for ordinary cooperative use. It is required only by the
-explicit synchronous primary-cell ensure operation and must sleep/yield rather
-than spin or perform I2C.
+explicit synchronous primary-cell ensure operation. It must sleep/yield for at
+least the requested monotonic duration rather than spin or perform I2C.
 
 ## Calendar APIs
 

@@ -51,6 +51,8 @@
       ".venv/**",
       ".vscode/**",
       "dist/**",
+      "idf_component.yml",
+      "idf_component.yml.orig",
       "tmp/**",
       "OPTION_A_PROPOSAL.txt",
       "build_output.txt",
