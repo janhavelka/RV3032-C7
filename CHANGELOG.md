@@ -18,6 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - COM20 configuration persistence evidence across two additional physical
   main-power cycles, including exact C0-C5 verification and restoration.
 
+### Changed
+
+- The PlatformIO pin now uses PIOArduino `55.03.311` with Arduino-ESP32
+  `3.3.11` and ESP-IDF `5.5.5`. ESP32-S3 builds target the built-in N16R8
+  definition (16 MB QIO flash and 8 MB octal PSRAM), and the bring-up CLI
+  reports the runtime MCU, memory, Arduino core, and ESP-IDF versions. HIL
+  firmware banners are port-neutral so evidence from a selected runtime port
+  is not mislabeled. Windows installation guidance covers the longer bundled
+  header paths in the new framework package.
+
+### Fixed
+
+- Library packaging now excludes local `dist/` and `tmp/` trees so generated
+  archives cannot be nested inside published packages.
+
 ## [3.0.0] - 2026-07-17
 
 ### Added

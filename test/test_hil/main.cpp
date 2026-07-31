@@ -919,7 +919,7 @@ void runHilSetup() {
   while (!Serial && before(serialDeadline)) {
     delay(10U);
   }
-  Serial.println("HIL_BEGIN RV3032-C7 exhaustive COM20 harness v1");
+  Serial.println("HIL_BEGIN RV3032-C7 exhaustive harness v1");
   Serial.printf("[INFO] library=%s build=%s commit=%s\n",
                 RV3032::VERSION, RV3032::BUILD_TIMESTAMP,
                 RV3032::GIT_COMMIT);

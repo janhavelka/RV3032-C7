@@ -50,6 +50,8 @@
       ".pio/**",
       ".venv/**",
       ".vscode/**",
+      "dist/**",
+      "tmp/**",
       "OPTION_A_PROPOSAL.txt",
       "build_output.txt",
       "docs/reference-pdfs/**",

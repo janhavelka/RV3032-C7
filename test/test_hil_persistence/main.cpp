@@ -584,7 +584,7 @@ void runSetup() {
   while (!Serial && before(serialDeadline)) {
     delay(10U);
   }
-  Serial.println("PERSIST_HIL_BEGIN RV3032-C7 COM20 v1");
+  Serial.println("PERSIST_HIL_BEGIN RV3032-C7 harness v1");
 
   if (!transport::initWire(8, 9, 400000U, 50U)) {
     Serial.println("[FAIL] application-owned I2C initialization");

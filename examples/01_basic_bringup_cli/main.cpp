@@ -472,6 +472,16 @@ static void print_help() {
 static void cmd_version() {
   Serial.println("=== Version Info ===");
   Serial.printf("  Example firmware build: %s %s\n", __DATE__, __TIME__);
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.printf("  MCU: %s rev %u, flash %lu bytes, PSRAM %s (%lu bytes)\n",
+                ESP.getChipModel(),
+                static_cast<unsigned int>(ESP.getChipRevision()),
+                static_cast<unsigned long>(ESP.getFlashChipSize()),
+                psramFound() ? "ready" : "not available",
+                static_cast<unsigned long>(ESP.getPsramSize()));
+  Serial.printf("  Arduino-ESP32: %s\n", ESP.getCoreVersion());
+  Serial.printf("  ESP-IDF: %s\n", ESP.getSdkVersion());
+#endif
   Serial.printf("  RV3032 library version: %s\n", RV3032::VERSION);
   Serial.printf("  RV3032 library full: %s\n", RV3032::VERSION_FULL);
   Serial.printf("  RV3032 library build: %s\n", RV3032::BUILD_TIMESTAMP);

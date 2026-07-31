@@ -76,6 +76,8 @@ REQUIRED_PACKAGE_FILES = [
 
 REQUIRED_EXPORT_EXCLUDES = [
     ".venv/**",
+    "dist/**",
+    "tmp/**",
     "OPTION_A_PROPOSAL.txt",
     "build_output.txt",
     "docs/reference-pdfs/**",
