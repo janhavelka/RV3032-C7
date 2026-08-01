@@ -42,5 +42,6 @@ wifi_credentials.h
 
 # Auto-generated files
 include/RV3032/Version.h
+docs/doxygen/
 idf_component.yml
 idf_component.yml.orig

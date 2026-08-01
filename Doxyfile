@@ -2,7 +2,6 @@
 # Generated and maintained for unified API documentation.
 
 PROJECT_NAME           = "RV3032-C7"
-PROJECT_NUMBER         = "1.5.0"
 PROJECT_BRIEF          = "RV3032-C7 embedded library API documentation"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
@@ -31,7 +30,10 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md include docs
+INPUT                  = README.md CHANGELOG.md CONTRIBUTING.md include \
+                         docs/ARCHITECTURE.md docs/DEVICE_REFERENCE.md \
+                         docs/IDF_PORT.md \
+                         docs/reports/HIL_SUMMARY.md
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = YES
 EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/reference-pdfs/*
@@ -54,5 +56,5 @@ GENERATE_MAN           = NO
 WARN_IF_UNDOCUMENTED   = NO
 WARN_NO_PARAMDOC       = NO
 WARN_IF_DOC_ERROR      = YES
-WARN_AS_ERROR          = NO
+WARN_AS_ERROR          = YES
 QUIET                  = YES

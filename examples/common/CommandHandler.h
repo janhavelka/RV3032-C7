@@ -79,22 +79,6 @@ inline bool parseU32Token(const String& token, uint32_t& out) {
   return true;
 }
 
-inline bool parseInt32Token(const String& token, int32_t& out) {
-  const char* text = token.c_str();
-  if (detail::hasWhitespace(text)) {
-    return false;
-  }
-  errno = 0;
-  char* end = nullptr;
-  const long long parsed = strtoll(text, &end, 10);
-  if (errno == ERANGE || end == text || *end != '\0' ||
-      parsed < INT32_MIN || parsed > INT32_MAX) {
-    return false;
-  }
-  out = static_cast<int32_t>(parsed);
-  return true;
-}
-
 inline bool parseFloatToken(const String& token, float& out) {
   const char* text = token.c_str();
   if (detail::hasWhitespace(text)) {

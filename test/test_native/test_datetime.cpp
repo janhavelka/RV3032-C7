@@ -9021,17 +9021,6 @@ void test_phase3_strict_cli_numeric_tokens_preserve_outputs() {
   TEST_ASSERT_FALSE(cmd::parseU32Token(String("4294967296"), u32));
   TEST_ASSERT_EQUAL_UINT32(99, u32);
 
-  int32_t i32 = 44;
-  TEST_ASSERT_TRUE(cmd::parseInt32Token(String("-2147483648"), i32));
-  TEST_ASSERT_EQUAL_INT32(INT32_MIN, i32);
-  TEST_ASSERT_TRUE(cmd::parseInt32Token(String("2147483647"), i32));
-  TEST_ASSERT_EQUAL_INT32(INT32_MAX, i32);
-  i32 = 44;
-  TEST_ASSERT_FALSE(cmd::parseInt32Token(String("2147483648"), i32));
-  TEST_ASSERT_EQUAL_INT32(44, i32);
-  TEST_ASSERT_FALSE(cmd::parseInt32Token(String("-2147483649"), i32));
-  TEST_ASSERT_EQUAL_INT32(44, i32);
-
   float value = 12.5f;
   TEST_ASSERT_TRUE(cmd::parseFloatToken(String("-1.25"), value));
   TEST_ASSERT_FLOAT_WITHIN(0.0001f, -1.25f, value);

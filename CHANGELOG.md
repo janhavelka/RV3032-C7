@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EEPROM HIL: stage typed alternate settings, verify persistent and active
   bytes after reboot, restore the exact original bytes, and verify them after a
   second reboot.
-- COM20 physical main-power-loss evidence with primary-cell RTC retention,
+- Physical main-power-loss evidence with primary-cell RTC retention,
   backup-switch flagging, application reboot, and post-return stress coverage.
-- COM20 configuration persistence evidence across two additional physical
+- Configuration persistence evidence across two additional physical
   main-power cycles, including exact C0-C5 verification and restoration.
 
 ### Changed
@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   firmware banners are port-neutral so evidence from a selected runtime port
   is not mislabeled. Windows installation guidance covers the longer bundled
   header paths in the new framework package.
+- Public and supporting documentation now describes the timer-zero restore
+  contract, per-lifecycle callback health counters, current HIL evidence, and
+  the distinction between direct registers and indirect user EEPROM.
+- Doxygen input is limited to maintained public documentation, treats emitted
+  documentation errors as build failures, and no longer duplicates the
+  manifest version. Release checks now validate version agreement dynamically
+  instead of hard-coding `3.0.0`.
+- The duplicated timed read/write transport deadline bookkeeping now uses one
+  shared preparation and completion path.
+
+### Removed
+
+- Obsolete v1.1 build output and the superseded managed-driver proposal from
+  the repository root, plus an unused signed-integer parser from example glue.
 
 ### Fixed
 
@@ -35,9 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore and exclude the bare ESP-IDF component manifests that PIOArduino can
   generate at the project root while its framework package is being repaired;
   this Arduino-only library does not publish those transient files.
-- The ESP32 example and HIL wait adapters now add one scheduler guard tick so
-  the primary-cell operation's vendor settle interval cannot be shortened by
-  Arduino-ESP32's tick-relative `delay()` implementation.
+- `WaitMsFn` now explicitly requires the full requested monotonic wait. The
+  ESP32 example and HIL adapters add one scheduler guard tick so vendor settle
+  intervals cannot be shortened by Arduino-ESP32's tick-relative `delay()`.
 - The configuration-persistence HIL harness now reapplies and proves the
   primary-cell active C0 startup state after every backup-powered return before
   comparing or restoring the remaining configuration bytes. The reconciliation
@@ -45,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A disabled timer can now use the vendor-defined non-running zero preset, so
   `getTimer()` output from a valid inactive device can be restored exactly;
   enabling the timer with a zero preset remains rejected before I/O.
+- Doxygen and example comments now accurately describe cached poll results,
+  transport-callback health accounting, EEPROM state, and application-owned
+  board pins.
 
 ## [3.0.0] - 2026-07-17
 

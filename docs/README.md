@@ -10,6 +10,7 @@ README, CHANGELOG, API headers, tests, or the maintained docs below.
 |---|---|
 | [`../README.md`](../README.md) | Public usage, API, behavioral contracts, build, and validation notes. |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Release-facing change history. |
+| [`../Doxyfile`](../Doxyfile) | Public API/reference build with documentation errors enforced. |
 | [`../AGENTS.md`](../AGENTS.md) | Repository engineering rules. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Driver lifecycle, health model, transport layering, instruction budget, and EEPROM policy. |
 | [`DEVICE_REFERENCE.md`](DEVICE_REFERENCE.md) | Device facts used by the driver: I2C address, register map, flags, EEPROM sequence, timing, and implementation notes. |
@@ -46,6 +47,11 @@ unrelated consumer-project version-generator branch have been removed. The
 cooperative configuration and EEPROM state machines remain explicit because
 their distinct mutation, reconciliation, deadline, and cleanup evidence is a
 safety boundary rather than accidental duplication.
+
+The current release-preparation cleanup also removes a stale v1.1 build log,
+the superseded managed-driver proposal, and an unused example parser. Timed
+read/write transport wrappers share one deadline-accounting owner while their
+read and write dispatches remain explicit.
 
 The maintained CLKOUT references distinguish the factory-delivery
 C0/C2/C3=`0x00` selection (direct XTAL 32.768 kHz) from a device's later
@@ -86,6 +92,9 @@ The compact notes in [`extracted-md/`](extracted-md/) preserve source-derived
 chip facts and open questions from the original vendor-document review. They
 are retained for traceability; maintained behavior should still be documented in
 the public API, tests, README, changelog, or maintained docs above.
+The latest pass rechecked these notes against Application Manual Rev. 1.3 and
+clarified that user EEPROM `0xCB..0xEA` is an indirect EEADDR address space,
+not a direct register range.
 
 ## Reference PDFs
 

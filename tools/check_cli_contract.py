@@ -130,7 +130,6 @@ def main() -> int:
         "parseU8Token",
         "parseU16Token",
         "parseU32Token",
-        "parseInt32Token",
         "parseFloatToken",
         "parseBool01Token",
         "parseRegisterToken",

@@ -53,7 +53,7 @@ Configuration EEPROM endurance is finite: **10,000 writes at 3.0 V/25 C** and
 **100 writes at 5.5 V/85 C**. Persistent mutation therefore compares first,
 issues at most one write-one command per byte, and directly verifies durability.
 
-## Quick start
+## Integration sketch
 
 ```cpp
 #include <Wire.h>
@@ -99,6 +99,11 @@ void loop() {
   }
 }
 ```
+
+This is a lifecycle sketch: the transport callbacks and application error
+handlers are intentionally project-owned. See
+`examples/01_basic_bringup_cli/main.cpp` and `examples/common/I2cTransport.h`
+for a complete Arduino-ESP32 integration.
 
 `waitMs` is optional for ordinary cooperative use. It is required only by the
 explicit synchronous primary-cell ensure operation. It must sleep/yield for at
@@ -273,6 +278,10 @@ or otherwise ambiguous requested write is never replayed. Persistence is
 queued only after the requested active state was read back and
 `operationStatus` remained `OK`.
 
+Timer preset zero is the vendor-defined non-running state. Calling
+`setTimer(0, freq, false)` can restore that state exactly;
+`setTimer(0, freq, true)` returns `INVALID_PARAM` before any I2C callback.
+
 Timer, periodic-update, CLKOUT, and temperature-event failures use their own
 bounded safe gates: TE=0, UIE=0, preserved PMU with NCLKE=1, and
 THE/TLE/THIE/TLIE=0 respectively. Their success/worst-case callback caps are
@@ -420,14 +429,16 @@ struct Status {
 };
 ```
 
-No exceptions are used. Transport success/failure is recorded only inside the
-tracked wrappers. Validation, precondition failures, and raw `probe()` do not
-change health counters. `READY` after `begin()` means callbacks are bound; it
+No exceptions are used. Transport success/failure is recorded per tracked
+transport callback inside the tracked wrappers. Validation, precondition
+failures, and raw `probe()` do not change health counters. `READY` after
+`begin()` means callbacks are bound; it
 is observational health, not address response or presence evidence. A
 successful raw `probe()` proves only communication for that one address-`0x51`
 Status read. It does not prove RV3032 identity. `recover()` and `lastError()`
-map the same address NACK to `DEVICE_NOT_FOUND`. Lifetime success/failure
-counters are ordinary `uint32_t` counters and wrap from `UINT32_MAX` to zero.
+map the same address NACK to `DEVICE_NOT_FOUND`. Success/failure counters reset
+on each successful `begin()`/`end()` lifecycle, are ordinary `uint32_t` values,
+and wrap from `UINT32_MAX` to zero.
 
 ## Wire example adapter
 
@@ -489,18 +500,17 @@ python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_docs_contract.py source
+doxygen Doxyfile
 python tools/hil_cli_runner.py --parser-self-test
 python tools/hil_cli_runner.py --dry-run
 ```
 
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
-authorization. Current compatibility evidence is recorded in
-`docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md`; the broad
-2.0.0 implementation report and historical HIL evidence are kept separately.
-The library is a dependency candidate only: TunnelMonitor integration and an
-immutable commit pin remain external work, and old 1.5.0 HIL is not a 2.0.0
-primary-cell or retention claim.
+authorization. The latest retained physical evidence is summarized in
+`docs/reports/HIL_SUMMARY.md`; dated implementation and integration-readiness
+reports remain historical audit records. TunnelMonitor integration and an
+immutable consumer commit pin remain external work.
 
 After such fresh authorization, `--destructive-setup` additionally requires
 explicit `--authorization-port`, `--authorization-module`,

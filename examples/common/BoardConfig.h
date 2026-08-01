@@ -5,7 +5,8 @@
  * These are convenience defaults for reference designs only.
  * NOT part of the library API. Override for your hardware.
  *
- * @warning The library itself is board-agnostic. All pins are passed via Config.
+ * @warning The library itself is board-agnostic. Pins remain application-owned;
+ *          only the resulting transport callbacks are passed via Config.
  *          These defaults are provided for examples only.
  */
 
@@ -22,7 +23,7 @@ namespace board {
 // ====================================================================
 // These values are NOT library defaults. They are example-only values.
 // Override them for your board by creating your own BoardConfig.h or
-// passing explicit values to Config structs in your application.
+// passing explicit values to your application's I2C owner.
 // ====================================================================
 
 /// @brief I2C SDA pin (data line). Example default for ESP32-S2/S3.

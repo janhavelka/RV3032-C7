@@ -259,6 +259,14 @@ def main() -> int:
     )
     timed_transport_write = function_body(
         "RV3032::TimedTransferResult RV3032::_i2cWriteTrackedBefore(",
+        "Status RV3032::prepareTrackedTransferBefore(",
+    )
+    timed_transport_prepare = function_body(
+        "Status RV3032::prepareTrackedTransferBefore(",
+        "RV3032::TimedTransferResult RV3032::finishTrackedTransferBefore(",
+    )
+    timed_transport_finish = function_body(
+        "RV3032::TimedTransferResult RV3032::finishTrackedTransferBefore(",
         "Status RV3032::_readRegisterRaw(",
     )
     timed_register_read = function_body(
@@ -481,41 +489,68 @@ def main() -> int:
         errors.append("plain readRegs bypasses the shared read validator")
     if "validateWriteRegsRequest(" not in plain_register_write:
         errors.append("plain writeRegs bypasses the shared write validator")
-    if "_i2cWriteReadRaw(" not in timed_transport_read or "_updateHealth(" not in timed_transport_read:
-        errors.append("timed read tracked wrapper does not own raw dispatch and health")
-    if "_i2cWriteRaw(" not in timed_transport_write or "_updateHealth(" not in timed_transport_write:
-        errors.append("timed write tracked wrapper does not own raw dispatch and health")
-
+    prepare_call = "prepareTrackedTransferBefore("
+    finish_call = "finishTrackedTransferBefore("
     for name, body, raw_call in (
         ("timed read", timed_transport_read, "_i2cWriteReadRaw("),
         ("timed write", timed_transport_write, "_i2cWriteRaw("),
     ):
-        required_timing_tokens = (
-            "remainingMs <= 1U",
-            "(remainingMs - 1U)",
-            "nowMs += timeoutMs;",
-            "result.completedAtMs = nowMs;",
-            "result.deadlineCrossed = !remainingBefore",
-            "Transport callback exceeded timeout",
-            "Transport callback crossed operation deadline",
-        )
-        for token in required_timing_tokens:
-            if token not in body:
-                errors.append(f"{name} omits post-callback timing contract: {token!r}")
+        if (body.count(prepare_call) != 1 or body.count(raw_call) != 1 or
+                body.count(finish_call) != 1):
+            errors.append(
+                f"{name} must prepare, raw-dispatch, and finish exactly once"
+            )
+        prepare_pos = body.find(prepare_call)
         raw_pos = body.find(raw_call)
-        first_clock = body.find("_nowMs()")
-        last_clock = body.rfind("_nowMs()")
-        if raw_pos < 0 or first_clock < 0 or last_clock <= raw_pos or first_clock >= raw_pos:
-            errors.append(f"{name} does not sample the clock before and after raw dispatch")
-        decision = body.find("if (!raw.callbackInvoked)")
-        precedence = [
-            body.find("raw.status.code == Err::TRANSPORT_CONTRACT_VIOLATION", decision),
-            body.find("else if (result.callbackTimeoutViolated)", decision),
-            body.find("else if (!raw.status.ok())", decision),
-            body.find("else if (result.deadlineCrossed)", decision),
-        ]
-        if decision < 0 or any(position < 0 for position in precedence) or precedence != sorted(precedence):
-            errors.append(f"{name} effective-result precedence has drifted")
+        finish_pos = body.find(finish_call)
+        if (prepare_pos < 0 or raw_pos < 0 or finish_pos < 0 or
+                not prepare_pos < raw_pos < finish_pos):
+            errors.append(
+                f"{name} does not order shared timing around raw dispatch"
+            )
+        if f"return {finish_call}" not in body:
+            errors.append(f"{name} does not return the shared final result")
+        if "_updateHealth(" in body:
+            errors.append(f"{name} duplicates shared health finalization")
+
+    for token in ("remainingMs <= 1U", "(remainingMs - 1U)"):
+        if token not in timed_transport_prepare:
+            errors.append(f"timed prepare omits deadline contract: {token!r}")
+    for token in (
+        "nowMs += timeoutMs;",
+        "result.completedAtMs = nowMs;",
+        "result.deadlineCrossed = !remainingBefore",
+        "Transport callback exceeded timeout",
+        "Transport callback crossed operation deadline",
+    ):
+        if token not in timed_transport_finish:
+            errors.append(f"timed finish omits callback contract: {token!r}")
+    if ("_nowMs()" not in timed_transport_prepare or
+            "_nowMs()" not in timed_transport_finish):
+        errors.append(
+            "shared timed transport does not sample before and after dispatch"
+        )
+    if "_updateHealth(" not in timed_transport_finish:
+        errors.append("shared timed transport omits health finalization")
+    if re.search(r"_i2cWrite(?:Read)?Raw\s*\(",
+                 timed_transport_prepare + timed_transport_finish):
+        errors.append("shared timed bookkeeping unexpectedly owns raw dispatch")
+    decision = timed_transport_finish.find("if (!raw.callbackInvoked)")
+    precedence = [
+        timed_transport_finish.find(
+            "raw.status.code == Err::TRANSPORT_CONTRACT_VIOLATION", decision
+        ),
+        timed_transport_finish.find(
+            "else if (result.callbackTimeoutViolated)", decision
+        ),
+        timed_transport_finish.find("else if (!raw.status.ok())", decision),
+        timed_transport_finish.find(
+            "else if (result.deadlineCrossed)", decision
+        ),
+    ]
+    if (decision < 0 or any(position < 0 for position in precedence) or
+            precedence != sorted(precedence)):
+        errors.append("shared timed transport effective-result precedence drifted")
 
     for token in (
         "earlierDeadline(\n          nowMs, boundary, _job.persistentPhaseDeadlineMs)",
@@ -563,6 +598,8 @@ def main() -> int:
                           "RV3032::TimedTransferResult RV3032::_i2cWriteReadTrackedBefore("),
             timed_transport_read,
             timed_transport_write,
+            timed_transport_prepare,
+            timed_transport_finish,
         )
     )
     def strip_cpp_comments(text: str) -> str:

@@ -16,10 +16,13 @@ Register groups:
 | `0x39-0x3C` | Password | Write-only password bytes. | application manual, p. 15 |
 | `0x3D-0x3F` | EEPROM access | EEADDR, EEDATA, EECMD. | application manual, p. 15 |
 | `0x40-0x4F` | User RAM | 16 bytes volatile user RAM. | application manual, p. 15 |
-| `0xC0-0xCA` | Configuration EEPROM RAM mirror | PMU, offset, CLKOUT, temp reference, EEPROM password, password enable. | application manual, p. 16 |
-| `0xCB-0xEA` | User EEPROM | 32 bytes nonvolatile user EEPROM. | application manual, p. 13 |
+| `0xC0-0xCA` | Direct configuration EEPROM RAM mirrors | PMU, offset, CLKOUT, temp reference, EEPROM password, password enable. | application manual, p. 16 |
 
-The application manual marks gaps outside the listed groups as reserved; it does not assign functions or reset behavior to those addresses. Source: application manual, pp. 15-16.
+The application manual marks gaps outside the listed direct-register groups,
+including direct addresses `0xCB-0xFF`, as reserved. The numerically overlapping
+`0xCB-0xEA` user EEPROM range exists only in the indirect EEADDR domain and is
+accessed through `0x3D-0x3F`; it is not a direct register group. Source:
+application manual, pp. 13, 15-16, 51, 69.
 
 CLKOUT spans three configuration-mirror bytes rather than one contiguous
 CLKOUT-only block: C0 owns PMU.NCLKE, C2 owns HFD[7:0], and C3 owns OS, FD, and

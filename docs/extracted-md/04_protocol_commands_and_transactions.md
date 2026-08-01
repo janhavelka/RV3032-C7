@@ -13,4 +13,6 @@ EEPROM/configuration model:
 
 - RAM registers `0x00-0x4F` are directly accessed through the register pointer. Source: application manual, pp. 13-15.
 - Configuration EEPROM is mirrored in RAM at `0xC0-0xCA`; updates to persistent EEPROM require the documented EEPROM command flow. Source: application manual, pp. 16, 68-72.
-- User EEPROM occupies `0xCB-0xEA` as nonvolatile user memory. Source: application manual, p. 13.
+- Indirect EEADDR values `0xCB-0xEA` select nonvolatile user EEPROM; these are
+  not direct register-pointer addresses. Source: application manual, pp. 13,
+  15, 51, 69.

@@ -17,11 +17,13 @@ namespace RV3032 {
  * @brief Battery backup switching modes
  * 
  * Controls how the RTC switches between main power and backup battery.
+ * These are logical API values, not the raw PMU BSM bit encodings. The driver
+ * encodes them explicitly; do not cast an enum value into a register field.
  */
 enum class BackupSwitchMode : uint8_t {
   Off = 0,     ///< Backup switching disabled (no battery backup)
-  Level = 1,   ///< Level switching mode; select only for the documented supply topology.
-  Direct = 2   ///< Direct switching mode; useful for documented rechargeable-backup topologies.
+  Level = 1,   ///< Level mode (raw BSM=10); use only for documented topology.
+  Direct = 2   ///< Direct mode (raw BSM=01); requires VDD to remain above VBACKUP.
 };
 
 /// @brief I2C write callback signature.

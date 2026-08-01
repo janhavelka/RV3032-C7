@@ -23,16 +23,16 @@ enum class Err : uint8_t {
   INVALID_DATETIME,      ///< Invalid date/time value
   DEVICE_NOT_FOUND,      ///< RTC device not responding on I2C bus
   EEPROM_WRITE_FAILED,   ///< EEPROM update operation failed
-  REGISTER_READ_FAILED,  ///< Register read operation failed
-  REGISTER_WRITE_FAILED, ///< Register write operation failed
+  REGISTER_READ_FAILED,  ///< Reserved legacy register-read failure category
+  REGISTER_WRITE_FAILED, ///< Register configuration/readback verification failed
   QUEUE_FULL,            ///< EEPROM write queue is full (too many pending writes)
-  BUSY,                  ///< Operation deferred because device is busy
+  BUSY,                  ///< Operation not admitted or advanced because driver, guard, or hardware is busy
   IN_PROGRESS,           ///< Work admitted; call pollJob(), pollEeprom(), or tick() as documented
   I2C_NACK_ADDR,         ///< I2C address not acknowledged
   I2C_NACK_DATA,         ///< I2C data byte not acknowledged
   I2C_TIMEOUT,           ///< I2C transaction timed out
   I2C_BUS,               ///< I2C bus error (arbitration lost, etc.)
-  EEPROM_VERIFY_FAILED = 18,   ///< Persistent readback did not match
+  EEPROM_VERIFY_FAILED = 18,   ///< Readback or semantic verification did not match
   EEPROM_CLEANUP_FAILED = 19,  ///< Safe EEPROM access-state cleanup failed
   PRIMARY_CELL_ALREADY_ATTEMPTED = 20, ///< Ensure already called this lifecycle
   JOB_RESULT_UNAVAILABLE = 21, ///< Requested typed job result is unavailable
@@ -51,7 +51,7 @@ enum class Err : uint8_t {
  */
 struct Status {
   Err code = Err::OK;      ///< Error category
-  int32_t detail = 0;      ///< I2C error code or vendor-specific detail
+  int32_t detail = 0;      ///< Context-specific detail; interpret with code and calling API
   const char* msg = "";    ///< Static error message (never heap-allocated)
 
   /**

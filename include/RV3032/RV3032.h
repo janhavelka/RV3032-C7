@@ -367,7 +367,7 @@ enum class PrimaryCellConfigurationOutcome : uint8_t {
 /** @brief Operation phase responsible for a primary-cell ensure failure. */
 enum class PrimaryCellFailureStage : uint8_t {
   NONE = 0,
-  PRECONDITION = 1,
+  PRECONDITION = 1, ///< Reserved compatibility value; admission failures do not mutate the report.
   PREPARE_ACCESS = 2,
   READ_PERSISTENT = 3,
   WRITE_PERSISTENT = 4,
@@ -412,8 +412,8 @@ struct SettingsSnapshot {
   bool hasWaitMsHook = false;                  ///< True when Config::waitMs is set
 
   bool enableEepromWrites = false;             ///< Persistent EEPROM writes enabled
-  uint32_t eepromTimeoutMs = 0;                ///< EEPROM write timeout
-  bool eepromBusy = false;                     ///< True while EEPROM state machine is active
+  uint32_t eepromTimeoutMs = 0;                ///< Post-settle EEPROM busy-poll window
+  bool eepromBusy = false;                     ///< True while generic persistence is active or queued
   Status eepromLastStatus = Status::Ok();      ///< Last EEPROM state-machine status
   Status eepromOperationStatus = Status::Ok(); ///< First forward failure in the current batch
   Status eepromCleanupStatus = Status::Ok();   ///< First cleanup failure in the current batch
@@ -422,12 +422,12 @@ struct SettingsSnapshot {
   uint8_t eepromQueueDepth = 0;                ///< Pending EEPROM queue depth
   bool jobBusy = false;                        ///< Cooperative job currently active
   bool primaryCellEnsureAttempted = false;     ///< Ensure latch for this lifecycle
-  uint32_t lastOkMs = 0;                       ///< Timestamp of last successful operation
-  uint32_t lastErrorMs = 0;                    ///< Timestamp of last failed operation
-  Status lastError = Status::Ok();             ///< Most recent operation failure
-  uint8_t consecutiveFailures = 0;             ///< Consecutive I2C failures
-  uint32_t totalFailures = 0;                  ///< Lifetime failure count
-  uint32_t totalSuccess = 0;                   ///< Lifetime success count
+  uint32_t lastOkMs = 0;                       ///< Timestamp of last successful tracked callback
+  uint32_t lastErrorMs = 0;                    ///< Timestamp of last failed tracked callback
+  Status lastError = Status::Ok();             ///< Most recent tracked callback failure
+  uint8_t consecutiveFailures = 0;             ///< Consecutive tracked callback failures
+  uint32_t totalFailures = 0;                  ///< Tracked failures this lifecycle
+  uint32_t totalSuccess = 0;                   ///< Tracked successes this lifecycle
 };
 
 /** @brief Hardware EEPROM support flags read from TEMP_LSB. */
@@ -438,10 +438,11 @@ struct EepromHardwareFlags {
 
 /**
  * @class RV3032
- * @brief Comprehensive driver for RV-3032-C7 real-time clock module
+ * @brief Typed driver for the supported RV-3032-C7 functions
  * 
- * This class provides complete control over the RV-3032-C7 RTC following
- * the begin/tick/end lifecycle pattern.
+ * This class provides typed control of the supported RV-3032-C7 functions
+ * following the begin/tick/end lifecycle pattern. Password management is
+ * deliberately unsupported.
  * 
  * @par Threading Model
  * Not thread-safe. The application must serialize both this instance and the
@@ -487,7 +488,9 @@ class RV3032 {
    * @brief Passively bind and validate configuration
    * 
    * @param config Hardware and behavior configuration
-   * @return OK when callbacks are bound; BUSY on a second lifecycle begin
+   * @return OK when callbacks are bound, BUSY on a second lifecycle begin, or
+   *         INVALID_CONFIG when a callback, address, timeout, EEPROM window,
+   *         or offline threshold violates Config's documented contract.
    * @note Performs zero transport/wait callbacks and does not prove presence,
    *       apply PMU policy, clear flags, or queue persistence. Call probe()
    *       explicitly when address-communication evidence is required.
@@ -554,6 +557,8 @@ class RV3032 {
 
   /**
    * @brief Perform one tracked read-only health re-probe
+   * @return The tracked Status-register callback result; address NACK maps to
+   *         DEVICE_NOT_FOUND.
    * @note Does not recover the physical bus, reapply configuration, provision
    *       primary-cell policy, start persistence, or reset the ensure latch.
    */
@@ -589,37 +594,37 @@ class RV3032 {
   }
 
   /**
-   * @brief Get timestamp of last successful operation
+   * @brief Get timestamp of the last successful tracked transport callback
    * @return Milliseconds timestamp from driver timebase
    */
   uint32_t lastOkMs() const { return _lastOkMs; }
 
   /**
-   * @brief Get most recent error status
+   * @brief Get the most recent tracked transport callback error
    * @return Status with error code, detail, and message
    */
   Status lastError() const { return _lastError; }
 
   /**
-   * @brief Get consecutive failure count
-   * @return Number of consecutive failures since last success
+   * @brief Get consecutive tracked transport callback failure count
+   * @return Number of callback failures since the last tracked success
    */
   uint8_t consecutiveFailures() const { return _consecutiveFailures; }
 
   /**
    * @brief Get total failure count
-   * @return Total failures since begin() (wraps to zero after UINT32_MAX)
+   * @return Tracked callback failures since begin() (wraps after UINT32_MAX)
    */
   uint32_t totalFailures() const { return _totalFailures; }
 
   /**
    * @brief Get total success count
-   * @return Total successes since begin() (wraps to zero after UINT32_MAX)
+   * @return Tracked callback successes since begin() (wraps after UINT32_MAX)
    */
   uint32_t totalSuccess() const { return _totalSuccess; }
 
   /**
-   * @brief Get timestamp of last error
+   * @brief Get timestamp of the last tracked transport callback error
    * @return Milliseconds timestamp from driver timebase, 0 if no error yet
    */
   uint32_t lastErrorMs() const { return _lastErrorMs; }
@@ -675,8 +680,9 @@ class RV3032 {
    * @param now_ms Current monotonic time in milliseconds
    * @param maxInstructions Maximum backend I2C instructions to execute
    * @param[out] instructionsUsed Number of I2C instructions attempted
-   * @return OK when idle or the active update completed, IN_PROGRESS when work remains,
-   *         or an error from the EEPROM state machine.
+   * @return NOT_INITIALIZED before begin(), BUSY while an ordinary job owns
+   *         the engine, IN_PROGRESS while generic work remains, otherwise the
+   *         cached terminal batch status (which may be OK or an earlier error).
    * @note The method may use the full supplied budget. tick(now_ms) delegates
    *       with a budget of one instruction. A zero budget performs no I2C and
    *       returns the current progress or terminal status.
@@ -710,30 +716,35 @@ class RV3032 {
 
   /**
    * @brief Copy the completed timer configuration report.
+   * @param[out] out Completed report; unchanged when no result is available.
    * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
    *         otherwise the exact terminal job Status after copying `out`.
    */
   Status getSetTimerJobResult(ConfigurationJobReport& out) const;
   /**
    * @brief Copy the completed periodic-update configuration report.
+   * @param[out] out Completed report; unchanged when no result is available.
    * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
    *         otherwise the exact terminal job Status after copying `out`.
    */
   Status getSetPeriodicUpdateJobResult(ConfigurationJobReport& out) const;
   /**
    * @brief Copy the completed backup-switch configuration report.
+   * @param[out] out Completed report; unchanged when no result is available.
    * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
    *         otherwise the exact terminal job Status after copying `out`.
    */
   Status getSetBackupSwitchModeJobResult(ConfigurationJobReport& out) const;
   /**
    * @brief Copy the completed CLKOUT configuration report.
+   * @param[out] out Completed report; unchanged when no result is available.
    * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
    *         otherwise the exact terminal job Status after copying `out`.
    */
   Status getSetClkoutConfigJobResult(ConfigurationJobReport& out) const;
   /**
    * @brief Copy the completed temperature-event configuration report.
+   * @param[out] out Completed report; unchanged when no result is available.
    * @return IN_PROGRESS or JOB_RESULT_UNAVAILABLE without changing `out`;
    *         otherwise the exact terminal job Status after copying `out`.
    */
@@ -789,10 +800,12 @@ class RV3032 {
    * @param now_ms Current monotonic time in milliseconds
    * @param maxInstructions Maximum backend I2C instructions to execute
    * @param[out] instructionsUsed Number of I2C instructions attempted
-   * @return OK when no job remains, IN_PROGRESS when the budget was exhausted before
-   *         completion, or the terminal job error. A hard deadline never permits
-   *         another callback; if persistent cleanup was still required, the terminal
-   *         status is EEPROM_CLEANUP_FAILED rather than an unqualified timeout.
+   * @return NOT_INITIALIZED before begin(), BUSY when generic EEPROM work owns
+   *         the engine, IN_PROGRESS while the active job remains, otherwise
+   *         the cached terminal job status. A hard deadline never permits
+   *         another callback; if persistent cleanup was still required, the
+   *         terminal status is EEPROM_CLEANUP_FAILED rather than an
+   *         unqualified timeout.
    * @note A zero budget performs no I2C and returns the current progress or
    *       terminal status.
    * @warning If INTERNAL_STATE_ERROR follows an already-issued staged
@@ -2037,12 +2050,12 @@ class RV3032 {
 
   // Driver state and health tracking
   DriverState _driverState = DriverState::UNINIT;
-  uint32_t _lastOkMs = 0;              ///< Timestamp of last successful operation
-  Status _lastError = Status::Ok();    ///< Most recent error status
-  uint32_t _lastErrorMs = 0;           ///< Timestamp of last error
-  uint8_t _consecutiveFailures = 0;    ///< Consecutive failures since last success
-  uint32_t _totalFailures = 0;         ///< Total failures since begin()
-  uint32_t _totalSuccess = 0;          ///< Total successes since begin()
+  uint32_t _lastOkMs = 0;              ///< Last successful tracked callback
+  Status _lastError = Status::Ok();    ///< Most recent tracked callback error
+  uint32_t _lastErrorMs = 0;           ///< Last failed tracked callback
+  uint8_t _consecutiveFailures = 0;    ///< Callback failures since success
+  uint32_t _totalFailures = 0;         ///< Tracked failures since begin()
+  uint32_t _totalSuccess = 0;          ///< Tracked successes since begin()
   
   struct RawTransferResult {
     Status status = Status::Ok();
@@ -2088,6 +2101,12 @@ class RV3032 {
   TimedTransferResult _i2cWriteTrackedBefore(
       const uint8_t* buf, size_t len,
       uint32_t& nowMs, uint32_t deadlineMs);
+  Status prepareTrackedTransferBefore(
+      uint32_t& nowMs, uint32_t deadlineMs,
+      uint32_t& callbackStartedAt, uint32_t& timeoutMs);
+  TimedTransferResult finishTrackedTransferBefore(
+      const RawTransferResult& raw, uint32_t callbackStartedAt,
+      uint32_t timeoutMs, uint32_t& nowMs, uint32_t deadlineMs);
 
   static bool remainingBefore(uint32_t nowMs, uint32_t deadlineMs,
                               uint32_t& remainingMs);

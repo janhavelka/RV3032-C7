@@ -127,7 +127,8 @@ static constexpr uint8_t REG_TS_CONTROL = 0x13;
 static constexpr uint8_t REG_CLOCK_INT_MASK = 0x14;
 
 /// @brief EVI Control register (0x15, read/write-protectable)
-/// Bits: CLKDE, EHL, EVI_DB1, EVI_DB0, ESYN. There is no enable bit 3.
+/// Bits: CLKDE, EHL, vendor ET[1:0] event filtering, and ESYN. There is no
+/// implemented bit 3.
 static constexpr uint8_t REG_EVI_CONTROL = 0x15;
 
 /// @brief TLow Threshold register (0x16, read/write-protectable)
@@ -394,10 +395,11 @@ static constexpr uint8_t CLOCK_INT_CUIE_BIT = 2;
 static constexpr uint8_t CLOCK_INT_CTHIE_BIT = 1;
 static constexpr uint8_t CLOCK_INT_CTLIE_BIT = 0;
 
-// EVI Control register bits (REG_EVI_CONTROL, 0x15)
+// EVI Control register bits (REG_EVI_CONTROL, 0x15). Bits 3:1 are
+// read-only and always zero.
 static constexpr uint8_t EVI_CLKDE_BIT = 7;
 static constexpr uint8_t EVI_EB_BIT = 6;              ///< EHL: falling/low or rising/high
-static constexpr uint8_t EVI_DB_MASK = 0x30;          ///< EVI Debounce mask (2 bits)
+static constexpr uint8_t EVI_DB_MASK = 0x30;          ///< Vendor ET event-filter field (2 bits)
 static constexpr uint8_t EVI_DB_SHIFT = 4;
 static constexpr uint8_t EVI_ESYN_BIT = 0;
 static constexpr uint8_t EVI_IMPLEMENTED_MASK = 0xF1;

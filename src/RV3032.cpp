@@ -2219,98 +2219,66 @@ RV3032::TimedTransferResult RV3032::_i2cWriteReadTrackedBefore(
     const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen,
     uint32_t& nowMs, uint32_t deadlineMs) {
   TimedTransferResult result{};
-
-  uint32_t callbackStartedAt = nowMs;
-  if (_config.nowMs != nullptr) {
-    callbackStartedAt = _nowMs();
-    if (static_cast<int32_t>(callbackStartedAt - nowMs) > 0) {
-      nowMs = callbackStartedAt;
-    }
-  }
-  result.completedAtMs = nowMs;
-
-  uint32_t remainingMs = 0;
-  if (!remainingBefore(nowMs, deadlineMs, remainingMs) || remainingMs <= 1U) {
-    result.status = Status::Error(
-        Err::TIMEOUT, "Operation deadline reached before transport callback");
+  uint32_t callbackStartedAt = 0;
+  uint32_t timeoutMs = 0;
+  result.status = prepareTrackedTransferBefore(
+      nowMs, deadlineMs, callbackStartedAt, timeoutMs);
+  if (!result.status.ok()) {
+    result.completedAtMs = nowMs;
     return result;
   }
-  const uint32_t timeoutMs =
-      _config.i2cTimeoutMs < (remainingMs - 1U)
-          ? _config.i2cTimeoutMs
-          : (remainingMs - 1U);
 
   const RawTransferResult raw =
       _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen, timeoutMs);
-  result.callbackInvoked = raw.callbackInvoked;
-  result.callbackStatus = raw.callbackInvoked ? raw.status : Status::Ok();
-
-  if (raw.callbackInvoked) {
-    if (_config.nowMs != nullptr) {
-      const uint32_t observed = _nowMs();
-      result.callbackTimeoutViolated =
-          static_cast<uint32_t>(observed - callbackStartedAt) > timeoutMs;
-      if (static_cast<int32_t>(observed - nowMs) > 0) nowMs = observed;
-    } else {
-      nowMs += timeoutMs;
-    }
-  }
-  result.completedAtMs = nowMs;
-  uint32_t ignored = 0;
-  result.deadlineCrossed = !remainingBefore(nowMs, deadlineMs, ignored);
-
-  Status healthStatus = raw.status;
-  if (raw.callbackInvoked && result.callbackTimeoutViolated &&
-      raw.status.code != Err::TRANSPORT_CONTRACT_VIOLATION) {
-    healthStatus = Status::Error(Err::I2C_TIMEOUT,
-                                 "Transport callback exceeded timeout");
-  }
-  if (raw.callbackInvoked) (void)_updateHealth(healthStatus);
-
-  if (!raw.callbackInvoked) {
-    result.status = raw.status;
-  } else if (raw.status.code == Err::TRANSPORT_CONTRACT_VIOLATION) {
-    result.status = raw.status;
-  } else if (result.callbackTimeoutViolated) {
-    result.status = healthStatus;
-  } else if (!raw.status.ok()) {
-    result.status = raw.status;
-  } else if (result.deadlineCrossed) {
-    result.status = Status::Error(
-        Err::TIMEOUT, "Transport callback crossed operation deadline",
-        static_cast<int32_t>(result.callbackStatus.code));
-  } else {
-    result.status = Status::Ok();
-  }
-  return result;
+  return finishTrackedTransferBefore(
+      raw, callbackStartedAt, timeoutMs, nowMs, deadlineMs);
 }
 
 RV3032::TimedTransferResult RV3032::_i2cWriteTrackedBefore(
     const uint8_t* buf, size_t len,
     uint32_t& nowMs, uint32_t deadlineMs) {
   TimedTransferResult result{};
+  uint32_t callbackStartedAt = 0;
+  uint32_t timeoutMs = 0;
+  result.status = prepareTrackedTransferBefore(
+      nowMs, deadlineMs, callbackStartedAt, timeoutMs);
+  if (!result.status.ok()) {
+    result.completedAtMs = nowMs;
+    return result;
+  }
 
-  uint32_t callbackStartedAt = nowMs;
+  const RawTransferResult raw = _i2cWriteRaw(buf, len, timeoutMs);
+  return finishTrackedTransferBefore(
+      raw, callbackStartedAt, timeoutMs, nowMs, deadlineMs);
+}
+
+Status RV3032::prepareTrackedTransferBefore(
+    uint32_t& nowMs, uint32_t deadlineMs,
+    uint32_t& callbackStartedAt, uint32_t& timeoutMs) {
+  callbackStartedAt = nowMs;
   if (_config.nowMs != nullptr) {
     callbackStartedAt = _nowMs();
     if (static_cast<int32_t>(callbackStartedAt - nowMs) > 0) {
       nowMs = callbackStartedAt;
     }
   }
-  result.completedAtMs = nowMs;
 
   uint32_t remainingMs = 0;
   if (!remainingBefore(nowMs, deadlineMs, remainingMs) || remainingMs <= 1U) {
-    result.status = Status::Error(
+    return Status::Error(
         Err::TIMEOUT, "Operation deadline reached before transport callback");
-    return result;
   }
-  const uint32_t timeoutMs =
+  timeoutMs =
       _config.i2cTimeoutMs < (remainingMs - 1U)
           ? _config.i2cTimeoutMs
           : (remainingMs - 1U);
+  return Status::Ok();
+}
 
-  const RawTransferResult raw = _i2cWriteRaw(buf, len, timeoutMs);
+RV3032::TimedTransferResult RV3032::finishTrackedTransferBefore(
+    const RawTransferResult& raw, uint32_t callbackStartedAt,
+    uint32_t timeoutMs, uint32_t& nowMs, uint32_t deadlineMs) {
+  TimedTransferResult result{};
   result.callbackInvoked = raw.callbackInvoked;
   result.callbackStatus = raw.callbackInvoked ? raw.status : Status::Ok();
 

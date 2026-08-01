@@ -30,3 +30,13 @@ EEPROM and configuration notes:
   password protection and rejects raw access to those ranges. Source:
   application manual, pp. 11, 42, 50-51.
 - Any single I2C communication from START to STOP must complete within 950 ms or the internal timeout resets the interface. Source: application manual, p. 139.
+
+Primary-cell topology notes:
+
+- For a non-rechargeable backup source, the vendor application circuit uses
+  Level Switching Mode (`BSM=10`) with the trickle charger disabled
+  (`TCM=00`). Source: application manual, p. 141.
+- Do not select Direct Switching Mode when a primary battery's specified
+  nominal voltage is equal to or close to VDD; DSM is intended for
+  topologies where VDD is known to remain above VBACKUP. Source: application
+  manual, pp. 59-60.

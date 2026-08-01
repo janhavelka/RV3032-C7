@@ -14,4 +14,8 @@ Key documented facts:
 | Nonvolatile memory | 32 bytes user EEPROM plus configuration EEPROM mirrored into RAM | application manual, pp. 11, 13, 16 |
 | Volatile memory | 16 bytes user RAM at `0x40-0x4F` | application manual, p. 15 |
 
-The RV-3032-C7 exposes a register-file RTC: time/calendar registers, side-effecting status flags, EEPROM access registers, user RAM, user EEPROM, and EEPROM-backed configuration mirror are all addressed over the same I2C register pointer. Source: application manual, pp. 13-16, 68-73.
+The RV-3032-C7 exposes direct time/calendar, status, EEPROM-control, user-RAM,
+and active configuration-mirror registers through the I2C register pointer.
+User EEPROM `0xCB..0xEA` is a separate indirect address space selected through
+EEADDR/EEDATA/EECMD; direct register addresses `0xCB..0xFF` are reserved.
+Source: application manual, pp. 13-16, 68-73.

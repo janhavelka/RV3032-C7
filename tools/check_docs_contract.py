@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 REQUIRED_SOURCE_FILES = [
     "README.md",
     "CHANGELOG.md",
+    "Doxyfile",
     "library.json",
     "include/RV3032/Version.h",
     "docs/README.md",
@@ -23,6 +24,7 @@ REQUIRED_SOURCE_FILES = [
     "docs/reports/2026-07-15-functional-hardening-closure-audit.md",
     "docs/reports/2026-07-13-v2.0.0-implementation.md",
     "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
+    "docs/reports/HIL_SUMMARY.md",
     "docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
     "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf",
     "docs/extracted-md/00_document_inventory.md",
@@ -39,6 +41,7 @@ REQUIRED_SOURCE_FILES = [
 REQUIRED_PACKAGE_FILES = [
     "README.md",
     "CHANGELOG.md",
+    "Doxyfile",
     "library.json",
     "include/RV3032/Version.h",
     "include/RV3032/RV3032.h",
@@ -63,6 +66,7 @@ REQUIRED_PACKAGE_FILES = [
     "docs/reports/2026-07-15-functional-hardening-closure-audit.md",
     "docs/reports/2026-07-13-v2.0.0-implementation.md",
     "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
+    "docs/reports/HIL_SUMMARY.md",
     "docs/extracted-md/00_document_inventory.md",
     "docs/extracted-md/01_chip_overview.md",
     "docs/extracted-md/02_pinout_and_signals.md",
@@ -77,11 +81,10 @@ REQUIRED_PACKAGE_FILES = [
 REQUIRED_EXPORT_EXCLUDES = [
     ".venv/**",
     "dist/**",
+    "docs/doxygen/**",
     "idf_component.yml",
     "idf_component.yml.orig",
     "tmp/**",
-    "OPTION_A_PROPOSAL.txt",
-    "build_output.txt",
     "docs/reference-pdfs/**",
     "docs/**/*.pdf",
 ]
@@ -101,13 +104,39 @@ def check_source() -> int:
         elif path.stat().st_size == 0:
             errors.append(f"required source file is empty: {rel}")
 
+    for rel in ("OPTION_A_PROPOSAL.txt", "build_output.txt"):
+        if (ROOT / rel).exists():
+            errors.append(f"obsolete root artifact remains: {rel}")
+
     data = _read_library_json()
-    if data.get("version") != "3.0.0":
-        errors.append("library.json version must be 3.0.0 for v3 hardening")
+    version = data.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        errors.append("library.json version must be a MAJOR.MINOR.PATCH string")
     excludes = data.get("export", {}).get("exclude", [])
     for pattern in REQUIRED_EXPORT_EXCLUDES:
         if pattern not in excludes:
             errors.append(f"library.json export.exclude missing {pattern!r}")
+
+    doxyfile = (ROOT / "Doxyfile").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    for setting in ("WARN_IF_DOC_ERROR", "WARN_AS_ERROR"):
+        if not re.search(rf"(?m)^{setting}\s*=\s*YES\s*$", doxyfile):
+            errors.append(f"Doxyfile must enable {setting}")
+    if not re.search(r"(?m)^EXTRACT_ALL\s*=\s*YES\s*$", doxyfile):
+        errors.append("Doxyfile must include the complete public API")
+    if re.search(r"(?m)^PROJECT_NUMBER\s*=\s*\S", doxyfile):
+        errors.append("Doxyfile must not duplicate the library.json version")
+    for historical_input in ("AGENTS.md", "docs/prompts", "docs/extracted-md"):
+        input_lines = "\n".join(
+            line for line in doxyfile.splitlines()
+            if line.startswith("INPUT") or line.startswith(" ")
+        )
+        if historical_input in input_lines:
+            errors.append(
+                f"Doxyfile public INPUT includes historical material: "
+                f"{historical_input}"
+            )
 
     report = ROOT / "docs/reports/2026-07-13-v2.0.0-implementation.md"
     if report.is_file():
@@ -336,8 +365,12 @@ def check_source() -> int:
     version_header = (ROOT / "include/RV3032/Version.h").read_text(
         encoding="utf-8", errors="replace"
     )
-    if '#define RV3032_VERSION_STRING "3.0.0"' not in version_header:
-        errors.append("generated Version.h does not expose 3.0.0")
+    if isinstance(version, str):
+        expected_version_define = f'#define RV3032_VERSION_STRING "{version}"'
+        if expected_version_define not in version_header:
+            errors.append(
+                "generated Version.h does not match the library.json version"
+            )
 
     if errors:
         print("Docs source contract FAILED:")
@@ -404,10 +437,13 @@ def check_package(archive: pathlib.Path) -> int:
         packaged_version = contents_by_name["include/RV3032/Version.h"].decode(
             "utf-8", errors="replace"
         )
-        if packaged_manifest.get("version") != "3.0.0":
-            errors.append("packaged manifest version is not 3.0.0")
-        if '#define RV3032_VERSION_STRING "3.0.0"' not in packaged_version:
-            errors.append("packaged Version.h does not match manifest 3.0.0")
+        packaged_manifest_version = packaged_manifest.get("version")
+        if (not isinstance(packaged_manifest_version, str) or
+                not re.fullmatch(r"\d+\.\d+\.\d+", packaged_manifest_version)):
+            errors.append("packaged manifest version is not MAJOR.MINOR.PATCH")
+        elif (f'#define RV3032_VERSION_STRING "{packaged_manifest_version}"'
+              not in packaged_version):
+            errors.append("packaged Version.h does not match packaged manifest")
     except (KeyError, json.JSONDecodeError) as exc:
         errors.append(f"cannot validate packaged version agreement: {exc}")
 
