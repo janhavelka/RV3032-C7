@@ -340,6 +340,27 @@ RV3032::Status clearBackupFlag() {
   return completeJob(gRtc.clearBackupSwitchFlag(), 2000U);
 }
 
+RV3032::Status ensurePrimaryActiveAfterPowerReturn() {
+  RV3032::PrimaryCellConfigurationReport report{};
+  const RV3032::Status status =
+      gRtc.ensurePrimaryCellConfiguration(report);
+  if (!status.ok()) {
+    return status;
+  }
+  if (report.writeCommandAttempted) {
+    return RV3032::Status::Error(
+        RV3032::Err::EEPROM_VERIFY_FAILED,
+        "Power-return ensure unexpectedly wrote persistent C0");
+  }
+  if (!report.persistentTargetVerified || !report.activeTargetVerified ||
+      !report.cleanupVerified) {
+    return RV3032::Status::Error(
+        RV3032::Err::INCOHERENT_DATA,
+        "Power-return primary-cell proof incomplete");
+  }
+  return RV3032::Status::Ok();
+}
+
 bool readBackupSwitched(bool& switched) {
   RV3032::ValidityFlags validity{};
   const RV3032::Status status = gRtc.readValidity(validity);
@@ -448,7 +469,13 @@ void handleAlternateReturn() {
   const Settings alternate = makeAlternateSettings(gRecord.original);
   uint8_t expected[CONFIG_BYTES] = {};
   encodeExpected(gRecord.original, alternate, expected);
-  RV3032::Status status = verifyExact(expected);
+  RV3032::Status status = ensurePrimaryActiveAfterPowerReturn();
+  if (!status.ok()) {
+    printStatus("ensure primary active after alternate cycle", status);
+    return;
+  }
+  Serial.println("ALT_RETURN_PRIMARY_ENSURE_PASS write_one=0");
+  status = verifyExact(expected);
   if (!status.ok()) {
     printStatus("verify alternate after power cycle", status);
   }
@@ -492,7 +519,13 @@ void handleAlternateReturn() {
 }
 
 void handleRestoredReturn() {
-  const RV3032::Status status = verifyExact(gRecord.original);
+  RV3032::Status status = ensurePrimaryActiveAfterPowerReturn();
+  if (!status.ok()) {
+    printStatus("ensure primary active after restored cycle", status);
+    return;
+  }
+  Serial.println("RESTORE_RETURN_PRIMARY_ENSURE_PASS write_one=0");
+  status = verifyExact(gRecord.original);
   if (!status.ok()) {
     printStatus("verify original after second power cycle", status);
     markAborted("second power-cycle verification failed");

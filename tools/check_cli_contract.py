@@ -50,10 +50,12 @@ def main() -> int:
     common_dir = ROOT / "examples" / "common"
     bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
     hil_runner = ROOT / "tools" / "hil_cli_runner.py"
+    persistence_hil = ROOT / "test" / "test_hil_persistence" / "main.cpp"
 
     ensure_exists(common_dir, "common example directory")
     ensure_exists(bringup_main, "bringup CLI example")
     ensure_exists(hil_runner, "HIL runner")
+    ensure_exists(persistence_hil, "persistence HIL harness")
 
     ensure_missing(ROOT / "examples" / "00_smoke_boot", "deprecated example 00_smoke_boot")
     ensure_missing(
@@ -200,6 +202,17 @@ def main() -> int:
             fail(f"unsafe legacy provisioning token remains: {token!r}")
 
     hil_text = hil_runner.read_text(encoding="utf-8", errors="replace")
+    persistence_hil_text = persistence_hil.read_text(
+        encoding="utf-8", errors="replace"
+    )
+    for token in (
+        "ensurePrimaryActiveAfterPowerReturn",
+        "ALT_RETURN_PRIMARY_ENSURE_PASS write_one=0",
+        "RESTORE_RETURN_PRIMARY_ENSURE_PASS write_one=0",
+        "Power-return ensure unexpectedly wrote persistent C0",
+    ):
+        if token not in persistence_hil_text:
+            fail(f"persistence power-return contract token missing: {token!r}")
     for token in (
         '"timer 1 2 0"',
         '"user RAM write terminal status: OK"',

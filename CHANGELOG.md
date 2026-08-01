@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The ESP32 example and HIL wait adapters now add one scheduler guard tick so
   the primary-cell operation's vendor settle interval cannot be shortened by
   Arduino-ESP32's tick-relative `delay()` implementation.
+- The configuration-persistence HIL harness now reapplies and proves the
+  primary-cell active C0 startup state after every backup-powered return before
+  comparing or restoring the remaining configuration bytes. The reconciliation
+  must issue zero additional persistent writes.
 - A disabled timer can now use the vendor-defined non-running zero preset, so
   `getTimer()` output from a valid inactive device can be restored exactly;
   enabling the timer with a zero preset remains rejected before I/O.

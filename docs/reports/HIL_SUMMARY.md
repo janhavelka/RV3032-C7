@@ -4,6 +4,95 @@ This file keeps the durable hardware-in-the-loop evidence. Raw runner JSON,
 step tables, stdout/stderr captures, and full serial transcripts are not kept in
 the repository because they are large generated artifacts.
 
+## Current v3.0.0 COM21 / PIOArduino 55.03.311 Evidence
+
+### Fixture
+
+| Item | Value |
+|---|---|
+| Date | `2026-07-31` |
+| Port | `COM21`, USB VID:PID `303A:1001` |
+| Board/target | ESP32-S3 revision 0.2, built-in PlatformIO board `esp32-s3-devkitc1-n16r8`, 16 MB flash, 8 MB PSRAM |
+| MCU MAC | `44:1b:f6:8d:1f:90` |
+| Runtime | PIOArduino platform `55.03.311` (PlatformIO displays `55.3.311`), Arduino-ESP32 `3.3.11`, ESP-IDF `v5.5.5` |
+| RTC address | `0x51` |
+| Other detected I2C addresses | `0x3C`, `0x41`, `0x50` |
+| I2C pins/clock | SDA `GPIO8`, SCL `GPIO9`, `400000` Hz |
+| I2C callback timeout | `50` ms |
+| Backup cell / VDD | Operator-confirmed non-rechargeable lithium cell installed; stable `3.3` V main rail |
+| Firmware/library | `3.0.0`; final CLI printed base commit `5e5c4f7` dirty because the corrected persistence-return harness remained intentionally uncommitted |
+
+### Results
+
+| Run | Result | Evidence |
+|---|---:|---|
+| Autonomous exhaustive HIL | 157 PASS, 0 FAIL, 1 SKIP | 783 read callbacks, 436 write callbacks, four intentional `WRITE_ONE` commands, and zero health failures. The skip was the separately authorized primary-cell safety case. |
+| Intensive one-hour CLI soak | 24491 PASS, 0 FAIL, 0 UNKNOWN | 3572.594 s; maximum consecutive failures `0`, worst command latency 0.625 s, and no RTC/I2C error token. |
+| Post-wait-adapter primary-cell campaign | 51 PASS, 0 FAIL | Persistent and active primary-cell targets plus cleanup were verified. The persistent byte was already correct, so `WRITE_ONE` count was zero; a second same-lifecycle call was rejected. |
+| Maximum read stress | 100000 PASS, 0 FAIL | 33.685 s, approximately 2968.7 operations/s, driver health clean. |
+| Maximum mixed stress | 100000 PASS, 0 FAIL | 24.061 s, approximately 4156.1 operations/s across all seven read paths, driver health clean. |
+| Battery retention | PASS | After a main-VDD removal with the lithium cell retained, PORF/VLF remained clear, BSF set, time stayed valid and advanced by 49 s, and the exact RAM sentinel survived. The post-return selftest was 16/16. |
+| Corrected two-cycle configuration persistence | PASS | Original persistent/active C0-C5 `20 00 00 00 38 0D` were saved. Alternate `60 05 24 60 23 01` was staged with exactly six `WRITE_ONE` commands and survived the first cycle. Startup primary-cell reconciliation restored the volatile active C0 semantics with zero persistent writes. The originals were then restored with exactly six commands and survived the second cycle; final startup reconciliation again used zero writes. Both persistent and active copies were exact after each return. |
+| Final normal-CLI cleanup | PASS | User RAM bytes 8-15 were zeroed and read back; PORF/VLF/BSF were clear and time valid; backup mode was level with charger bits `0x0`; timer was exactly zero/4096 Hz/disabled; selftest was 16/16; read and mixed stress were each 100/100; driver state was READY with zero failures. Runtime reported ESP32-S3 revision 0.2, 16 MB flash, 8 MB PSRAM, Arduino-ESP32 3.3.11, and ESP-IDF v5.5.5. |
+
+The final physical-cycle transcript reported:
+
+```text
+VALIDITY PORF=0 VLF=0 BSF=1 TIME_VALID=1
+RESTORE_RETURN_PRIMARY_ENSURE_PASS write_one=0
+PERSISTENT_C0_C5 20 00 00 00 38 0D
+ACTIVE_C0_C5 20 00 00 00 38 0D
+PERSIST_POWER_CYCLE_COMPLETE
+RESTORED_C0_C5 20 00 00 00 38 0D
+```
+
+### Findings and Repository Changes
+
+- Updating from PIOArduino `54.03.20` to `55.03.311` moved the runtime from
+  Arduino-ESP32 3.2.0 / ESP-IDF 5.4.1 to Arduino-ESP32 3.3.11 / ESP-IDF 5.5.5.
+  The configuration now uses the built-in N16R8 board definition and removes
+  obsolete manual 4 MB flash/partition/PSRAM overrides and the old PSRAM cache
+  workaround flag.
+- A disabled RV3032 timer legitimately reads preset zero. The API, CLI,
+  documentation, native tests, and HIL now accept `ticks=0` only when the timer
+  is disabled; enabled zero remains a pre-I/O validation error.
+- Arduino `delay(ms)` is tick-relative and can return just short of a full
+  monotonic millisecond interval. Example and HIL wait adapters add one guard
+  tick, preserving the driver's strict vendor-settle proof without weakening
+  its early-return detection.
+- A backup-powered return preserves persistent C0 but its active backup-switch
+  state needs the product's explicit startup primary-cell reconciliation. The
+  corrected persistence harness performs that bounded operation before exact
+  active-byte verification and requires persistent target proof, active target
+  proof, cleanup proof, and zero additional persistent writes.
+- PIOArduino can generate a root `idf_component.yml` when `src_dir = .`. That
+  transient file and its `.orig` form are ignored, excluded from library
+  exports, and rejected by the package contract because this repository does
+  not ship a native ESP-IDF component.
+
+### Invalid Attempts, Recovery, and Exclusions
+
+- The first two requested removals occurred before the backup battery had been
+  installed. PORF, invalid time, and lost RAM correctly made those attempts
+  invalid as retention evidence. The operator then installed the cell, the
+  original configuration was recovered, and only the later valid cycles are
+  counted above.
+- An earlier persistence-harness ordering exposed active C0 `0x40` after a
+  backup return and then restored persistent C0 incorrectly. C1-C5 were already
+  restored; an explicitly authorized primary-cell ensure recovered C0 to
+  `0x20` with one bounded `WRITE_ONE`. The corrected two-cycle campaign was
+  restarted from exact original persistent and active bytes and passed. This
+  was a harness/startup-lifecycle finding, not a silent driver failure.
+- A separate TunnelMonitor upload briefly replaced the HIL firmware during the
+  campaign. The intended firmware and exact RTC state were restored and
+  reverified; this was external fixture activity, not a library failure.
+- The operator accepted the existing GPIO/output fixture risk and declined an
+  independent VBACKUP measurement. No oscilloscope measurement of rail decay,
+  switchover timing, or backfeed current was made.
+- No deliberate bus short/disconnect, external temperature-limit stimulus, or
+  EVI stimulus was applied. Native fault injection covers bounded software
+  failure paths without electrically disturbing the shared bus.
+
 ## Current v3.0.0 COM20 Evidence
 
 ### Fixture
