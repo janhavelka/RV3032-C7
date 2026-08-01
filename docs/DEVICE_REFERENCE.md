@@ -40,10 +40,11 @@ not disable the alarm: the vendor truth table defines an event every minute.
 ## Timer, event, and timestamps
 
 The countdown timer is 12 bits. Running presets are `1..4095`; zero does not
-start the timer and is rejected by the typed setter. A write to Timer High
-writes only bits 3:0; reserved bits 7:4 are zero. The readable value is the
-configured preset, not a live remaining-count register. Timer source and enable
-are in Control 1.
+start the timer and the typed setter accepts it only with `enable=false`, which
+allows an inactive hardware state to be restored exactly. A write to Timer
+High writes only bits 3:0; reserved bits 7:4 are zero. The readable value is
+the configured preset, not a live remaining-count register. Timer source and
+enable are in Control 1.
 
 External-event ET=`00` detects the selected edge only; ET=`01/10/11` also
 samples the selected high/low level at 256/64/8 Hz. EHL selects rising/high or

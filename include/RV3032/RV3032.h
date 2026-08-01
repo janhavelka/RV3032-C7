@@ -743,8 +743,9 @@ class RV3032 {
   /**
    * @brief Start a budgeted periodic countdown timer configuration job.
    *
-   * @param ticks Timer preset (1-4095). The vendor defines 0 as a non-running
-   *              value rather than a countdown preset.
+   * @param ticks Timer preset (0-4095). The vendor defines 0 as a non-running
+   *              value; it is accepted only when enable is false so a valid
+   *              inactive hardware state can be restored exactly.
    * @param freq Timer clock frequency
    * @param enable Start timer immediately if true
    * @return IN_PROGRESS if the job was accepted, BUSY if another job is active,
@@ -1073,8 +1074,9 @@ class RV3032 {
   /**
    * @brief Configure periodic countdown timer
    * 
-   * @param ticks Timer preset (1-4095). The vendor defines 0 as a non-running
-   *              value rather than a countdown preset.
+   * @param ticks Timer preset (0-4095). The vendor defines 0 as a non-running
+   *              value; it is accepted only when enable is false so a valid
+   *              inactive hardware state can be restored exactly.
    * @param freq Timer clock frequency
    * @param enable Start timer immediately if true
    * @return IN_PROGRESS when admitted; INVALID_PARAM for invalid input.

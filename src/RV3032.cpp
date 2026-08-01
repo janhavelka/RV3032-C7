@@ -287,8 +287,12 @@ Status RV3032::startSetTimerJob(uint16_t ticks, TimerFrequency freq, bool enable
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
-  if (ticks == 0 || ticks > 0x0FFF) {
+  if (ticks > 0x0FFF) {
     return Status::Error(Err::INVALID_PARAM, "Timer ticks out of range");
+  }
+  if (ticks == 0 && enable) {
+    return Status::Error(Err::INVALID_PARAM,
+                         "Timer zero preset requires disabled state");
   }
   const uint8_t freqRaw = static_cast<uint8_t>(freq);
   if (freqRaw > kMaxTimerFrequency) {

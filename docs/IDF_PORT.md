@@ -38,7 +38,11 @@ static uint32_t idfNowMs(void*) {
 }
 
 static void idfWaitMs(uint32_t delayMs, void*) {
-  vTaskDelay(pdMS_TO_TICKS(delayMs));
+  TickType_t ticks = pdMS_TO_TICKS(delayMs);
+  if (ticks == 0 || ticks * portTICK_PERIOD_MS < delayMs) {
+    ++ticks;  // Round up to the requested duration.
+  }
+  vTaskDelay(ticks + 1U);  // Guard against entering near a tick boundary.
 }
 
 RV3032::Config cfg{};
@@ -108,7 +112,9 @@ UF-polling-only mode.
 
 The synchronous primary-cell ensure is a deliberate startup-only boundary. Run
 it in the serialized I2C owner, with no pending job or persistence work. Its
-wait callback must yield the task; never implement it as a spin loop.
+wait callback must yield the task and must not return before the requested
+monotonic duration; never implement it as a spin loop. A relative RTOS tick
+delay therefore needs both upward tick rounding and one entry-phase guard tick.
 
 ## Porting rules
 

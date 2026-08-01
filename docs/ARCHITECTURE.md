@@ -64,14 +64,15 @@ read-only recovery, and physical phases. The application must arrange an
 uncontended shared-bus owner before dispatch. `i2cTimeoutMs` is constrained to
 1..100 ms. `nowMs` provides wrap-safe health and operation time. `waitMs` is a
 yielding application wait used only by the explicit primary-cell ensure
-operation; it must sleep or yield and must not spin.
+operation; it must not return before the requested monotonic duration, must
+sleep or yield, and must not spin.
 
-The example Arduino-ESP32 3.2.0 Wire adapter applies only the remaining part of
-one callback deadline before each potentially blocking phase and restores the
-previous Wire timeout by RAII. `endTransmission(false)` only stages the
-repeated-start transfer; the combined operation executes in the final-stop
-`requestFrom(..., true)`. A short staging write is never retried and is closed
-by exactly one bounded final STOP so it cannot strand Wire ownership.
+The example Wire adapter, validated with Arduino-ESP32 3.3.11, applies only the
+remaining part of one callback deadline before each potentially blocking phase
+and restores the previous Wire timeout by RAII. `endTransmission(false)` only
+stages the repeated-start transfer; the combined operation executes in the
+final-stop `requestFrom(..., true)`. A short staging write is never retried and
+is closed by exactly one bounded final STOP so it cannot strand Wire ownership.
 
 ## Execution forms
 

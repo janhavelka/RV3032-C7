@@ -62,7 +62,11 @@ issues at most one write-one command per byte, and directly verifies durability.
 RV3032::RV3032 rtc;
 
 static uint32_t nowMs(void*) { return millis(); }
-static void waitMs(uint32_t delayMs, void*) { delay(delayMs); }
+static void waitMs(uint32_t delayMs, void*) {
+  // Arduino-ESP32 delay() is relative to scheduler ticks. One guard tick
+  // prevents a near-boundary call from returning before delayMs has elapsed.
+  delay(delayMs + 1U);
+}
 
 void setup() {
   RV3032::Config cfg{};
@@ -97,8 +101,8 @@ void loop() {
 ```
 
 `waitMs` is optional for ordinary cooperative use. It is required only by the
-explicit synchronous primary-cell ensure operation and must sleep/yield rather
-than spin or perform I2C.
+explicit synchronous primary-cell ensure operation. It must sleep/yield for at
+least the requested monotonic duration rather than spin or perform I2C.
 
 ## Calendar APIs
 
@@ -428,13 +432,14 @@ counters are ordinary `uint32_t` counters and wrap from `UINT32_MAX` to zero.
 ## Wire example adapter
 
 `examples/common/I2cTransport.h` is application glue, not library code. Its
-Arduino-ESP32 3.2.0 adapter applies the callback's supplied timeout as one hard,
-exclusive bound across the complete callback. Each blocking Wire phase gets
-only the remaining interval, and RAII restores the application's prior Wire
-timeout on every exit. A short staging write is not retried: the adapter emits
-one bounded final STOP before returning an I2C-domain error. The application
-must serialize the shared bus and keep the Wire mutex uncontended during the
-synchronous callback; the adapter does not add a second lock or scheduler.
+Wire adapter, validated with Arduino-ESP32 3.3.11, applies the callback's
+supplied timeout as one hard, exclusive bound across the complete callback.
+Each blocking Wire phase gets only the remaining interval, and RAII restores
+the application's prior Wire timeout on every exit. A short staging write is
+not retried: the adapter emits one bounded final STOP before returning an
+I2C-domain error. The application must serialize the shared bus and keep the
+Wire mutex uncontended during the synchronous callback; the adapter does not
+add a second lock or scheduler.
 
 ## CLI ownership
 
@@ -464,6 +469,17 @@ temporary bounded Wire timeout and restores the application's previous value;
 it does not perform bus recovery.
 
 ## Verification
+
+The embedded environments pin PIOArduino `55.03.311` (Arduino-ESP32 `3.3.11`,
+ESP-IDF `5.5.5`). The ESP32-S3 environments use the built-in
+`esp32-s3-devkitc1-n16r8` definition for 16 MB QIO flash and 8 MB octal PSRAM.
+Select upload and monitor ports on the command line; machine-local COM ports
+are intentionally not committed.
+
+On Windows hosts with legacy path limits enabled, the first 3.3.11 framework
+installation can exceed `MAX_PATH` while unpacking bundled headers. Enable
+Windows long-path support or temporarily set `PLATFORMIO_CACHE_DIR` to a short,
+writable path for the PlatformIO install/build command.
 
 ```powershell
 python -m platformio test -e native

@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A reusable `esp32s3hil_persistence` environment for two-cycle configuration
+  EEPROM HIL: stage typed alternate settings, verify persistent and active
+  bytes after reboot, restore the exact original bytes, and verify them after a
+  second reboot.
+- COM20 physical main-power-loss evidence with primary-cell RTC retention,
+  backup-switch flagging, application reboot, and post-return stress coverage.
+- COM20 configuration persistence evidence across two additional physical
+  main-power cycles, including exact C0-C5 verification and restoration.
+
+### Changed
+
+- The PlatformIO pin now uses PIOArduino `55.03.311` with Arduino-ESP32
+  `3.3.11` and ESP-IDF `5.5.5`. ESP32-S3 builds target the built-in N16R8
+  definition (16 MB QIO flash and 8 MB octal PSRAM), and the bring-up CLI
+  reports the runtime MCU, memory, Arduino core, and ESP-IDF versions. HIL
+  firmware banners are port-neutral so evidence from a selected runtime port
+  is not mislabeled. Windows installation guidance covers the longer bundled
+  header paths in the new framework package.
+
+### Fixed
+
+- Library packaging now excludes local `dist/` and `tmp/` trees so generated
+  archives cannot be nested inside published packages.
+- Ignore and exclude the bare ESP-IDF component manifests that PIOArduino can
+  generate at the project root while its framework package is being repaired;
+  this Arduino-only library does not publish those transient files.
+- The ESP32 example and HIL wait adapters now add one scheduler guard tick so
+  the primary-cell operation's vendor settle interval cannot be shortened by
+  Arduino-ESP32's tick-relative `delay()` implementation.
+- The configuration-persistence HIL harness now reapplies and proves the
+  primary-cell active C0 startup state after every backup-powered return before
+  comparing or restoring the remaining configuration bytes. The reconciliation
+  must issue zero additional persistent writes.
+- A disabled timer can now use the vendor-defined non-running zero preset, so
+  `getTimer()` output from a valid inactive device can be restored exactly;
+  enabling the timer with a zero preset remains rejected before I/O.
+
 ## [3.0.0] - 2026-07-17
 
 ### Added

@@ -62,7 +62,11 @@ RV3032::Status ownerWriteRead(uint8_t address, const uint8_t* tx,
 
 uint32_t nowMs(void*) { return millis(); }
 
-void waitMs(uint32_t durationMs, void*) { delay(durationMs); }
+void waitMs(uint32_t durationMs, void*) {
+  // Give the scheduler-relative delay one guard tick so the monotonic wait
+  // contract cannot be shortened by the entry tick phase.
+  delay(durationMs + 1U);
+}
 
 void report(const char* name, bool passed, const RV3032::Status* status = nullptr) {
   if (passed) {
@@ -919,7 +923,7 @@ void runHilSetup() {
   while (!Serial && before(serialDeadline)) {
     delay(10U);
   }
-  Serial.println("HIL_BEGIN RV3032-C7 exhaustive COM20 harness v1");
+  Serial.println("HIL_BEGIN RV3032-C7 exhaustive harness v1");
   Serial.printf("[INFO] library=%s build=%s commit=%s\n",
                 RV3032::VERSION, RV3032::BUILD_TIMESTAMP,
                 RV3032::GIT_COMMIT);

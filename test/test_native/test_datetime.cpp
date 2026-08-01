@@ -4242,17 +4242,26 @@ void test_alarm_timer_and_pmu_round_trips_are_cooperative() {
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
       static_cast<uint8_t>(rtc.getTimer(ticks, timerFrequency, enabled).code));
   fake.direct[RV3032::cmd::REG_TIMER_HIGH] &= 0x0F;
+  TEST_ASSERT_TRUE(rtc.setTimerInterruptEnabled(false).inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
   const uint32_t beforeZeroTimer = fake.callbackCount;
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
       static_cast<uint8_t>(rtc.setTimer(
           0, RV3032::TimerFrequency::Hz1, true).code));
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
-      static_cast<uint8_t>(rtc.setTimer(
-          0, RV3032::TimerFrequency::Hz1, false).code));
+  TEST_ASSERT_EQUAL_UINT32(beforeZeroTimer, fake.callbackCount);
+  TEST_ASSERT_TRUE(rtc.setTimer(
+      0, RV3032::TimerFrequency::Hz1, false).inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  TEST_ASSERT_TRUE(rtc.getTimer(ticks, timerFrequency, enabled).ok());
+  TEST_ASSERT_EQUAL_UINT16(0, ticks);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::TimerFrequency::Hz1),
+                          static_cast<uint8_t>(timerFrequency));
+  TEST_ASSERT_FALSE(enabled);
+  const uint32_t beforeInvalidTimerFrequency = fake.callbackCount;
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
       static_cast<uint8_t>(rtc.setTimer(
           1, static_cast<RV3032::TimerFrequency>(0xFF), false).code));
-  TEST_ASSERT_EQUAL_UINT32(beforeZeroTimer, fake.callbackCount);
+  TEST_ASSERT_EQUAL_UINT32(beforeInvalidTimerFrequency, fake.callbackCount);
 
   TEST_ASSERT_TRUE(rtc.startSetBackupSwitchModeJob(
       RV3032::BackupSwitchMode::Direct, fake.nowMs).inProgress());
@@ -8499,7 +8508,7 @@ void test_phase3_cli_invalid_mutating_commands_are_zero_io() {
       "clkout_freq 4",
       "offset nan",
       "offset 0x1p0",
-      "timer 0 2 0",
+      "timer 0 2 1",
       "timer 1 2 0 trailing",
       "evi edge 2",
       "evi debounce 4",
