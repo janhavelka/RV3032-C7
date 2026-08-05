@@ -5563,7 +5563,7 @@ uint32_t RV3032::dateToDays(uint16_t year, uint8_t month, uint8_t day) {
 
   // Count days from 1970 to current year
   for (uint16_t y = 1970; y < year; ++y) {
-    days += isLeapYear(y) ? 366 : 365;
+    days += isLeapYear(y) ? 366U : 365U;
   }
 
   // Days before current month

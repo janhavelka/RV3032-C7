@@ -32,12 +32,10 @@ STRIP_CODE_COMMENTS    = NO
 
 INPUT                  = README.md CHANGELOG.md CONTRIBUTING.md include \
                          docs/ARCHITECTURE.md docs/DEVICE_REFERENCE.md \
-                         docs/IDF_PORT.md \
-                         docs/reports/HIL_SUMMARY.md
+                         docs/IDF_PORT.md
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = YES
 EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/reference-pdfs/*
-EXAMPLE_PATH           = examples/01_basic_bringup_cli
 
 USE_MDFILE_AS_MAINPAGE = README.md
 FULL_PATH_NAMES        = NO
@@ -58,3 +56,6 @@ WARN_NO_PARAMDOC       = NO
 WARN_IF_DOC_ERROR      = YES
 WARN_AS_ERROR          = YES
 QUIET                  = YES
+
+# Public API documentation must not depend on a host-specific Graphviz install.
+HAVE_DOT               = NO

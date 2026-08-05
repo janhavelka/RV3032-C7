@@ -378,23 +378,38 @@ enum class PrimaryCellFailureStage : uint8_t {
 
 /** @brief Detailed operation and cleanup evidence from primary-cell ensure. */
 struct PrimaryCellConfigurationReport {
+  /// High-level terminal outcome.
   PrimaryCellConfigurationOutcome outcome =
       PrimaryCellConfigurationOutcome::NOT_ATTEMPTED;
+  /// Phase responsible for operationStatus when the operation failed.
   PrimaryCellFailureStage failureStage = PrimaryCellFailureStage::NONE;
+  /// First forward-path failure, or OK when forward work succeeded.
   Status operationStatus = Status::Ok();
+  /// Access-state cleanup result, independent of operationStatus.
   Status cleanupStatus = Status::Ok();
+  /// Persistent C0 value observed before any mutation.
   uint8_t persistentBefore = 0;
+  /// Exact persistent C0 value derived from primary-cell policy.
   uint8_t persistentTarget = 0;
+  /// Persistent C0 value observed during final verification.
   uint8_t persistentAfter = 0;
+  /// Active C0 value observed during final verification.
   uint8_t activeAfter = 0;
+  /// Control 1 value observed during final cleanup verification.
   uint8_t control1After = 0;
+  /// persistentBefore contains direct EEPROM-read evidence.
   bool persistentBeforeValid = false;
+  /// persistentAfter contains direct EEPROM-read evidence.
   bool persistentAfterValid = false;
   bool persistentTargetVerified = false; ///< Direct EEPROM read proved the exact derived primary-cell target.
   bool activeTargetVerified = false; ///< Active-C0 readback proved the exact derived persistent target.
+  /// Exactly one wear-limited WRITE_ONE command was dispatched.
   bool writeCommandAttempted = false;
+  /// Direct persistent readback proved the dispatched write durable.
   bool writeDurablyVerified = false;
+  /// EEPROM access state was restored and verified.
   bool cleanupVerified = false;
+  /// Safety cleanup left automatic refresh disabled after uncertain state.
   bool autoRefreshHeldDisabledForSafety = false;
 };
 
@@ -437,7 +452,6 @@ struct EepromHardwareFlags {
 };
 
 /**
- * @class RV3032
  * @brief Typed driver for the supported RV-3032-C7 functions
  * 
  * This class provides typed control of the supported RV-3032-C7 functions

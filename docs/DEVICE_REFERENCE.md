@@ -1,8 +1,9 @@
 # RV3032-C7 device reference used by the driver
 
-This is an implementation-oriented summary of the local Micro Crystal
-datasheet and application manual. The vendor PDFs in `reference-pdfs/` remain
-the authority for electrical limits, layout, and qualification.
+This is an implementation-oriented summary of the Micro Crystal datasheet and
+application manual. The vendor PDFs retained in the repository (but excluded
+from the PlatformIO package) remain the authority for electrical limits,
+layout, and qualification.
 
 ## Interface and memory model
 

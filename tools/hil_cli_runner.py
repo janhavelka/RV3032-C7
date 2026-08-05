@@ -18,12 +18,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
-try:
-    import serial
-except ImportError as exc:  # pragma: no cover - exercised by operator env
-    raise SystemExit("pyserial is required: python -m pip install pyserial") from exc
-
-
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PROMPT = "> "
 FAILURE_PATTERNS = (
@@ -746,6 +740,16 @@ def destructive_authorization_record(args: argparse.Namespace) -> str:
 
 
 def run_hardware(args: argparse.Namespace) -> int:
+    if not args.port:
+        raise SystemExit("hardware HIL requires an explicit --port")
+    global serial
+    try:
+        import serial
+    except ImportError as exc:  # pragma: no cover - exercised by operator env
+        raise SystemExit(
+            "hardware HIL requires pyserial: python -m pip install pyserial"
+        ) from exc
+
     authorization = destructive_authorization_record(args)
     results: list[Result] = []
     if authorization:
@@ -837,7 +841,10 @@ def run_hardware(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", default="COM27")
+    parser.add_argument(
+        "--port",
+        help="serial port for physical HIL (required outside device-free modes)",
+    )
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--idle-timeout-s", type=float, default=0.35)
     parser.add_argument("--boot-timeout-s", type=float, default=8.0)

@@ -548,6 +548,7 @@ void test_end_unconditionally_abandons_work_with_zero_io() {
   TEST_ASSERT_EQUAL_UINT32(100, rtc.lastErrorMs());
   TEST_ASSERT_FALSE(rtc.lastError().ok());
   TEST_ASSERT_TRUE(rtc.setClockInterruptEnabled(true).inProgress());
+  TEST_ASSERT_TRUE(rtc.getJobStatus().inProgress());
   const uint32_t beforeEnd = first.callbackCount;
   rtc.end();
   TEST_ASSERT_FALSE(rtc.isInitialized());
@@ -617,6 +618,7 @@ void test_tick_zero_budget_and_eeprom_end_guards() {
   TEST_ASSERT_EQUAL_UINT32(ordinaryCallbacks, fake.callbackCount);
   TEST_ASSERT_TRUE(rtc.isJobBusy());
   TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  TEST_ASSERT_TRUE(rtc.getJobStatus().ok());
 
   TEST_ASSERT_TRUE(rtc.setOffsetPpm(0.2384f).inProgress());
   TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
@@ -4272,6 +4274,27 @@ void test_alarm_timer_and_pmu_round_trips_are_cooperative() {
   TEST_ASSERT_TRUE(rtc.setTrickleChargeResistance(
       RV3032::TrickleChargeResistance::KOHM_7).inProgress());
   TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  fake.direct[RV3032::cmd::REG_CONTROL3] = 0x05;
+  const uint8_t backupInterruptBit = static_cast<uint8_t>(
+      1u << RV3032::cmd::CTRL3_BSIE_BIT);
+  TEST_ASSERT_TRUE(rtc.setBackupSwitchInterruptEnabled(true).inProgress());
+  TEST_ASSERT_TRUE(rtc.getJobStatus().inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  TEST_ASSERT_EQUAL_HEX8(
+      0x05,
+      fake.direct[RV3032::cmd::REG_CONTROL3] &
+          static_cast<uint8_t>(~backupInterruptBit));
+  TEST_ASSERT_TRUE(rtc.getBackupSwitchInterruptEnabled(enabled).ok());
+  TEST_ASSERT_TRUE(enabled);
+  TEST_ASSERT_TRUE(rtc.setBackupSwitchInterruptEnabled(false).inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  TEST_ASSERT_TRUE(rtc.getBackupSwitchInterruptEnabled(enabled).ok());
+  TEST_ASSERT_FALSE(enabled);
+  enabled = true;
+  fake.failOrdinal = fake.callbackCount + 1U;
+  TEST_ASSERT_FALSE(rtc.getBackupSwitchInterruptEnabled(enabled).ok());
+  TEST_ASSERT_TRUE(enabled);
+  fake.failOrdinal = 0;
   RV3032::BackupSwitchMode backupMode = RV3032::BackupSwitchMode::Off;
   RV3032::TrickleChargeMode chargeMode =
       RV3032::TrickleChargeMode::CHARGER_DISABLED;

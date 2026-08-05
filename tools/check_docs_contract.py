@@ -20,22 +20,9 @@ REQUIRED_SOURCE_FILES = [
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
-    "docs/reports/2026-07-14-full-library-functional-audit.md",
-    "docs/reports/2026-07-15-functional-hardening-closure-audit.md",
-    "docs/reports/2026-07-13-v2.0.0-implementation.md",
-    "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
     "docs/reports/HIL_SUMMARY.md",
     "docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
     "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf",
-    "docs/extracted-md/00_document_inventory.md",
-    "docs/extracted-md/01_chip_overview.md",
-    "docs/extracted-md/02_pinout_and_signals.md",
-    "docs/extracted-md/03_electrical_and_timing.md",
-    "docs/extracted-md/04_protocol_commands_and_transactions.md",
-    "docs/extracted-md/05_register_map.md",
-    "docs/extracted-md/06_modes_interrupts_status_and_faults.md",
-    "docs/extracted-md/07_initialization_reset_and_operational_notes.md",
-    "docs/extracted-md/08_variant_differences_and_open_questions.md",
 ]
 
 REQUIRED_PACKAGE_FILES = [
@@ -62,26 +49,20 @@ REQUIRED_PACKAGE_FILES = [
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
-    "docs/reports/2026-07-14-full-library-functional-audit.md",
-    "docs/reports/2026-07-15-functional-hardening-closure-audit.md",
-    "docs/reports/2026-07-13-v2.0.0-implementation.md",
-    "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md",
     "docs/reports/HIL_SUMMARY.md",
-    "docs/extracted-md/00_document_inventory.md",
-    "docs/extracted-md/01_chip_overview.md",
-    "docs/extracted-md/02_pinout_and_signals.md",
-    "docs/extracted-md/03_electrical_and_timing.md",
-    "docs/extracted-md/04_protocol_commands_and_transactions.md",
-    "docs/extracted-md/05_register_map.md",
-    "docs/extracted-md/06_modes_interrupts_status_and_faults.md",
-    "docs/extracted-md/07_initialization_reset_and_operational_notes.md",
-    "docs/extracted-md/08_variant_differences_and_open_questions.md",
 ]
 
 REQUIRED_EXPORT_EXCLUDES = [
     ".venv/**",
     "dist/**",
+    "AGENTS.md",
     "docs/doxygen/**",
+    "docs/extracted-md/**",
+    "docs/prompts/**",
+    "docs/reports/*.json",
+    "docs/reports/*.pid",
+    "docs/reports/*.txt",
+    "docs/reports/*-runner.md",
     "idf_component.yml",
     "idf_component.yml.orig",
     "tmp/**",
@@ -93,6 +74,16 @@ REQUIRED_EXPORT_EXCLUDES = [
 def _read_library_json() -> dict:
     with (ROOT / "library.json").open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _require_tokens(errors: list[str], rel: str, tokens: tuple[str, ...]) -> None:
+    path = ROOT / rel
+    if not path.is_file():
+        return
+    contents = path.read_text(encoding="utf-8", errors="replace")
+    for token in tokens:
+        if token not in contents:
+            errors.append(f"maintained contract {rel} missing token: {token!r}")
 
 
 def check_source() -> int:
@@ -108,6 +99,17 @@ def check_source() -> int:
         if (ROOT / rel).exists():
             errors.append(f"obsolete root artifact remains: {rel}")
 
+    forbidden_artifacts = [
+        *ROOT.glob("docs/prompts/**/*.md"),
+        *ROOT.glob("docs/extracted-md/**/*.md"),
+        *ROOT.glob("docs/reports/20??-*.md"),
+    ]
+    for path in sorted(set(forbidden_artifacts)):
+        errors.append(
+            "completed workflow artifact remains: "
+            f"{path.relative_to(ROOT).as_posix()}"
+        )
+
     data = _read_library_json()
     version = data.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -117,160 +119,98 @@ def check_source() -> int:
         if pattern not in excludes:
             errors.append(f"library.json export.exclude missing {pattern!r}")
 
-    doxyfile = (ROOT / "Doxyfile").read_text(
-        encoding="utf-8", errors="replace"
-    )
+    doxyfile = (ROOT / "Doxyfile").read_text(encoding="utf-8", errors="replace")
     for setting in ("WARN_IF_DOC_ERROR", "WARN_AS_ERROR"):
         if not re.search(rf"(?m)^{setting}\s*=\s*YES\s*$", doxyfile):
             errors.append(f"Doxyfile must enable {setting}")
     if not re.search(r"(?m)^EXTRACT_ALL\s*=\s*YES\s*$", doxyfile):
         errors.append("Doxyfile must include the complete public API")
+    if not re.search(r"(?m)^HAVE_DOT\s*=\s*NO\s*$", doxyfile):
+        errors.append("Doxyfile must disable host-dependent Graphviz output")
     if re.search(r"(?m)^PROJECT_NUMBER\s*=\s*\S", doxyfile):
         errors.append("Doxyfile must not duplicate the library.json version")
-    for historical_input in ("AGENTS.md", "docs/prompts", "docs/extracted-md"):
-        input_lines = "\n".join(
-            line for line in doxyfile.splitlines()
-            if line.startswith("INPUT") or line.startswith(" ")
-        )
-        if historical_input in input_lines:
+    input_match = re.search(r"(?ms)^INPUT\s*=.*?(?=^\S)", doxyfile)
+    public_inputs = input_match.group(0) if input_match else ""
+    for historical_input in (
+        "AGENTS.md",
+        "docs/prompts",
+        "docs/extracted-md",
+        "docs/reports",
+    ):
+        if historical_input in public_inputs:
             errors.append(
-                f"Doxyfile public INPUT includes historical material: "
-                f"{historical_input}"
+                f"Doxyfile public INPUT includes non-API material: {historical_input}"
             )
 
-    report = ROOT / "docs/reports/2026-07-13-v2.0.0-implementation.md"
-    if report.is_file():
-        report_text = report.read_text(encoding="utf-8", errors="replace")
-        for token in ("Vendor capability matrix", "Requirement-to-evidence matrix",
-                      "Hardware-in-the-loop status is **NOT RUN**", "Worktree state"):
-            if token not in report_text:
-                errors.append(f"implementation report missing token: {token!r}")
-
-    readiness_report = (
-        ROOT / "docs/reports/2026-07-14-tunnelmonitor-integration-readiness.md"
+    _require_tokens(
+        errors,
+        "docs/README.md",
+        (
+            "Maintained documents",
+            "Vendor references",
+            "Evidence policy",
+            "Completed prompts and point-in-time implementation audits",
+        ),
     )
-    if readiness_report.is_file():
-        readiness_text = readiness_report.read_text(
-            encoding="utf-8", errors="replace"
-        )
-        for token in (
-            "Four closed compatibility gaps",
-            "Requirement-to-evidence matrix",
-            "Physical HIL status is **NOT RUN**",
-            "Final worktree state",
-        ):
-            if token not in readiness_text:
-                errors.append(
-                    f"readiness report missing token: {token!r}"
-                )
-
-    docs_index = ROOT / "docs/README.md"
-    if docs_index.is_file():
-        docs_text = docs_index.read_text(encoding="utf-8", errors="replace")
-        for token in (
-            "Active Functional-Hardening Prompt Suite 06",
-            "Current post-hardening cleanup",
-            "2026-07-14-full-library-functional-audit.md",
-            "2026-07-15-functional-hardening-closure-audit.md",
-            "historical where they",
-        ):
-            if token not in docs_text:
-                errors.append(f"docs index missing active-hardening token: {token!r}")
-
-    closure_report = (
-        ROOT / "docs/reports/2026-07-15-functional-hardening-closure-audit.md"
-    )
-    if closure_report.is_file():
-        closure_text = closure_report.read_text(
-            encoding="utf-8", errors="replace"
-        )
-        for token in (
-            "Requirement-to-evidence closure matrix",
-            "109/109",
-            "Physical HIL status is **NOT RUN**",
-            "Final worktree state",
-        ):
-            if token not in closure_text:
-                errors.append(
-                    f"closure report missing token: {token!r}"
-                )
-
-    maintained_contract_tokens = {
-        "README.md": (
+    _require_tokens(
+        errors,
+        "README.md",
+        (
+            "begin()",
+            "probe()",
+            "ensurePrimaryCellConfiguration()",
             "ConfigurationJobReport",
-            "4 * i2cTimeoutMs + activationMs + 1",
-            "UIE=0",
             "Status tick(uint32_t nowMs)",
-            "operationStatus",
-            "cleanupStatus",
             "Wire example adapter",
             "CLI ownership",
-            "const uint32_t now = nowMs(nullptr);",
-            "chip identity",
-            "wrap from `UINT32_MAX` to zero",
-            "The maintained example glue is intentionally small",
-            "generates only this library's version header",
-            "CLKOUT factory default and persistence",
-            "approximately 66 ms POR refresh",
-            "setClkoutEnabled()` queues exact C0",
-            "In VBACKUP power state the pin is LOW",
+            ".\\scripts\\pio.cmd test -e native",
+            "docs/reports/HIL_SUMMARY.md",
         ),
-        "docs/ARCHITECTURE.md": (
+    )
+    _require_tokens(
+        errors,
+        "docs/ARCHITECTURE.md",
+        (
+            "Ownership and lifecycle",
             "Staged configuration and reconciliation",
-            "Internal ownership and reuse",
             "Terminal bookkeeping has one owner",
-            "one terminal-precedence rule",
-            "SAFE_DISABLED_VERIFIED",
             "readback-only reconciliation",
-            "TIE=0",
-            "AIE=0",
-            "EIE=0",
-            "BSIE=0",
-            "short staging write",
-            "PendingOperation",
-            "cannot prove RV3032",
-            "C0, C2, and C3 all equal `0x00`",
-            "setClkoutEnabled()` hands only C0",
+            "Active configuration and persistent EEPROM",
         ),
-        "docs/DEVICE_REFERENCE.md": (
-            "UF-polling-only mode",
-            "2 ms activation not-before boundary",
-            "Persistent content proof and access-state cleanup proof are independent",
+    )
+    _require_tokens(
+        errors,
+        "docs/DEVICE_REFERENCE.md",
+        (
+            "Active calendar/control/register space: `0x00..0x2D`",
             "It is not BCD",
-            "An assertion after the guard read cannot be",
-            "PMU_NCLKE_MASK",
-            "TS_EVI_OVERWRITE_BIT",
-            "compares all four implemented active bytes C0..C3",
-            "CLKOUT pin is forced LOW in VBACKUP",
-            "queues C0, C2, and C3",
+            "Status side effects",
+            "Persistent content proof and access-state cleanup proof are independent",
+            "Application Manual Rev. 1.3 pages 45",
         ),
-        "docs/IDF_PORT.md": (
+    )
+    _require_tokens(
+        errors,
+        "docs/IDF_PORT.md",
+        (
+            "Adapter boundary",
             "Status tick(uint32_t nowMs)",
-            "operation/cleanup evidence",
-            "TIE/AIE/EIE/BSIE",
+            "Choose exactly one surface per owner-loop iteration.",
             "does not prove RV3032 silicon identity",
             "hard bound on the complete adapter callback",
-            "const uint32_t now = idfNowMs(nullptr);",
-            "if (rtc.isJobBusy())",
-            "pollStatus = rtc.pollJob(now, 1, used);",
-            "pollStatus = rtc.pollEeprom(now, 1, used);",
-            "Choose exactly one surface per owner-loop iteration.",
-            "consumer dependency pins and application-version metadata",
-            "generator owns only the RV3032",
-            "CLKOUT persistence is a two-surface operation",
-            "poll the generic EEPROM surface",
         ),
-    }
-    for rel, tokens in maintained_contract_tokens.items():
-        path = ROOT / rel
-        if not path.is_file():
-            continue
-        contents = path.read_text(encoding="utf-8", errors="replace")
-        for token in tokens:
-            if token not in contents:
-                errors.append(
-                    f"maintained contract {rel} missing token: {token!r}"
-                )
+    )
+    _require_tokens(
+        errors,
+        "docs/reports/HIL_SUMMARY.md",
+        (
+            "Latest retained campaign",
+            "157 PASS, 0 FAIL, 1 SKIP",
+            "Battery retention",
+            "Two-cycle configuration persistence",
+            "Limits",
+        ),
+    )
 
     maintained_paths = [
         ROOT / "include/RV3032/RV3032.h",
@@ -320,6 +260,8 @@ def check_source() -> int:
     public_header = (ROOT / "include/RV3032/RV3032.h").read_text(
         encoding="utf-8", errors="replace"
     )
+    if "@class RV3032" in public_header:
+        errors.append("public header contains ambiguous @class RV3032 directive")
     warning = "Any Status-register write clears THF and TLF in silicon."
     for method in (
         "clearAlarmFlag",
@@ -338,21 +280,28 @@ def check_source() -> int:
         comment = public_header[comment_index:declaration_index]
         if warning not in comment:
             errors.append(f"public Doxygen for {method} lacks Status-write warning")
-        if ("either omitted flag is already set at the guard read" not in comment or
-                "operation returns INVALID_PARAM without writing." not in comment):
+        if (
+            "either omitted flag is already set at the guard read" not in comment
+            or "operation returns INVALID_PARAM without writing." not in comment
+        ):
             errors.append(f"public Doxygen for {method} lacks omitted-flag guard contract")
-        if ("An assertion" not in comment or
-                "after the guard read cannot be preserved." not in comment):
+        if (
+            "An assertion" not in comment
+            or "after the guard read cannot be preserved." not in comment
+        ):
             errors.append(f"public Doxygen for {method} lacks post-guard race warning")
 
-    readme_text = (ROOT / "README.md").read_text(
-        encoding="utf-8", errors="replace"
-    )
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8", errors="replace")
     if readme_text.count("const uint32_t now = nowMs(nullptr);") < 5:
         errors.append("README polling snippets do not consistently sample current time")
-    for forbidden in ("pollJob(nowMs,", "tick(nowMs)", ", nowMs, 4000"):
+    for forbidden in (
+        "pollJob(nowMs,",
+        "tick(nowMs)",
+        ", nowMs, 4000",
+        "python -m platformio",
+    ):
         if forbidden in readme_text:
-            errors.append(f"README retains uncompilable polling token: {forbidden!r}")
+            errors.append(f"README retains invalid verification token: {forbidden!r}")
 
     idf_text = (ROOT / "docs/IDF_PORT.md").read_text(
         encoding="utf-8", errors="replace"
@@ -368,14 +317,12 @@ def check_source() -> int:
     if isinstance(version, str):
         expected_version_define = f'#define RV3032_VERSION_STRING "{version}"'
         if expected_version_define not in version_header:
-            errors.append(
-                "generated Version.h does not match the library.json version"
-            )
+            errors.append("generated Version.h does not match the library.json version")
 
     if errors:
         print("Docs source contract FAILED:")
-        for err in errors:
-            print(f"- {err}")
+        for error in errors:
+            print(f"- {error}")
         return 1
 
     print("Docs source contract PASSED")
@@ -412,10 +359,25 @@ def check_package(archive: pathlib.Path) -> int:
                         contents_by_name[candidate] = extracted.read()
                 if candidate.startswith("docs/reference-pdfs/") or candidate.endswith(".pdf"):
                     forbidden.append(candidate)
-                if candidate.startswith((
-                    "test/", ".pio/", ".venv/", ".vscode/", ".git/",
-                    "dist/", "tmp/",
-                )):
+                if candidate.startswith(
+                    (
+                        "test/",
+                        ".pio/",
+                        ".venv/",
+                        ".vscode/",
+                        ".git/",
+                        "AGENTS.md",
+                        "dist/",
+                        "tmp/",
+                        "docs/prompts/",
+                        "docs/extracted-md/",
+                    )
+                ):
+                    forbidden.append(candidate)
+                if (
+                    candidate.startswith("docs/reports/")
+                    and candidate != "docs/reports/HIL_SUMMARY.md"
+                ):
                     forbidden.append(candidate)
                 if candidate in (
                     "OPTION_A_PROPOSAL.txt",
@@ -428,7 +390,6 @@ def check_package(archive: pathlib.Path) -> int:
     for rel in REQUIRED_PACKAGE_FILES:
         if rel not in seen:
             errors.append(f"missing required package file: {rel}")
-
     for rel in sorted(set(forbidden)):
         errors.append(f"forbidden package file included: {rel}")
 
@@ -438,19 +399,23 @@ def check_package(archive: pathlib.Path) -> int:
             "utf-8", errors="replace"
         )
         packaged_manifest_version = packaged_manifest.get("version")
-        if (not isinstance(packaged_manifest_version, str) or
-                not re.fullmatch(r"\d+\.\d+\.\d+", packaged_manifest_version)):
+        if (
+            not isinstance(packaged_manifest_version, str)
+            or not re.fullmatch(r"\d+\.\d+\.\d+", packaged_manifest_version)
+        ):
             errors.append("packaged manifest version is not MAJOR.MINOR.PATCH")
-        elif (f'#define RV3032_VERSION_STRING "{packaged_manifest_version}"'
-              not in packaged_version):
+        elif (
+            f'#define RV3032_VERSION_STRING "{packaged_manifest_version}"'
+            not in packaged_version
+        ):
             errors.append("packaged Version.h does not match packaged manifest")
     except (KeyError, json.JSONDecodeError) as exc:
         errors.append(f"cannot validate packaged version agreement: {exc}")
 
     if errors:
         print("Docs package contract FAILED:")
-        for err in errors:
-            print(f"- {err}")
+        for error in errors:
+            print(f"- {error}")
         return 1
 
     print("Docs package contract PASSED")
@@ -460,8 +425,8 @@ def check_package(archive: pathlib.Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate documentation/package contract.")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("source", help="Check required docs and package metadata in the source tree.")
-    package_parser = sub.add_parser("package", help="Check required and forbidden files in a packed archive.")
+    sub.add_parser("source", help="Check maintained docs and package metadata.")
+    package_parser = sub.add_parser("package", help="Check a packed library archive.")
     package_parser.add_argument("archive", type=pathlib.Path)
     args = parser.parse_args()
 

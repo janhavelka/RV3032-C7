@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-08-05
+
 ### Added
 
+- Native coverage for shared job-status reporting and the active-only
+  backup-switch interrupt setter/getter, including output preservation on
+  transport failure.
 - A reusable `esp32s3hil_persistence` environment for two-cycle configuration
   EEPROM HIL: stage typed alternate settings, verify persistent and active
   bytes after reboot, restore the exact original bytes, and verify them after a
@@ -20,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public documentation now has one maintained index, an accurate direct and
+  indirect memory map, non-overlapping cooperative examples, wrapper-based
+  Windows verification commands, and a concise current HIL evidence summary.
+- The documentation/package contract now validates maintained release content
+  instead of preserving completed prompt phases and point-in-time audit text.
+- Device-free HIL help, parser self-test, and dry-run no longer require
+  `pyserial`; physical execution requires an explicit serial port.
+- GitHub Actions now use current Node 24-based majors: Checkout and Setup
+  Python v7, plus Cache v6. This removes the hosted runner's Node 20
+  deprecation warnings.
 - The PlatformIO pin now uses PIOArduino `55.03.311` with Arduino-ESP32
   `3.3.11` and ESP-IDF `5.5.5`. ESP32-S3 builds target the built-in N16R8
   definition (16 MB QIO flash and 8 MB octal PSRAM), and the bring-up CLI
@@ -39,11 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Completed AI prompt suites, superseded dated audit/implementation reports,
+  duplicated extracted device notes, transcript-like HIL excerpts, and old
+  hardware campaigns from the maintained release tree. All remain recoverable
+  from Git history and, where applicable, prior release tags.
 - Obsolete v1.1 build output and the superseded managed-driver proposal from
   the repository root, plus an unused signed-integer parser from example glue.
 
 ### Fixed
 
+- Doxygen now documents the namespaced driver class instead of creating a
+  bogus global class page, and explicitly disables host-dependent Graphviz
+  output so CI and local builds behave consistently.
+- CI now runs the device-free HIL parser self-test and dry-run. The strict host
+  build also no longer reports signed-to-unsigned conversion at date rollover.
 - Library packaging now excludes local `dist/` and `tmp/` trees so generated
   archives cannot be nested inside published packages.
 - Ignore and exclude the bare ESP-IDF component manifests that PIOArduino can
@@ -472,7 +496,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0

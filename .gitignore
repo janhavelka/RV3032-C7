@@ -1,5 +1,6 @@
 # PlatformIO
 .pio/
+.venv/
 .vscode/
 .idea/
 
@@ -12,6 +13,7 @@
 *.tar.gz
 *.tgz
 *.zip
+dist/
 
 # Python (for scripts/)
 __pycache__/
@@ -36,9 +38,16 @@ config_local.h
 wifi_credentials.h
 
 # Temporary files
+tmp/
 *.tmp
 *.bak
 *.log
+
+# HIL runner artifacts (keep only curated Markdown evidence)
+docs/reports/*.json
+docs/reports/*.pid
+docs/reports/*.txt
+docs/reports/*-runner.md
 
 # Auto-generated files
 include/RV3032/Version.h

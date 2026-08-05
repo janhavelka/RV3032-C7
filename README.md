@@ -41,7 +41,11 @@ The chip has several different storage classes:
 
 | Range | Storage | Access |
 | --- | --- | --- |
-| `0x00..0x4F` | Direct volatile registers and 16-byte user RAM | Direct register transfers, subject to public allowlists |
+| `0x00..0x2D` | Direct calendar, alarm, timer, status, control, temperature, and timestamp registers | Typed operations or restricted raw access |
+| `0x2E..0x38` | Reserved/unimplemented direct-register gap | Denied |
+| `0x39..0x3C` | Write-only password registers | Unsupported and denied |
+| `0x3D..0x3F` | EEPROM address/data/command staging registers | Driver-internal protocol only |
+| `0x40..0x4F` | 16-byte volatile user RAM | Typed RAM operations |
 | `0xC0..0xC5` | Supported active configuration mirrors and EEPROM | Typed active operations; indirect durable proof |
 | `0xC6..0xCA` | Vendor password mirrors and EEPROM | Silicon reference only; library access is unsupported and denied |
 | `0xCB..0xEA` | 32-byte user EEPROM | Indirect access only |
@@ -125,15 +129,33 @@ arguments on failure. Writing Seconds resets the hundredths
 counter and the 4096 Hz through 1 Hz prescalers. These helpers do not inspect
 or clear Status flags.
 
-Applications needing stronger evidence use:
+Applications needing stronger evidence choose one cooperative job and poll it
+to a terminal result before admitting another. For a status-first snapshot:
 
 ```cpp
 const uint32_t now = nowMs(nullptr);
-rtc.startReadTimeSnapshotJob(now, 100);
-rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, now, 250);
+RV3032::Status st = rtc.startReadTimeSnapshotJob(now, 100);
+if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
 
+// One owner-loop step; repeat with a freshly sampled time while IN_PROGRESS.
+const uint32_t pollNow = nowMs(nullptr);
 uint8_t used = 0;
-RV3032::Status st = rtc.pollJob(now, 1, used);
+st = rtc.pollJob(pollNow, 1, used);
+```
+
+For a verified set that deliberately clears PORF/VLF, use this instead after
+the previous job is terminal:
+
+```cpp
+const uint32_t now = nowMs(nullptr);
+RV3032::Status st =
+    rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, now, 250);
+if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
+
+// One owner-loop step; repeat with a freshly sampled time while IN_PROGRESS.
+const uint32_t pollNow = nowMs(nullptr);
+uint8_t used = 0;
+st = rtc.pollJob(pollNow, 1, used);
 ```
 
 The snapshot reads Status before the calendar, returns typed `StatusFlags` from
@@ -160,9 +182,17 @@ Explicit reads work even when generic writes are disabled:
 
 ```cpp
 const uint32_t now = nowMs(nullptr);
-rtc.startReadConfigurationEepromJob(
+RV3032::Status st = rtc.startReadConfigurationEepromJob(
     RV3032::ConfigurationEepromRegister::PMU, now);
-rtc.startReadUserEepromJob(offset, length, now);
+if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
+```
+
+After that job is terminal, a separate user-EEPROM read may be admitted:
+
+```cpp
+const uint32_t now = nowMs(nullptr);
+RV3032::Status st = rtc.startReadUserEepromJob(offset, length, now);
+if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
 ```
 
 User EEPROM writes require `Config::enableEepromWrites=true`:
@@ -469,7 +499,8 @@ entries remain, so no queued work is orphaned.
 - `src/` — platform-neutral implementation
 - `examples/common/` — example-only board/transport glue, not library code
 - `examples/01_basic_bringup_cli/` — interactive product-neutral bring-up CLI
-- `docs/` — architecture, device reference, adapter notes, reports, local PDFs
+- `docs/` — architecture, device reference, adapter notes, HIL summary, and
+  repository-only vendor PDFs
 - `test/test_native/` — native fake and unit/integration tests
 
 The maintained example glue is intentionally small: `BoardConfig.h`,
@@ -493,9 +524,9 @@ Windows long-path support or temporarily set `PLATFORMIO_CACHE_DIR` to a short,
 writable path for the PlatformIO install/build command.
 
 ```powershell
-python -m platformio test -e native
-python -m platformio run -e esp32s3dev
-python -m platformio run -e esp32s2dev
+.\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s2dev
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
@@ -507,9 +538,11 @@ python tools/hil_cli_runner.py --dry-run
 
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
-authorization. The latest retained physical evidence is summarized in
-`docs/reports/HIL_SUMMARY.md`; dated implementation and integration-readiness
-reports remain historical audit records. TunnelMonitor integration and an
+authorization. The latest retained physical evidence is summarized in the
+[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/v3.0.1/docs/reports/HIL_SUMMARY.md),
+which is also included in the release package.
+Completed prompts and point-in-time audit reports remain available in Git
+history rather than the release tree. TunnelMonitor integration and an
 immutable consumer commit pin remain external work.
 
 After such fresh authorization, `--destructive-setup` additionally requires
