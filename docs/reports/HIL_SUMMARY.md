@@ -7,10 +7,8 @@ transcripts are intentionally not committed.
 ## Latest retained campaign
 
 The latest physical campaign ran on 2026-07-31 against the v3.0.0 integration
-surface. The final persistence-return correction used in that campaign was
-subsequently captured by commit `ae08889`; the campaign did not run against a
-clean future release tag. Release-preparation and device-free validation must
-therefore be reported separately from this physical evidence.
+surface. This evidence predates v3.0.1, which changed only documentation,
+packaging, CI, and the HIL harness.
 
 ### Fixture
 

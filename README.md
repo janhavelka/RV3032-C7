@@ -80,7 +80,7 @@ void setup() {
   cfg.nowMs = nowMs;
   cfg.waitMs = waitMs;
   cfg.timeUser = nullptr;
-  cfg.i2cTimeoutMs = 5;
+  cfg.i2cTimeoutMs = 50;
   cfg.enableEepromWrites = false;
 
   RV3032::Status st = rtc.begin(cfg);   // validates/binds; zero I2C
@@ -499,9 +499,15 @@ entries remain, so no queued work is orphaned.
 - `src/` — platform-neutral implementation
 - `examples/common/` — example-only board/transport glue, not library code
 - `examples/01_basic_bringup_cli/` — interactive product-neutral bring-up CLI
-- `docs/` — architecture, device reference, adapter notes, HIL summary, and
-  repository-only vendor PDFs
-- `test/test_native/` — native fake and unit/integration tests
+- [`docs/`](https://github.com/janhavelka/RV3032-C7/tree/main/docs) — architecture,
+  device reference, ESP-IDF adapter notes, HIL summary, and repository-only
+  vendor PDFs
+- `test/test_native/` — host unit/integration tests against the bounded fake
+- `test/test_hil/`, `test/test_hil_persistence/` — on-device harnesses
+  (`esp32s3hil`, `esp32s3hil_persistence`)
+- `test/stubs/` — Arduino/Wire stubs for the native build
+- `tools/` — repository check scripts and the device-free HIL runner
+- `scripts/` — version generator and the PlatformIO wrapper
 
 The maintained example glue is intentionally small: `BoardConfig.h`,
 `CliShell.h`, `CliStyle.h`, `CommandHandler.h`, `I2cScanner.h`,
@@ -539,11 +545,8 @@ python tools/hil_cli_runner.py --dry-run
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
 authorization. The latest retained physical evidence is summarized in the
-[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/v3.0.1/docs/reports/HIL_SUMMARY.md),
+[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reports/HIL_SUMMARY.md),
 which is also included in the release package.
-Completed prompts and point-in-time audit reports remain available in Git
-history rather than the release tree. TunnelMonitor integration and an
-immutable consumer commit pin remain external work.
 
 After such fresh authorization, `--destructive-setup` additionally requires
 explicit `--authorization-port`, `--authorization-module`,

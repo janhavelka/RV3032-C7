@@ -28,8 +28,8 @@ duplicate an in-flight wear-limited mutation.
 The four states are `UNINIT`, `READY`, `DEGRADED`, and `OFFLINE`. `OFFLINE` is a
 health label, not an admission policy: a valid caller-requested operation still
 reaches the transport. Only tracked transport wrappers update health.
-Lifetime success/failure counters are ordinary `uint32_t` values and wrap from
-`UINT32_MAX` to zero. Address NACK is mapped consistently to
+Success/failure counters cover the current `begin()`/`end()` lifecycle, are
+ordinary `uint32_t` values, and wrap from `UINT32_MAX` to zero. Address NACK is mapped consistently to
 `DEVICE_NOT_FOUND` in both tracked `recover()` evidence and `lastError()`.
 
 ## Transport layers
@@ -208,9 +208,10 @@ together because every Status write clears both flags in silicon.
 
 ## Active configuration and persistent EEPROM
 
-Addresses `0xC0..0xC5` are active configuration mirrors. Persistent
-configuration and the 32-byte user EEPROM are accessed indirectly through
-EEADDR, EEDATA, and EECMD. The part does not contain FRAM.
+Addresses `0xC0..0xCA` are active configuration mirrors; only `0xC0..0xC5` are
+supported by this library, because `0xC6..0xCA` are the vendor password mirrors
+and are denied before transport. Persistent configuration and the 32-byte user
+EEPROM are accessed indirectly through EEADDR, EEDATA, and EECMD. The part does not contain FRAM.
 
 For CLKOUT, C0 owns NCLKE and C2/C3 own HFD/OS/FD. At factory delivery, the
 CLKOUT bytes C0, C2, and C3 all equal `0x00`: direct 32.768 kHz XTAL output is

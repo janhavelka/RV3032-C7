@@ -92,8 +92,9 @@ static constexpr uint8_t REG_TIMER_HIGH = 0x0C;
 static constexpr uint8_t REG_STATUS = 0x0D;
 
 /// @brief Temperature LSB/support-flags register (0x0E)
-/// Bits 7:4 are the fractional temperature nibble; bits 3:0 are EEF, EEBUSY,
-/// CLKF, and BSF support flags with documented write-clear semantics.
+/// Bits 7:4 are the fractional temperature nibble. Bits 3:0 are EEF, EEBUSY,
+/// CLKF and BSF. EEF, CLKF and BSF are write-zero-to-clear; EEBUSY is
+/// read-only status.
 static constexpr uint8_t REG_TEMP_LSB = 0x0E;
 
 /// @brief Temperature integer register (0x0F, read-only)
@@ -127,8 +128,8 @@ static constexpr uint8_t REG_TS_CONTROL = 0x13;
 static constexpr uint8_t REG_CLOCK_INT_MASK = 0x14;
 
 /// @brief EVI Control register (0x15, read/write-protectable)
-/// Bits: CLKDE, EHL, vendor ET[1:0] event filtering, and ESYN. There is no
-/// implemented bit 3.
+/// Bits: CLKDE, EHL, vendor ET[1:0] event filtering, and ESYN.
+/// Bits 3:1 are unimplemented and always read 0.
 static constexpr uint8_t REG_EVI_CONTROL = 0x15;
 
 /// @brief TLow Threshold register (0x16, read/write-protectable)
@@ -316,11 +317,16 @@ static constexpr uint8_t REG_EEPROM_PW_ENABLE = 0xCA;
 
 // ========== User EEPROM (0xCB–0xEA) ==========
 
-/// @brief User EEPROM start address (0xCB)
-/// 32 bytes of non-volatile user storage
-/// Accessed via REG_EE_ADDRESS, REG_EE_DATA, REG_EE_COMMAND
+/// @brief Configuration EEPROM start address (0xC0)
+/// Persistent configuration bytes C0..CA, each mirrored into a RAM register.
 static constexpr uint8_t CONFIG_EEPROM_START = 0xC0;
+
+/// @brief Configuration EEPROM end address (0xCA)
 static constexpr uint8_t CONFIG_EEPROM_END = 0xCA;
+
+/// @brief User EEPROM start address (0xCB)
+/// 32 bytes of non-volatile user storage.
+/// Accessed via REG_EE_ADDRESS, REG_EE_DATA, REG_EE_COMMAND
 static constexpr uint8_t USER_EEPROM_START = 0xCB;
 
 /// @brief User EEPROM end address (0xEA)
@@ -383,6 +389,13 @@ static constexpr uint8_t TS_CONTROL_IMPLEMENTED_MASK = 0x3F;
 static constexpr uint8_t TS_CONTROL_OVERWRITE_MASK = 0x07;
 /// EVR may read back as 1; TLR and THR always read back as 0.
 static constexpr uint8_t TS_CONTROL_READBACK_MASK = 0x27;
+/// Implemented bits minus EVR. EVR is a command bit, not stored state: the
+/// Application Manual contradicts itself on whether re-writing a already-set
+/// EVR resets the TS EVI bank again (section 3.10 "no further reset occurs"
+/// vs. section 4.17 note 9 "writing or overwriting a 1 causes reset"). Any
+/// read-modify-write of 0x13 that is not an intentional EVI reset must
+/// therefore write EVR=0, which is safe under both readings.
+static constexpr uint8_t TS_CONTROL_RMW_MASK = 0x1F;
 
 // Clock Interrupt Mask register bits (REG_CLOCK_INT_MASK, 0x14)
 static constexpr uint8_t CLOCK_INT_MASK_IMPLEMENTED_MASK = 0xFF;
@@ -416,6 +429,11 @@ static constexpr uint8_t PMU_BSM_LEVEL = 0x20;        ///< BSM: Level switching 
 static constexpr uint8_t PMU_BSM_DIRECT = 0x10;       ///< BSM: Direct switching mode
 static constexpr uint8_t PMU_TCR_MASK = 0x0C;
 static constexpr uint8_t PMU_TCM_MASK = 0x03;
+/// Bits preserved when deriving a primary-cell-safe C0: NCLKE (0x40) | TCR
+/// (0x0C). Clearing BSM and TCM is required because the trickle charger is
+/// gated by BOTH fields: it is active only when TCM != 00 AND BSM is 01/10
+/// (App. Manual Rev. 1.3 section 4.3). Section 8.2 requires the charger to be
+/// disabled for a non-rechargeable backup source. Do NOT widen this mask.
 static constexpr uint8_t PMU_PRIMARY_PRESERVE_MASK = 0x4C;
 
 // Active/persistent Offset byte fields (C1)

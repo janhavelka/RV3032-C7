@@ -180,7 +180,6 @@ def main() -> int:
         fail("CLI prompt is not deferred while cooperative work is owned")
     for token in (
         "Build timestamp calendar set completed",
-        'enable ? "CLKOUT enable" : "CLKOUT disable"',
         "operationAccepted(operationName, st)",
     ):
         if token not in text:

@@ -37,7 +37,7 @@ inline bool hasWhitespace(const char* text) {
 inline bool parseUnsigned(const String& token, int base,
                           uint64_t maximum, uint64_t& parsed) {
   const char* text = token.c_str();
-  if (hasWhitespace(text) || text[0] == '-') {
+  if (hasWhitespace(text) || text[0] == '-' || text[0] == '+') {
     return false;
   }
   errno = 0;
@@ -118,7 +118,7 @@ inline bool parseBool01Token(const String& token, bool& out) {
 
 inline bool parseRegisterToken(const String& token, uint8_t& out) {
   const char* text = token.c_str();
-  if (detail::hasWhitespace(text) || text[0] == '-') {
+  if (detail::hasWhitespace(text) || text[0] == '-' || text[0] == '+') {
     return false;
   }
   int base = 10;

@@ -50,7 +50,9 @@ docs/reports/*.txt
 docs/reports/*-runner.md
 
 # Auto-generated files
-include/RV3032/Version.h
+# NOTE: include/RV3032/Version.h is generated but deliberately committed: CI,
+# tools/check_docs_contract.py and non-PlatformIO consumers all require it to be
+# present without running scripts/generate_version.py.
 docs/doxygen/
 idf_component.yml
 idf_component.yml.orig

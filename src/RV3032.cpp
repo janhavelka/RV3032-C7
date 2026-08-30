@@ -15,6 +15,12 @@ namespace RV3032 {
 namespace {
 constexpr uint32_t EEPROM_READ_SETTLE_MS = 1;
 constexpr uint32_t EEPROM_WRITE_SETTLE_MS = 10;
+// tSWA, backup switchover activation (App. Manual 4.2.2/4.2.3, Table 7.5).
+// Disabled -> DSM needs 2 ms; disabled -> LSM needs 10 ms. Deliberately
+// separate from EEPROM_WRITE_SETTLE_MS: the two happen to share a value but
+// encode unrelated vendor requirements.
+constexpr uint32_t BACKUP_ACTIVATION_DIRECT_MS = 2;
+constexpr uint32_t BACKUP_ACTIVATION_LEVEL_MS = 10;
 constexpr uint32_t EEPROM_BUSY_POLL_INTERVAL_MS = 1;
 constexpr uint32_t EEPROM_READY_TIMEOUT_MS = 250;
 constexpr uint32_t EEPROM_READ_TIMEOUT_MS = 25;
@@ -878,8 +884,10 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
       case JobState::BACKUP_WRITE_PMU: {
         const uint8_t requestedBsm = static_cast<uint8_t>(
             _job.backupTargetPmu & cmd::PMU_BSM_MASK);
-        const uint32_t activationMs = requestedBsm == cmd::PMU_BSM_DIRECT
-            ? 2U : requestedBsm == cmd::PMU_BSM_LEVEL ? 10U : 0U;
+        const uint32_t activationMs =
+            requestedBsm == cmd::PMU_BSM_DIRECT ? BACKUP_ACTIVATION_DIRECT_MS
+            : requestedBsm == cmd::PMU_BSM_LEVEL ? BACKUP_ACTIVATION_LEVEL_MS
+            : 0U;
         const uint32_t boundary = earlierDeadline(
             currentNowMs, callbackBoundary(), _job.mutationCutoffMs);
         const TimedTransferResult transfer = writeRegsBefore(
@@ -1294,7 +1302,7 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         _job.temperatureOriginal[0] = static_cast<uint8_t>(
             _job.temperatureOriginal[0] & cmd::CONTROL3_IMPLEMENTED_MASK);
         _job.temperatureOriginal[1] = static_cast<uint8_t>(
-            _job.temperatureOriginal[1] & cmd::TS_CONTROL_READBACK_MASK);
+            _job.temperatureOriginal[1] & cmd::TS_CONTROL_OVERWRITE_MASK);
         {
           const uint8_t requestedControl3 = _job.temperatureTarget[0];
           const uint8_t requestedOverwrite = _job.temperatureTarget[1];
@@ -2713,11 +2721,11 @@ Status RV3032::startSetBackupSwitchModeJob(
       break;
     case BackupSwitchMode::Level:
       requestedBsm = cmd::PMU_BSM_LEVEL;
-      activationMs = 10U;
+      activationMs = BACKUP_ACTIVATION_LEVEL_MS;
       break;
     case BackupSwitchMode::Direct:
       requestedBsm = cmd::PMU_BSM_DIRECT;
-      activationMs = 2U;
+      activationMs = BACKUP_ACTIVATION_DIRECT_MS;
       break;
     default:
       return Status::Error(Err::INVALID_PARAM,
@@ -3554,7 +3562,7 @@ Status RV3032::setEviDebounce(EviDebounce debounce) {
 Status RV3032::setEviOverwrite(bool enable) {
   const uint8_t bit = static_cast<uint8_t>(1u << cmd::TS_EVI_OVERWRITE_BIT);
   return updateRegisterBit(
-      cmd::REG_TS_CONTROL, cmd::TS_CONTROL_IMPLEMENTED_MASK, bit, enable,
+      cmd::REG_TS_CONTROL, cmd::TS_CONTROL_RMW_MASK, bit, enable,
       QuiescenceGuard{cmd::REG_CONTROL2,
                       static_cast<uint8_t>(1u << cmd::CTRL2_EIE_BIT)});
 }
@@ -3766,7 +3774,7 @@ Status RV3032::resetTimestamp(TimestampSource source) {
 
   const uint8_t mask = static_cast<uint8_t>(1u << bit);
   return updateRegisterSingle(cmd::REG_TS_CONTROL,
-                              cmd::TS_CONTROL_IMPLEMENTED_MASK,
+                              cmd::TS_CONTROL_RMW_MASK,
                               mask, mask, QuiescenceGuard{});
 }
 
@@ -4500,8 +4508,8 @@ Status RV3032::cleanupPrimaryCellEnsure(
   }
 
   const uint32_t settledFor = _nowMs() - activeVerifiedAt;
-  if (settledFor < EEPROM_WRITE_SETTLE_MS) {
-    st = ensureWait(EEPROM_WRITE_SETTLE_MS - settledFor, operationStart);
+  if (settledFor < BACKUP_ACTIVATION_LEVEL_MS) {
+    st = ensureWait(BACKUP_ACTIVATION_LEVEL_MS - settledFor, operationStart);
     if (!st.ok()) {
       report.failureStage = PrimaryCellFailureStage::SETTLE;
       return st.code == Err::TIMEOUT
@@ -5099,12 +5107,23 @@ Status RV3032::processPersistentJob(uint32_t& nowMs, bool& callbackUsed) {
       return inProgress;
     }
     case EepromState::CLEANUP_WAIT_READY: {
+      // A transport error here is not a deadline: budget remains, so one
+      // transient failure on this EEbusy read must not abandon the chip with
+      // EERD=1 and a safe-access C0 (BSM=00) still installed, which would
+      // leave automatic refresh and backup switchover disabled with no
+      // in-library repair. EEbusy gates only EECMD dispatch, while the
+      // remaining cleanup states write ordinary RAM registers, so record the
+      // cleanup failure and still restore the active mirror and Control 1.
+      // The restore states tolerate further failures and the latched cleanup
+      // status keeps terminal EEPROM_CLEANUP_FAILED precedence.
       if (_job.persistentReadyChecks != 0 &&
           !hasDeadlinePassed(nowMs, _job.persistentNotBeforeMs)) {
         return inProgress;
       }
       if (hasDeadlinePassed(nowMs, _job.persistentPhaseDeadlineMs) ||
           _job.persistentReadyChecks >= EEPROM_CLEANUP_CHECK_CAP) {
+        // Deadline reached: the contract forbids starting another callback,
+        // so the access state stays unproven and is reported as such.
         return finishCleanupFailure(Status::Error(
             Err::TIMEOUT,
             "EEPROM busy during cleanup"));
@@ -5112,7 +5131,9 @@ Status RV3032::processPersistentJob(uint32_t& nowMs, bool& callbackUsed) {
       uint8_t temp = 0;
       Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
-        return finishCleanupFailure(st);
+        rememberCleanupFailure(st, false);
+        beginActiveRestore();
+        return inProgress;
       }
       if ((temp & cmd::EEPROM_BUSY_MASK) != 0) {
         ++_job.persistentReadyChecks;

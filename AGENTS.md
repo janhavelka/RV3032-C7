@@ -1,4 +1,4 @@
-﻿# AGENTS.md - RV3032-C7 Production Embedded Guidelines
+# AGENTS.md - RV3032-C7 Production Embedded Guidelines
 
 ## Role and Target
 You are a professional embedded software engineer building a production-grade RV3032-C7 RTC library.
@@ -32,14 +32,26 @@ include/RV3032/        - Public API headers only (Doxygen)
   Version.h            - Auto-generated (do not edit)
 src/                   - Implementation (.cpp)
 examples/
-  00_*/
-  01_*/
-  common/              - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h,
-                         I2cScanner.h, CommandHandler.h)
+  01_basic_bringup_cli/
+  common/              - Example-only helpers (BoardConfig.h, CliShell.h,
+                         CliStyle.h, CommandHandler.h, I2cScanner.h,
+                         I2cTransport.h, Log.h)
+test/
+  test_native/         - Host unit/integration tests against the bounded fake
+  test_hil/            - On-device harness (env esp32s3hil)
+  test_hil_persistence/- On-device EEPROM power-cycle harness
+  stubs/               - Arduino/Wire stubs for the native build
+tools/                 - Repository check scripts and the device-free HIL runner
+scripts/               - Version generator and the PlatformIO wrapper
+docs/                  - Architecture, device reference, IDF notes, vendor PDFs
+.github/workflows/     - CI
 platformio.ini
 library.json
+Doxyfile
 README.md
 CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
 AGENTS.md
 ```
 
@@ -175,8 +187,8 @@ startup operation:
   performs more callbacks than its caller-supplied instruction budget.
 - `probe()` is an explicit diagnostic read.
 - The dedicated `ensurePrimaryCellConfiguration()` operation is explicit at the
-  library boundary. A product such as TunnelMonitor may deliberately call it
-  once during application startup; the library lifecycle never calls it. It
+  library boundary. The application may deliberately call it once
+  during its own startup; the library lifecycle never calls it. It
   rejects active/pending job or EEPROM work and is the only API allowed to
   perform multiple transport callbacks before returning.
 - Health counters are observational only. They never suppress a caller-
@@ -244,7 +256,7 @@ Transport callbacks (Config::i2cWrite, i2cWriteRead)
 - `_lastErrorMs` - timestamp of last failed I2C operation
 - `_lastError` - most recent error Status
 - `_consecutiveFailures` - failures since last success (resets on success)
-- `_totalFailures` / `_totalSuccess` - lifetime counters (wrap at max)
+- `_totalFailures` / `_totalSuccess` - counters for the current begin()/end() lifecycle (wrap at max)
 
 ---
 

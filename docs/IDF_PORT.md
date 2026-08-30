@@ -140,14 +140,6 @@ delay therefore needs both upward tick rounding and one entry-phase guard tick.
 
 ## Local verification
 
-```sh
-python scripts/generate_version.py check
-python tools/check_core_timing_guard.py
-python -m platformio test -e native
-python tools/check_cli_contract.py
-python -m platformio run -e esp32s2dev
-python -m platformio run -e esp32s3dev
-```
-
-These checks do not prove hardware wiring, power-loss behavior, backup-cell
+Use the single command list in the root [README](../README.md#verification).
+Those checks do not prove hardware wiring, power-loss behavior, backup-cell
 chemistry, EEPROM endurance, or long-term timing accuracy.

@@ -7,7 +7,19 @@ Thank you for considering contributing to this project!
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/my-feature`
 3. Make your changes
-4. Ensure examples build: `pio run -e esp32s3dev -e esp32s2dev`
+4. Run the same gate CI runs (on Windows use `.\scripts\pio.cmd` in place of
+   `pio`, per `AGENTS.md`):
+
+   ```
+   pio run -e esp32s3dev
+   pio run -e esp32s2dev
+   pio test -e native
+   python scripts/generate_version.py check
+   python tools/check_core_timing_guard.py
+   python tools/check_cli_contract.py
+   python tools/check_docs_contract.py source
+   doxygen Doxyfile
+   ```
 5. Commit with a clear message: `git commit -m "feat: add X"`
 6. Push and open a Pull Request
 

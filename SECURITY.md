@@ -4,14 +4,15 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.4.x   | :white_check_mark: |
+| 3.0.x   | :white_check_mark: |
+| < 3.0   | :x:                |
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability within this library, please follow responsible disclosure:
 
 1. **Do NOT** open a public GitHub issue.
-2. Email the maintainer at: `info@thymos.cz`.
+2. Email the maintainer at: `jan@havelka.dev`.
 3. Include:
    - A description of the vulnerability
    - Steps to reproduce
@@ -22,13 +23,8 @@ We will acknowledge receipt within 48 hours and aim to provide a fix or mitigati
 
 ## Scope
 
-This library is designed for embedded systems. Security considerations include:
-- No dynamic memory allocation in steady state (reduces attack surface)
-- No network code (networking is out of scope for this library)
-- No persistent storage by default (NVS side effects are opt-in)
-
-## Security Best Practices for Users
-
-- Always validate external inputs before passing to `Config`
-- Use hardware watchdogs in production deployments
-- Keep dependencies updated
+This library talks to one I2C device through application-supplied callbacks.
+It performs no dynamic allocation in steady state, contains no network code,
+and writes nothing outside the RV-3032-C7 itself. On-chip EEPROM persistence
+is opt-in through `Config::enableEepromWrites` and is wear-limited; see the
+endurance note in `docs/DEVICE_REFERENCE.md`.

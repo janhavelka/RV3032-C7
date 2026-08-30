@@ -127,7 +127,10 @@ struct StatusFlags {
 struct ValidityFlags {
   bool powerOnReset = false;   ///< PORF: Power-on reset flag
   bool voltageLow = false;     ///< VLF: Voltage low flag
-  bool backupSwitched = false; ///< BSF: Backup switchover flag
+  /// BSF: backup switchover flag. Always reads 0 while switchover is
+  /// disabled (BSM=00/11), and is cleared automatically at POR, so it
+  /// cannot evidence a switchover across a power cycle.
+  bool backupSwitched = false;
   bool timeInvalid = false;    ///< True when PORF or VLF indicates invalid time
 };
 
@@ -1195,6 +1198,13 @@ class RV3032 {
    *       getSetBackupSwitchModeJobResult() for exact evidence.
    * @warning Register proof does not prove retention, electrical topology, or
    *          voltage safety. Follow the vendor backup-source restrictions.
+   * @warning The trickle charger is gated by BSM *and* TCM together: it is
+   *          active only when TCM != 00 AND BSM selects Direct or Level
+   *          (App. Manual Rev. 1.3 section 4.3). Because this job preserves
+   *          the existing TCM, enabling switchover on a part whose C0 still
+   *          holds a non-zero TCM starts charging current into VBACKUP. Read
+   *          getTrickleChargeMode() first and set it to Off before enabling
+   *          switchover for a non-rechargeable primary cell.
    */
   Status startSetBackupSwitchModeJob(
       BackupSwitchMode mode,
@@ -1202,10 +1212,13 @@ class RV3032 {
       uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS);
 
   /**
-   * @brief Read backup switchover mode from the PMU register.
+   * @brief Read backup switchover mode from the active PMU mirror.
    *
    * @param[out] mode Decoded backup mode. Both disabled PMU encodings map to Off.
    * @return Status::Ok() on success, error otherwise
+   * @note Active-only. The RAM mirror can differ from persistent EEPROM until
+   *       the next refresh; use a persistent read job or the primary-cell
+   *       report for durable C0 evidence.
    */
   Status getBackupSwitchMode(BackupSwitchMode& mode);
 
@@ -1227,7 +1240,12 @@ class RV3032 {
   Status setTrickleChargeResistance(TrickleChargeResistance resistance);
   /** @brief Read active PMU trickle-charge resistance. */
   Status getTrickleChargeResistance(TrickleChargeResistance& resistance);
-  /** @brief Cooperatively set active-only backup-switch interrupt enable. */
+  /**
+   * @brief Cooperatively set active-only backup-switch interrupt enable.
+   * @note Clear BSF first with clearBackupSwitchFlag(). Enabling BSIE while
+   *       BSF is already set asserts INT immediately (App. Manual Rev. 1.3
+   *       section 4.14.1).
+   */
   Status setBackupSwitchInterruptEnabled(bool enabled);
   /** @brief Read backup-switch interrupt enable. */
   Status getBackupSwitchInterruptEnabled(bool& enabled);
@@ -1429,9 +1447,10 @@ class RV3032 {
   Status getTemperatureEventConfig(TemperatureEventConfig& config);
   /**
    * @brief Cooperatively set the signed 16-bit raw TREF correction value.
-   * @note One raw step is 1/128 degree C (0.0078125 C). This adjusts the
-   *       temperature reference used by compensation and is not a replacement
-   *       for the device's factory calibration procedure.
+   * @note One raw step is 1/128 degree C (0.0078125 C). This shifts only the
+   *       readable thermometer value in registers 0x0E/0x0F; per the vendor
+   *       Application Manual it has no effect on the RTC's own temperature
+   *       compensation, and is not a replacement for factory calibration.
    * @note Queues wear-limited generic persistence when
    *       Config::enableEepromWrites is true; finish with tick()/pollEeprom().
    */
@@ -1538,8 +1557,10 @@ class RV3032 {
   /**
    * @brief Cooperatively set the RTC STOP bit.
    * @note STOP=1 resets the hundredths counter and 4096 Hz through 1 Hz
-   *       prescalers, stops the calendar, and disables CLKOUT, timer, periodic
-   *       update, EVI filtering, and temperature measurement until restarted.
+   *       prescalers, stops the calendar, timer, periodic update, EVI
+   *       filtering, and temperature measurement until restarted. It stops
+   *       only the XTAL-derived 1024 Hz / 64 Hz / 1 Hz CLKOUT selections;
+   *       32.768 kHz and all HF-mode outputs are unaffected.
    */
   Status setStopEnabled(bool enabled); ///< Active-only STOP update.
   /** @brief Read the RTC STOP bit. */

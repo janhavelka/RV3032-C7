@@ -23,8 +23,7 @@ headers under `include/RV3032/`. Markup errors are treated as build failures.
 
 The Micro Crystal datasheet and Application Manual Rev. 1.3 are retained in
 the repository's
-[vendor-reference directory](https://github.com/janhavelka/RV3032-C7/tree/v3.0.1/docs/reference-pdfs)
-for offline traceability. They remain the authority for electrical limits,
+[vendor-reference directory](reference-pdfs/) for offline traceability. They remain the authority for electrical limits,
 layout, qualification, and application circuits. PDFs are excluded from the
 PlatformIO package.
 

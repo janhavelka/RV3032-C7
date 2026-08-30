@@ -236,9 +236,16 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
     return callbackTimeoutStatus();
   }
   if (read != rxLen) {
-    return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
-                                 "I2C read length mismatch",
-                                 static_cast<int32_t>(read));
+    // On Arduino-ESP32, endTransmission(false) only stages the repeated start;
+    // the address phase actually happens inside requestFrom(). An absent or
+    // unresponsive device therefore surfaces here as read == 0 rather than as
+    // a NACK return above, so it must be mapped to I2C_NACK_ADDR for the
+    // driver to report DEVICE_NOT_FOUND.
+    const bool addressNack = (read == 0U);
+    return RV3032::Status::Error(
+        addressNack ? RV3032::Err::I2C_NACK_ADDR : RV3032::Err::I2C_ERROR,
+        addressNack ? "I2C address NACK" : "I2C read length mismatch",
+        static_cast<int32_t>(read));
   }
 
   for (size_t i = 0; i < rxLen; ++i) {

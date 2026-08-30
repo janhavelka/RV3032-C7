@@ -16,6 +16,8 @@ jobs:
         environment:
           - esp32s3dev
           - esp32s2dev
+          - esp32s3hil
+          - esp32s3hil_persistence
 
     steps:
       - name: Checkout repository
