@@ -253,7 +253,9 @@ Persistent content proof and access-state cleanup proof are independent.
 Typed reports retain the first forward status, first cleanup status, durable
 proof, and partial byte counts even if later C0/Control 1 restoration fails.
 Generic queue batches retain those two first causes separately; cleanup failure
-has semantic `EEPROM_CLEANUP_FAILED` precedence and cancels remaining entries.
+has semantic `EEPROM_CLEANUP_FAILED` precedence. It cancels remaining entries
+only when C0/Control 1 access state is unproven; an auxiliary cleanup failure
+with exact access-state proof retains them for a subsequent poll.
 
 A command callback error does not prove the command failed to reach silicon.
 The driver therefore never retries WRITE_ONE blindly. It performs direct

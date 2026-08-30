@@ -259,8 +259,12 @@ bool RV3032::isOrdinaryJobBusy() const {
 }
 
 Status RV3032::getJobStatus() const {
-  if (isJobBusy()) {
+  if (isOrdinaryJobBusy()) {
     return Status::Error(Err::IN_PROGRESS, "Job in progress");
+  }
+  if (_eeprom.persistent.state != EepromState::IDLE) {
+    return Status::Error(Err::BUSY,
+                         "Generic EEPROM work uses its separate status");
   }
   return _job.lastStatus;
 }
@@ -516,6 +520,20 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
       if (_job.activeKind == JobKind::PERSISTENT_ACCESS_RECOVERY) {
         if (_job.configurationReport.operationStatus.ok()) {
           _job.configurationReport.operationStatus = terminal;
+        }
+        if (_job.recoveryPmuVerified &&
+            _job.recoveryControl1Verified) {
+          // C0 and EERD are already proven. The remaining activation wait is
+          // electrical settling, so an exclusive-deadline timeout must not
+          // turn valid access-state evidence into a cleanup failure.
+          _job.configurationReport.finalState =
+              ConfigurationFinalState::REQUESTED_VERIFIED;
+          _persistentAccessStateUnproven = false;
+          const Status provenTerminal =
+              !_job.configurationReport.cleanupStatus.ok()
+                  ? _job.configurationReport.cleanupStatus
+                  : _job.configurationReport.operationStatus;
+          return finishJob(provenTerminal);
         }
         if (!_job.configurationReport.mutationAttempted) {
           _job.configurationReport.finalState =
@@ -1875,11 +1893,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         }
         _job.configurationReport.finalState =
             ConfigurationFinalState::REQUESTED_VERIFIED;
+        _persistentAccessStateUnproven = false;
         if (_job.backupActivationRequired) {
           _job.state = JobState::RECOVERY_WAIT_ACTIVATION;
           return configurationInProgress;
         }
-        _persistentAccessStateUnproven = false;
         return finishJob(!_job.configurationReport.cleanupStatus.ok()
             ? _job.configurationReport.cleanupStatus
             : _job.configurationReport.operationStatus);
@@ -2035,8 +2053,7 @@ Status RV3032::updateRegisterSingle(
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
                          "Persistent access state requires recovery");
   }
-  if (isJobBusy() || _eeprom.persistent.state != EepromState::IDLE ||
-      (!persist && _eeprom.queueCount > 0)) {
+  if (isJobBusy() || (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
@@ -2123,8 +2140,7 @@ Status RV3032::updateRegisterBlock(uint8_t reg, uint8_t length,
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
                          "Persistent access state requires recovery");
   }
-  if (isJobBusy() || _eeprom.persistent.state != EepromState::IDLE ||
-      (!persist && _eeprom.queueCount > 0)) {
+  if (isJobBusy() || (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
@@ -3080,6 +3096,13 @@ Status RV3032::clearPeriodicUpdateFlag() {
 // ===== Power Management / Backup Operations =====
 
 Status RV3032::startSetBackupSwitchModeJob(
+    BackupSwitchMode mode, uint32_t nowMs, uint32_t operationTimeoutMs) {
+  return startSetBackupSwitchModeJobWithChargePolicy(
+      mode, nowMs, operationTimeoutMs,
+      BackupChargePolicy::REQUIRE_CHARGER_OFF);
+}
+
+Status RV3032::startSetBackupSwitchModeJobWithChargePolicy(
     BackupSwitchMode mode, uint32_t nowMs, uint32_t operationTimeoutMs,
     BackupChargePolicy chargePolicy) {
   if (!_initialized) {
@@ -3120,8 +3143,7 @@ Status RV3032::startSetBackupSwitchModeJob(
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
                          "Persistent access state requires recovery");
   }
-  if (isJobBusy() || _eeprom.persistent.state != EepromState::IDLE ||
-      (!persist && _eeprom.queueCount > 0)) {
+  if (isJobBusy() || (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
@@ -3166,6 +3188,12 @@ Status RV3032::getBackupSwitchMode(BackupSwitchMode& mode) {
 }
 
 Status RV3032::setTrickleChargeMode(
+    TrickleChargeMode mode) {
+  return setTrickleChargeModeWithChargePolicy(
+      mode, BackupChargePolicy::REQUIRE_CHARGER_OFF);
+}
+
+Status RV3032::setTrickleChargeModeWithChargePolicy(
     TrickleChargeMode mode, BackupChargePolicy chargePolicy) {
   const uint8_t raw = static_cast<uint8_t>(mode);
   if (raw > 3) {
@@ -3575,8 +3603,7 @@ Status RV3032::setClkoutFrequency(ClkoutFrequency freq) {
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
                          "Persistent access state requires recovery");
   }
-  if (isJobBusy() || _eeprom.persistent.state != EepromState::IDLE ||
-      (!persist && _eeprom.queueCount > 0)) {
+  if (isJobBusy() || (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
@@ -3631,8 +3658,7 @@ Status RV3032::setClkoutConfig(const ClkoutConfig& config) {
     return Status::Error(Err::EEPROM_CLEANUP_FAILED,
                          "Persistent access state requires recovery");
   }
-  if (isJobBusy() || _eeprom.persistent.state != EepromState::IDLE ||
-      (!persist && _eeprom.queueCount > 0)) {
+  if (isJobBusy() || (!persist && _eeprom.queueCount > 0)) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
   _job = JobOp{};
@@ -5015,7 +5041,7 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
     if (!st.ok() && op.cleanupStatus.ok()) {
       op.cleanupStatus = st;
     }
-    if (!proofStillPossible) op.cleanupProofPossible = false;
+    if (!proofStillPossible) op.accessProofPossible = false;
   };
   auto finishOperation = [&](const Status& st) -> Status {
     rememberOperationFailure(st);
@@ -5072,6 +5098,12 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
         return finishOperation(st);
       }
       op.control1Valid = true;
+      if ((op.control1 & cmd::CONTROL1_EERD_MASK) != 0) {
+        // Merely observing a leaked access mode creates a cleanup obligation.
+        // Otherwise a deadline before VERIFY_EERD would report a plain timeout
+        // while leaving the known EERD=1 state unreported.
+        op.cleanupRequired = true;
+      }
       op.state = EepromState::ENABLE_EERD;
       return inProgress;
     }
@@ -5542,7 +5574,10 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
       uint8_t temp = 0;
       Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
       if (!st.ok()) {
-        rememberCleanupFailure(st, false);
+        // EEbusy gates EEPROM commands, not the ordinary C0/Control 1 restore
+        // that follows. Preserve the read failure, but allow exact final
+        // readback to prove the access state.
+        rememberCleanupFailure(st, true);
         beginActiveRestore();
         return inProgress;
       }
@@ -5566,11 +5601,11 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
       uint8_t value = 0;
       Status st = readPersistent(op.address, &value, 1);
       if (!st.ok()) {
-        rememberCleanupFailure(st, false);
+        rememberCleanupFailure(st, true);
       } else if (value != op.data[0]) {
         rememberCleanupFailure(Status::Error(
             Err::EEPROM_VERIFY_FAILED,
-            "Selected active mirror cleanup verification failed"), false);
+            "Selected active mirror cleanup verification failed"), true);
       }
       op.state = EepromState::RESTORE_ACTIVE;
       return inProgress;
@@ -5642,7 +5677,7 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
         rememberCleanupFailure(Status::Error(
             Err::EEPROM_VERIFY_FAILED,
             "Control 1 cleanup verification failed"), false);
-      } else if (op.cleanupProofPossible) {
+      } else if (op.accessProofPossible) {
         op.readResult.cleanupVerified = true;
         op.writeReport.cleanupVerified = true;
         op.cleanupRequired = false;

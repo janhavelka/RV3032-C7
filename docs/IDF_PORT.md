@@ -72,7 +72,7 @@ Admission methods perform no transfer. The I2C owner advances work explicitly:
 const uint32_t now = idfNowMs(nullptr);
 uint8_t used = 0;
 RV3032::Status pollStatus;
-if (rtc.isJobBusy()) {
+if (rtc.isOrdinaryJobBusy()) {
   pollStatus = rtc.pollJob(now, 1, used);
 } else {
   pollStatus = rtc.pollEeprom(now, 1, used);

@@ -86,6 +86,15 @@ def source_check() -> int:
             errors.append(f"library.json export.exclude missing {pattern!r}")
     if "AUDIT.md" in excludes:
         errors.append("library.json retains stale AUDIT.md exclude")
+    for probe in (
+        ".github/workflows/ci.yml",
+        "docs/doxygen/index.html",
+        "RV3032-C7.tar.gz",
+        "RV3032-C7.tgz",
+        "RV3032-C7.zip",
+    ):
+        if not forbidden_package_path(probe):
+            errors.append(f"package path policy permits excluded probe: {probe}")
 
     doxyfile = (ROOT / "Doxyfile").read_text(encoding="utf-8", errors="replace")
     for setting, value in (
@@ -135,6 +144,10 @@ def member_candidates(name: str) -> set[str]:
 
 
 def forbidden_package_path(path: str) -> bool:
+    if any(fnmatch.fnmatchcase(path, pattern)
+           for pattern in REQUIRED_EXPORT_EXCLUDES):
+        return True
+    # Defense in depth for repository metadata and broad generated artifacts.
     if path.endswith(".pdf") or fnmatch.fnmatch(path, "docs/CODE_AUDIT*.md"):
         return True
     if path.startswith((

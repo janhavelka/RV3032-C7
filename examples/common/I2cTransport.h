@@ -23,10 +23,15 @@ namespace transport {
 static constexpr int32_t I2C_DETAIL_INVALID_ARGUMENT = -1;
 static constexpr int32_t I2C_DETAIL_INVALID_TIMEOUT = -2;
 static constexpr int32_t I2C_DETAIL_SHORT_STAGING = -3;
-// Arduino-ESP32 accepts no Wire buffer smaller than its 32-byte hardware FIFO.
-// The RV3032 driver's largest transfer is smaller, so this conservative cap
-// remains valid even if the application reduces Wire's default 128-byte buffer.
+// Match the selected Arduino-ESP32 Wire buffer so the adapter does not reject
+// valid RV3032 register bursts. Keep a conservative fallback for cores that do
+// not publish their capacity.
+#if defined(I2C_BUFFER_LENGTH)
+static constexpr size_t MAX_TRANSFER_BYTES =
+    static_cast<size_t>(I2C_BUFFER_LENGTH);
+#else
 static constexpr size_t MAX_TRANSFER_BYTES = 32U;
+#endif
 
 class ScopedWireTimeout {
  public:

@@ -13,12 +13,18 @@ Thank you for considering contributing to this project!
    ```
    pio run -e esp32s3dev
    pio run -e esp32s2dev
+   pio run -e esp32s3hil
+   pio run -e esp32s3hil_persistence
    pio test -e native
    python scripts/generate_version.py check
    python tools/check_portability.py
    python tools/check_abi.py
+   python -S tools/hil_cli_runner.py --parser-self-test
+   python -S tools/hil_cli_runner.py --dry-run
    python tools/check_package.py source
    doxygen Doxyfile
+   pio pkg pack -o RV3032-C7.tar.gz .
+   python tools/check_package.py package RV3032-C7.tar.gz
    ```
 5. Commit with a clear message: `git commit -m "feat: add X"`
 6. Push and open a Pull Request

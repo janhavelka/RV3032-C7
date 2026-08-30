@@ -439,7 +439,7 @@ struct SettingsSnapshot {
   uint32_t eepromWriteCount = 0;               ///< Successful generic queue items since begin()
   uint32_t eepromWriteFailures = 0;            ///< Failed generic queue items since begin()
   uint8_t eepromQueueDepth = 0;                ///< Pending EEPROM queue depth
-  bool jobBusy = false;                        ///< Cooperative job currently active
+  bool jobBusy = false;                        ///< Ordinary or active generic EEPROM work
   bool primaryCellEnsureAttempted = false;     ///< Ensure latch for this lifecycle
   uint32_t lastOkMs = 0;                       ///< Timestamp of last successful tracked callback
   uint32_t lastErrorMs = 0;                    ///< Timestamp of last failed tracked callback
@@ -657,7 +657,8 @@ class RV3032 {
    * @brief Check whether generic configuration persistence is active or queued.
    * 
    * @return true if the generic EEPROM engine is active or queue entries are pending
-   * @note Explicit configuration/user EEPROM jobs use isJobBusy() and pollJob().
+   * @note Explicit configuration/user EEPROM jobs use isOrdinaryJobBusy()
+   *       and pollJob().
    */
   bool isEepromBusy() const;
 
@@ -711,9 +712,10 @@ class RV3032 {
    * @note An ordinary item failure is returned immediately, retains the
    *       remaining queue, and remains the batch status while later items are
    *       advanced by subsequent calls.
-   * @warning A terminal EEPROM_CLEANUP_FAILED cancels remaining queued items;
-   *          no later item is allowed to run against unverified C0/Control 1
-   *          state. Re-admission is an application recovery-policy decision.
+   * @warning EEPROM_CLEANUP_FAILED cancels remaining queued items only when
+   *          C0/Control 1 access state is unproven. An auxiliary cleanup error
+   *          with exact access-state proof remains observable at the item
+   *          boundary and retains later items for a subsequent poll.
    */
   Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
 
@@ -731,9 +733,22 @@ class RV3032 {
   bool isJobBusy() const;
 
   /**
+   * @brief Check whether an ordinary budgeted job is active.
+   *
+   * @return true only for work advanced through pollJob().
+   * @note Use this predicate to select the polling surface. isJobBusy()
+   *       retains its legacy combined behavior and also reports an active
+   *       generic EEPROM item; isEepromBusy() reports generic active or queued
+   *       work.
+   */
+  bool isOrdinaryJobBusy() const;
+
+  /**
    * @brief Get the current or last shared job status.
    *
-   * @return IN_PROGRESS while a job is active, otherwise the last terminal job status.
+   * @return IN_PROGRESS while an ordinary job is active, BUSY while an active
+   *         generic EEPROM item owns its separate polling surface, otherwise
+   *         the last terminal ordinary-job status.
    */
   Status getJobStatus() const;
 
@@ -984,8 +999,9 @@ class RV3032 {
    * @note The job waits for EEbusy to clear, writes and verifies desiredC0,
    *       clears and verifies EERD while preserving every other implemented
    *       Control 1 bit, then honors the backup activation settle. It never
-   *       issues an EEPROM command. Only complete proof clears
-   *       SettingsSnapshot::persistentAccessStateUnproven.
+   *       issues an EEPROM command. Exact C0/Control 1 proof clears
+   *       SettingsSnapshot::persistentAccessStateUnproven; a later settle
+   *       timeout remains an operation timeout without re-latching it.
    */
   Status startPersistentAccessStateRecoveryJob(
       uint8_t desiredC0,
@@ -1229,9 +1245,6 @@ class RV3032 {
    * @param nowMs Current monotonic time.
    * @param operationTimeoutMs Exclusive whole-operation deadline. Admission
    *        requires `4 * i2cTimeoutMs + activationMs + 1`, through 1000 ms.
-   * @param chargePolicy Safe default rejects Direct/Level when the observed
-   *        TCM field is nonzero. ALLOW_BACKUP_CHARGING is an explicit caller
-   *        assertion that charging the installed backup source is intended.
    * @return IN_PROGRESS when admitted or a zero-I/O admission error.
    * @note Requires BSIE=0, preserves all implemented non-BSM PMU bits, issues
    *       at most one PMU write, verifies active readback, then waits 2 ms for
@@ -1248,15 +1261,31 @@ class RV3032 {
    * @warning The trickle charger is gated by BSM *and* TCM together: it is
    *          active only when TCM != 00 AND BSM selects Direct or Level
    *          (App. Manual Rev. 1.3 section 4.3). Because this job preserves
-   *          the existing TCM, ALLOW_BACKUP_CHARGING may start charging current
-   *          into VBACKUP. Use it only with a compatible rechargeable source.
+   *          the existing TCM, the safe legacy method rejects a nonzero TCM.
+   *          Use startSetBackupSwitchModeJobWithChargePolicy() only with a
+   *          compatible rechargeable source.
    */
   Status startSetBackupSwitchModeJob(
       BackupSwitchMode mode,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS,
-      BackupChargePolicy chargePolicy =
-          BackupChargePolicy::REQUIRE_CHARGER_OFF);
+      uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS);
+
+  /**
+   * @brief Start backup-switchover configuration with explicit charge policy.
+   * @param mode Requested backup-switch mode.
+   * @param nowMs Current monotonic time.
+   * @param operationTimeoutMs Exclusive whole-operation deadline.
+   * @param chargePolicy ALLOW_BACKUP_CHARGING explicitly confirms that the
+   *        installed backup source may be charged; REQUIRE_CHARGER_OFF keeps
+   *        the safe legacy behavior.
+   * @return Same contract and result surface as startSetBackupSwitchModeJob().
+   * @note This distinct name preserves the exact legacy member-function type.
+   */
+  Status startSetBackupSwitchModeJobWithChargePolicy(
+      BackupSwitchMode mode,
+      uint32_t nowMs,
+      uint32_t operationTimeoutMs,
+      BackupChargePolicy chargePolicy);
 
   /**
    * @brief Read backup switchover mode from the active PMU mirror.
@@ -1272,17 +1301,22 @@ class RV3032 {
   /**
    * @brief Cooperatively set PMU trickle-charge voltage mode.
    * @param mode Requested voltage mode; CHARGER_DISABLED clears TCM.
-   * @param chargePolicy Safe default rejects a nonzero mode when the observed
-   *        BSM is Direct/Level. ALLOW_BACKUP_CHARGING explicitly confirms a
-   *        compatible rechargeable backup source.
    * @note The electrical meaning depends on BSM and supply topology. When
    *       Config::enableEepromWrites is true, this queues a wear-limited C0
    *       update that must be advanced through tick()/pollEeprom().
    */
   Status setTrickleChargeMode(
-      TrickleChargeMode mode,
-      BackupChargePolicy chargePolicy =
-          BackupChargePolicy::REQUIRE_CHARGER_OFF);
+      TrickleChargeMode mode);
+  /**
+   * @brief Set TCM with an explicit backup-charge policy.
+   * @param mode Requested voltage mode.
+   * @param chargePolicy ALLOW_BACKUP_CHARGING explicitly confirms a compatible
+   *        rechargeable source; REQUIRE_CHARGER_OFF retains the safe default.
+   * @return Same cooperative contract as setTrickleChargeMode().
+   * @note This distinct name preserves the exact legacy member-function type.
+   */
+  Status setTrickleChargeModeWithChargePolicy(
+      TrickleChargeMode mode, BackupChargePolicy chargePolicy);
   /** @brief Read active PMU trickle-charge voltage mode. */
   Status getTrickleChargeMode(TrickleChargeMode& mode);
   /**
@@ -2076,7 +2110,7 @@ class RV3032 {
     bool writeMode = false;
     bool writeAttempted = false;
     bool cleanupRequired = false;
-    bool cleanupProofPossible = true;
+    bool accessProofPossible = true;
     bool queueOwned = false;
     uint8_t data[kJobUserRamBufferSize] = {0};
     PersistentReadResult readResult{};
@@ -2271,7 +2305,6 @@ class RV3032 {
   static void exposePersistentEvidence(PersistentOp& op);
   Status finishJob(const Status& status);
   bool workIdle() const;
-  bool isOrdinaryJobBusy() const;
 
   // Health tracking (called only by tracked transport wrappers)
   Status _updateHealth(const Status& st);

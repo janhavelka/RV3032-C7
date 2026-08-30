@@ -137,8 +137,10 @@ The wait state performs no callback. Software register proof is not physical
 retention, voltage/topology safety, or measured board timing evidence.
 The default `BackupChargePolicy::REQUIRE_CHARGER_OFF` rejects Direct/Level when
 TCM is nonzero. Preserving it requires the caller's explicit
-`ALLOW_BACKUP_CHARGING` assertion for a rechargeable backup source. The same
-safe default applies when setting nonzero TCM over an enabled BSM.
+`startSetBackupSwitchModeJobWithChargePolicy(...,
+ALLOW_BACKUP_CHARGING)` assertion for a rechargeable backup source. The same
+safe default applies when setting nonzero TCM over an enabled BSM; explicit
+intent uses `setTrickleChargeModeWithChargePolicy()`.
 
 Live register reconfiguration uses explicit read-only quiescence guards. Timer
 requires TIE=0, alarm updates AIE=0, EVI updates and EVI timestamp reset EIE=0,
@@ -265,9 +267,10 @@ Typed persistent reports keep `operationStatus`, `cleanupStatus`, durable
 content proof, and partial byte counts separate. Directly established proof is
 not erased by a later C0/Control 1 cleanup failure. Generic queue batches latch
 the first forward and cleanup statuses into durable settings fields before
-clearing each item. Cleanup failure has terminal semantic precedence, cancels
-remaining entries, and leaves both exact causes observable until a new batch,
-`begin()`, or `end()`.
+clearing each item. Cleanup failure has terminal semantic precedence and leaves
+both exact causes observable until a new batch, `begin()`, or `end()`. It
+cancels remaining entries only when C0/Control 1 access state is unproven;
+auxiliary cleanup errors with exact access-state proof retain later items.
 
 Every budgeted queue loop refreshes elapsed time between callbacks (or charges
 the configured callback bound when no clock hook exists), so a larger budget
@@ -275,8 +278,9 @@ cannot cross a mutation cutoff and start WRITE_ONE. The configured EEPROM
 timeout is the busy-poll window after the mandatory 10 ms write settle. An
 ordinary item failure pauses at its boundary and remains the first batch
 operation error
-while later queued items can be advanced; cleanup failure instead cancels the
-remaining queue because safe access state is unproven.
+while later queued items can be advanced. An auxiliary cleanup failure behaves
+the same after exact access-state proof. Cleanup failure cancels the remaining
+queue only when safe C0/Control 1 state is unproven.
 
 The final cleanup reserve is derived as
 `250 ms + 6 * i2cTimeoutMs + 10 ms`. A write-one cutoff additionally reserves
@@ -292,8 +296,10 @@ primary ensure cleanup that lacks C0/Control 1 proof sets the same latch. A
 fully proven cleanup remains proven even if a later electrical activation
 settle times out. The explicit cooperative
 `startPersistentAccessStateRecoveryJob()` waits for EEbusy, writes and verifies
-the caller-selected implemented C0, clears and verifies EERD, and honors BSM
-activation settle before clearing the latch. It issues no EEPROM command.
+the caller-selected implemented C0, and clears and verifies EERD. That exact
+access-state proof clears the latch; the job then honors BSM activation settle
+before reporting success. A settle deadline returns `TIMEOUT` without
+re-latching the proven access state. It issues no EEPROM command.
 
 ## Primary-cell provisioning boundary
 

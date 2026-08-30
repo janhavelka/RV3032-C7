@@ -5,6 +5,12 @@
 
 #include "Arduino.h"
 
+// Arduino-ESP32 3.3.11 default from Wire.h. The example adapter deliberately
+// consumes this public core capacity when it is available.
+#ifndef I2C_BUFFER_LENGTH
+#define I2C_BUFFER_LENGTH 128U
+#endif
+
 class TwoWire {
  public:
   enum class Call : uint8_t {

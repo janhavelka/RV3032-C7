@@ -96,7 +96,7 @@ void loop() {
       persistence.code != RV3032::Err::BUSY) {
     handleRtcPersistenceFailure(persistence);
   }
-  if (rtc.isJobBusy()) {
+  if (rtc.isOrdinaryJobBusy()) {
     uint8_t used = 0;
     RV3032::Status job = rtc.pollJob(now, 1, used);
     handleRtcJobProgress(job);          // at most one library callback
@@ -257,9 +257,12 @@ it is rejected with zero I/O until recovery, and an ensure that cannot prove
 its own C0/Control 1 cleanup sets the latch.
 
 The generic queue status/count/depth surfaces do not describe explicit typed
-persistent jobs. Those jobs use `isJobBusy()`, `pollJob()`, and their typed
-result getters. The generic queue has separate fixed state, so advancing it
-never erases or replaces the last ordinary job status or result.
+persistent jobs. Those jobs use `isOrdinaryJobBusy()`, `pollJob()`, and their
+typed result getters. Legacy `isJobBusy()` remains a combined active-work
+predicate, while `getJobStatus()` reports `BUSY` when active generic EEPROM
+work owns the separate polling surface. The generic queue has separate fixed
+state, so advancing it never erases or replaces the last ordinary job status
+or result.
 
 `getEepromHardwareFlags()` reads the chip's EEbusy and sticky EEF bits; these
 are distinct from the library queue state returned by `isEepromBusy()`.
@@ -343,9 +346,12 @@ mutation, writes at most once, reconciles by exact implemented-bit readback,
 and cannot report terminal success before the activation not-before boundary.
 The safe default rejects Direct/Level if the observed TCM field is nonzero.
 Boards with a compatible rechargeable source must state that intent explicitly
-with `BackupChargePolicy::ALLOW_BACKUP_CHARGING`; this may energize charging.
+with `startSetBackupSwitchModeJobWithChargePolicy(...,
+BackupChargePolicy::ALLOW_BACKUP_CHARGING)`; this may energize charging.
 The same safe default applies to `setTrickleChargeMode(nonzero)` when BSM is
-already Direct/Level, so charging cannot be enabled through the inverse update.
+already Direct/Level. Use `setTrickleChargeModeWithChargePolicy()` for the
+corresponding explicit rechargeable-source assertion, so charging cannot be
+enabled accidentally through the inverse update.
 Register proof does not prove physical retention, backup voltage/topology
 safety, or electrical timing on a real board.
 
@@ -561,7 +567,7 @@ python tools/hil_cli_runner.py --dry-run
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
 authorization. The latest retained physical evidence is summarized in the
-[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reports/HIL_SUMMARY.md),
+<a href="docs/reports/HIL_SUMMARY.md">HIL summary</a>,
 which is also included in the release package.
 
 After such fresh authorization, `--destructive-setup` additionally requires

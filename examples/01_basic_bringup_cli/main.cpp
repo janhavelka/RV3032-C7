@@ -879,9 +879,9 @@ static void cmd_clkout(const String& args) {
     return;
   }
   RV3032::Status st = g_rtc.setClkoutEnabled(enable);
-  // Must match printConfigurationReport()'s dispatch name, otherwise the typed
-  // ConfigurationJobReport evidence is silently dropped for this command.
-  const char* operationName = "CLKOUT configuration";
+  // This single-register update has terminal Status but does not own the
+  // staged CLKOUT ConfigurationJobReport used by setClkoutConfig().
+  const char* operationName = enable ? "CLKOUT enable" : "CLKOUT disable";
   if (!operationAccepted(operationName, st)) {
     LOGE("setClkoutEnabled() failed: %s", st.msg);
     return;

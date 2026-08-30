@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fresh audit verification preserved the exact legacy member-function types
+  for backup-switch and trickle-charge setters while exposing explicit charge
+  policy through distinctly named methods.
+- Ordinary-job polling now has an explicit public predicate, so owner loops do
+  not select `pollJob()` while generic EEPROM work owns its separate surface.
+- Pre-existing EERD is a cleanup obligation as soon as it is observed; exact
+  C0/Control 1 proof is no longer discarded by auxiliary cleanup failures or
+  by a later recovery activation-settle timeout.
+- The ESP32 Wire adapter now accepts the selected core's published buffer
+  capacity, and package validation directly enforces every declared export
+  exclusion.
+- CLI, transport, package, and cooperative-edge regression coverage plus the
+  contributor verification gate now match the maintained contracts.
+
 ## [3.1.0] - 2026-08-30
 
 ### Added
@@ -28,12 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   700 ms so they are executable across the accepted callback-timeout range.
 - EEPROM write mutation cutoffs reserve the full non-replayable post-WRITE_ONE
   busy, two-read durability proof, access cleanup, and settle chain.
-- `isJobBusy()` retains combined active-work behavior while ordinary and
-  generic persistence engines use independent fixed internal state.
+- `isJobBusy()` retains combined active-work behavior; the public
+  `isOrdinaryJobBusy()` selects `pollJob()` while generic persistence uses its
+  independent fixed state and polling surface.
 - Repository checks are focused semantic portability, ABI/version, and package
   validators instead of source-order and exact-prose archaeology.
-- The reference transport is explicitly ESP32-S2/S3 scoped, uses a conservative
-  32-byte Wire bound, and discards partial staging before address-only cleanup.
+- The reference transport is explicitly ESP32-S2/S3 scoped, uses the selected
+  core's published Wire buffer capacity with a conservative fallback, and
+  discards partial staging before address-only cleanup.
 
 ### Fixed
 
