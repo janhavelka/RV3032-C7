@@ -135,6 +135,10 @@ completion; disabled-to-Level cannot complete before 10 ms. Admission requires
 the exclusive interval `4 * i2cTimeoutMs + activationMs + 1`, through 1000 ms.
 The wait state performs no callback. Software register proof is not physical
 retention, voltage/topology safety, or measured board timing evidence.
+The default `BackupChargePolicy::REQUIRE_CHARGER_OFF` rejects Direct/Level when
+TCM is nonzero. Preserving it requires the caller's explicit
+`ALLOW_BACKUP_CHARGING` assertion for a rechargeable backup source. The same
+safe default applies when setting nonzero TCM over an enabled BSM.
 
 Live register reconfiguration uses explicit read-only quiescence guards. Timer
 requires TIE=0, alarm updates AIE=0, EVI updates and EVI timestamp reset EIE=0,
@@ -152,7 +156,8 @@ does not implicitly clear an already latched UF.
 At a hard persistence deadline, no new callback is started. If cleanup remains
 unverified, the terminal result is `EEPROM_CLEANUP_FAILED`; queued persistence
 items are cancelled rather than executed against uncertain C0/Control 1 state.
-The application owns any later recovery and re-admission.
+The application chooses the intended C0 and explicitly admits the bounded
+recovery job before re-admitting persistence.
 
 Control register read-modify-write operations, flag clears, timer programming,
 calendar composites, staged CLKOUT/temperature configuration, large RAM writes,
@@ -245,9 +250,9 @@ The shared persistence protocol:
    WRITE_ONE (`0x21`);
 6. waits from command-callback completion, checks busy/EEF, and directly proves
    the persistent byte again even when EEF reports a write failure;
-7. restores and verifies the queued intended active C0..C5 mirror, active C0
-   access state, and the exact original Control 1 value, then observes the BSM
-   settle interval.
+7. restores and verifies the queued intended active C0..C5 mirror and active
+   C0 access state, clears and verifies EERD while preserving all other
+   implemented Control 1 bits, then observes the BSM settle interval.
 
 Callback failure after a command write is ambiguous, so the engine continues
 with direct proof and never retries the wear-limited command. Generic paths do
@@ -273,10 +278,22 @@ operation error
 while later queued items can be advanced; cleanup failure instead cancels the
 remaining queue because safe access state is unproven.
 
-The generic cleanup reserve is derived, not guessed:
-`250 ms + 6 * i2cTimeoutMs + 10 ms`. Typed starts require that reserve plus one
-forward callback timeout and one millisecond. The six callbacks restore and
-verify selected active state, active C0, and Control 1.
+The final cleanup reserve is derived as
+`250 ms + 6 * i2cTimeoutMs + 10 ms`. A write-one cutoff additionally reserves
+the 10 ms write settle, the configured EEbusy window, twelve fixed proof
+callbacks, two 25 ms READ_ONE poll windows, and that complete final cleanup.
+This prevents a dispatched wear-limited command from being stranded mid-proof.
+
+Generic persistence owns a `PersistentOp` separate from the ordinary job's
+`PersistentOp`; a queue poll cannot reset a completed ordinary result. Any
+abandoned cleanup sets `persistentAccessStateUnproven`, cancels queued work,
+and blocks new persistence plus the synchronous primary ensure operation. A
+primary ensure cleanup that lacks C0/Control 1 proof sets the same latch. A
+fully proven cleanup remains proven even if a later electrical activation
+settle times out. The explicit cooperative
+`startPersistentAccessStateRecoveryJob()` waits for EEbusy, writes and verifies
+the caller-selected implemented C0, clears and verifies EERD, and honors BSM
+activation settle before clearing the latch. It issues no EEPROM command.
 
 ## Primary-cell provisioning boundary
 
@@ -285,6 +302,8 @@ exception. It exists for a serialized application I2C owner during startup and
 is never called by `begin()`, `recover()`, `tick()`, or another library API.
 
 Admission requires `nowMs`, `waitMs`, and no active/pending job or EEPROM work.
+An unproven persistent-access latch is a zero-I/O rejection until the explicit
+recovery job succeeds.
 The same successful begin/end lifecycle permits only one admitted attempt.
 Rejected preconditions do not consume the latch.
 

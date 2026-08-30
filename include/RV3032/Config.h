@@ -26,6 +26,12 @@ enum class BackupSwitchMode : uint8_t {
   Direct = 2   ///< Direct mode (raw BSM=01); requires VDD to remain above VBACKUP.
 };
 
+/** @brief Explicit permission for a PMU change to energize backup charging. */
+enum class BackupChargePolicy : uint8_t {
+  REQUIRE_CHARGER_OFF = 0, ///< Reject a resulting enabled-BSM/nonzero-TCM pair.
+  ALLOW_BACKUP_CHARGING = 1, ///< Caller confirms charging is intended.
+};
+
 /// @brief I2C write callback signature.
 /// @note Invocation is synchronous. The buffer is borrowed only for the
 ///       callback duration and Status::msg must have static storage. Legal
@@ -136,15 +142,24 @@ struct Config {
   bool enableEepromWrites = false;
 
   /// @brief EEPROM busy-poll window after the mandatory write settle (default: 100ms)
-  /// @note Valid range is 10..250 ms when generic persistence is enabled. The
-  ///       required 10 ms post-WRITE_ONE wait is additional and is measured
-  ///       from transport-callback completion.
+  /// @note Valid range is 10..250 ms when generic persistence is enabled or
+  ///       persistent-access recovery is used. The required 10 ms
+  ///       post-WRITE_ONE wait is additional and is measured from
+  ///       transport-callback completion.
   uint32_t eepromTimeoutMs = 100;
 
   /// @brief Consecutive failure threshold before transitioning to OFFLINE
   /// @note Default: 5. DEGRADED = [1, offlineThreshold-1], OFFLINE >= offlineThreshold.
   ///       Values below 1 are rejected by begin().
   uint8_t offlineThreshold = 5;
+
+  /// @brief Per-callback timeout used only by primary-cell ensure (default: 5ms)
+  /// @note Valid range is 1..5 ms. Kept as a trailing field so existing
+  ///       positional aggregate initializers retain their meaning. The
+  ///       dedicated synchronous primary-cell operation has a fixed one-second
+  ///       whole-operation bound and sizes its cleanup reserve for this
+  ///       independent transfer bound.
+  uint32_t primaryCellI2cTimeoutMs = 5;
 };
 
 }  // namespace RV3032

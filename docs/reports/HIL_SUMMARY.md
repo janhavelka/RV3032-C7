@@ -7,8 +7,9 @@ transcripts are intentionally not committed.
 ## Latest retained campaign
 
 The latest physical campaign ran on 2026-07-31 against the v3.0.0 integration
-surface. This evidence predates v3.0.1, which changed only documentation,
-packaging, CI, and the HIL harness.
+surface. It does not cover the driver, API, tooling, or harness changes made in
+v3.0.1 and later; current device-free verification must be reported separately
+from this retained physical evidence.
 
 ### Fixture
 

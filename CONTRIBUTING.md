@@ -15,9 +15,9 @@ Thank you for considering contributing to this project!
    pio run -e esp32s2dev
    pio test -e native
    python scripts/generate_version.py check
-   python tools/check_core_timing_guard.py
-   python tools/check_cli_contract.py
-   python tools/check_docs_contract.py source
+   python tools/check_portability.py
+   python tools/check_abi.py
+   python tools/check_package.py source
    doxygen Doxyfile
    ```
 5. Commit with a clear message: `git commit -m "feat: add X"`

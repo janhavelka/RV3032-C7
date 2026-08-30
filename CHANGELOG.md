@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-30
+
+### Added
+
+- An explicit `BackupChargePolicy` makes rechargeable-backup intent mandatory
+  before either a BSM or TCM setter may produce an enabled charging pair.
+- A cached `persistentAccessStateUnproven` setting and bounded cooperative
+  persistent-access recovery job that proves caller-selected C0 and cleared
+  EERD state without issuing an EEPROM command.
+- A separate 1..5 ms `primaryCellI2cTimeoutMs` configuration field, plus native
+  coverage for audit regressions, no-clock default admission, cleanup recovery,
+  fake-password tripwires, and Wire short-staging cleanup.
+
+### Changed
+
+- Generic EEPROM queue work now owns fixed persistence state independent of the
+  ordinary job record, preserving completed job status and typed results.
+- Default snapshot and verified calendar-set deadlines are now 200 ms and
+  700 ms so they are executable across the accepted callback-timeout range.
+- EEPROM write mutation cutoffs reserve the full non-replayable post-WRITE_ONE
+  busy, two-read durability proof, access cleanup, and settle chain.
+- `isJobBusy()` retains combined active-work behavior while ordinary and
+  generic persistence engines use independent fixed internal state.
+- Repository checks are focused semantic portability, ABI/version, and package
+  validators instead of source-order and exact-prose archaeology.
+- The reference transport is explicitly ESP32-S2/S3 scoped, uses a conservative
+  32-byte Wire bound, and discards partial staging before address-only cleanup.
+
+### Fixed
+
+- Blocking mutators can no longer interleave with cooperative jobs; verified
+  calendar readback now validates weekday rollover; persistent ranges exclude
+  password bytes; alarm reset-date fallback and generic EEPROM poll caps match
+  the documented silicon/configuration behavior.
+- Fixed-layout build-time parsing removes `sscanf`, all public error ordinals
+  are explicit, version-code component limits are enforced, and the native fake
+  refuses password-register indirect commands.
+- Persistent access-state latching now covers pre-existing EERD and primary
+  ensure cleanup failures without falsely requiring recovery after readback-
+  proven cleanup or a later activation-settle timeout.
+- CLI parsing, whitespace handling, diagnostics, command-report naming, scanner
+  branch coverage, and packaging/documentation inconsistencies identified by
+  the 2026 code audit are corrected.
+
 ## [3.0.1] - 2026-08-05
 
 ### Added
@@ -496,7 +540,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0

@@ -63,6 +63,7 @@ struct FakeRv3032 {
   bool logOverflow = false;
   bool protocolViolation = false;
   bool unsafeAccessStateAtCommand = false;
+  bool passwordCommandAttempted = false;
   uint16_t writeOneAttempts = 0;
   uint16_t readOneAttempts = 0;
   uint16_t updateAllAttempts = 0;
@@ -311,6 +312,16 @@ struct FakeRv3032 {
       }
       pendingAddress = direct[RV3032::cmd::REG_EE_ADDRESS];
       pendingData = direct[RV3032::cmd::REG_EE_DATA];
+      if (pendingAddress >= RV3032::cmd::REG_EEPROM_PASSWORD0 &&
+          pendingAddress <= RV3032::cmd::REG_EEPROM_PW_ENABLE) {
+        // The real password window is permanently destructive. Treat any
+        // indirect access as a fixture protocol violation so a widened driver
+        // entry point cannot appear safe in host tests.
+        passwordCommandAttempted = true;
+        protocolViolation = true;
+        direct[RV3032::cmd::REG_TEMP_LSB] |= RV3032::cmd::EEPROM_EEF_MASK;
+        return;
+      }
       pendingCommand = value;
       if (value == RV3032::cmd::EEPROM_CMD_READ_ONE) {
         ++readOneAttempts;

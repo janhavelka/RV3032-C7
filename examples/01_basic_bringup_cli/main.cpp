@@ -296,6 +296,12 @@ static void print_verbose_status(const char* op, const RV3032::Status& st) {
 
 static RV3032::Status read_user_eeprom_chunk(uint8_t offset, uint8_t length,
                                               uint8_t* out) {
+  if (out == nullptr || offset >= RV3032::USER_EEPROM_SIZE || length == 0U ||
+      length > RV3032::USER_EEPROM_JOB_MAX_BYTES ||
+      length > static_cast<uint8_t>(RV3032::USER_EEPROM_SIZE - offset)) {
+    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM,
+                                 "Invalid user EEPROM chunk bounds");
+  }
   static constexpr uint32_t TIMEOUT_MS = 1000U;
   const uint32_t startedMs = millis();
   const uint32_t deadlineMs = startedMs + TIMEOUT_MS;
@@ -400,6 +406,16 @@ static const char* backup_mode_name(RV3032::BackupSwitchMode mode) {
   }
 }
 
+static const char* clkout_frequency_name(RV3032::ClkoutFrequency frequency) {
+  switch (frequency) {
+    case RV3032::ClkoutFrequency::Hz32768: return "32768Hz";
+    case RV3032::ClkoutFrequency::Hz1024: return "1024Hz";
+    case RV3032::ClkoutFrequency::Hz64: return "64Hz";
+    case RV3032::ClkoutFrequency::Hz1: return "1Hz";
+    default: return "unknown";
+  }
+}
+
 /**
  * @brief Print available commands.
  */
@@ -464,7 +480,7 @@ static void print_help() {
   cli::printHelpItem("drv", "Show driver state and health");
   cli::printHelpItem("probe", "Read 0x51 Status register without health tracking");
   cli::printHelpItem("recover", "Manual recovery attempt");
-  cli::printHelpItem("verbose [0|1]", "Enable verbose status output (no args = show)");
+  cli::printHelpItem("verbose [0|1]", "Detailed status for time, clear_vlf, and recover");
   cli::printHelpItem("stress [N]", "Run N iterations stress test (default 100)");
   cli::printHelpItem("stress_mix [N]", "Run N iterations mixed operations test");
   cli::printHelpItem("selftest", "Run safe command self-test report");
@@ -879,7 +895,6 @@ static void cmd_clkout(const String& args) {
  * Example: "clkout_freq 3" (0=32768Hz, 1=1024Hz, 2=64Hz, 3=1Hz)
  */
 static void cmd_clkout_freq(const String& args) {
-  const char* freqStr[] = {"32768Hz", "1024Hz", "64Hz", "1Hz"};
   if (args.length() == 0) {
     RV3032::ClkoutFrequency freq = RV3032::ClkoutFrequency::Hz32768;
     RV3032::Status st = g_rtc.getClkoutFrequency(freq);
@@ -887,8 +902,8 @@ static void cmd_clkout_freq(const String& args) {
       LOGE("getClkoutFrequency() failed: %s", st.msg);
       return;
     }
-    const uint8_t idx = static_cast<uint8_t>(freq);
-    Serial.printf("Clock output frequency: %s\n", freqStr[idx]);
+    Serial.printf("Clock output frequency: %s\n",
+                  clkout_frequency_name(freq));
     return;
   }
 
@@ -906,7 +921,7 @@ static void cmd_clkout_freq(const String& args) {
     LOGE("setClkoutFrequency() failed: %s", st.msg);
     return;
   }
-  LOGI("Clock output frequency %s %s", freqStr[freq],
+  LOGI("Clock output frequency %s %s", clkout_frequency_name(freqEnum),
        st.inProgress() ? "accepted" : "completed");
 }
 
@@ -1168,8 +1183,11 @@ static void cmd_reg(const String& args) {
     return;
   }
   confirmTok.toLowerCase();
-  if ((!userRamReg && (!hasConfirmation || confirmTok != "confirm")) ||
-      (userRamReg && hasConfirmation)) {
+  if (userRamReg && hasConfirmation) {
+    LOGE("User RAM writes do not use confirm: reg <addr> <value>");
+    return;
+  }
+  if (!userRamReg && (!hasConfirmation || confirmTok != "confirm")) {
     LOGE("Register writes outside user RAM require: reg <addr> <value> confirm");
     return;
   }

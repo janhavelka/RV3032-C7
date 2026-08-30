@@ -40,7 +40,10 @@ inline bool readLine(String& outLine) {
       outLine = buffer;
       buffer = "";
       outLine.trim();
-      return outLine.length() > 0U;
+      // Report a completed whitespace-only line to the owner as well. The
+      // command handler treats it as a no-op, and loop() then repaints the
+      // prompt instead of leaving the terminal on a blank line.
+      return true;
     }
 
     if (overflowed) {

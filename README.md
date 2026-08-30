@@ -134,7 +134,7 @@ to a terminal result before admitting another. For a status-first snapshot:
 
 ```cpp
 const uint32_t now = nowMs(nullptr);
-RV3032::Status st = rtc.startReadTimeSnapshotJob(now, 100);
+RV3032::Status st = rtc.startReadTimeSnapshotJob(now);
 if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
 
 // One owner-loop step; repeat with a freshly sampled time while IN_PROGRESS.
@@ -149,7 +149,7 @@ the previous job is terminal:
 ```cpp
 const uint32_t now = nowMs(nullptr);
 RV3032::Status st =
-    rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, now, 250);
+    rtc.startSetTimeAndClearInvalidFlagsVerifiedJob(value, now);
 if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
 
 // One owner-loop step; repeat with a freshly sampled time while IN_PROGRESS.
@@ -167,6 +167,9 @@ preserving UF/TF/AF/EVF that may assert between the cooperative read and write.
 The report records the unavoidable THF/TLF clearing, and the job verifies final
 Status/calendar state. Larger polling budgets refresh elapsed time between
 callbacks so no later mutation starts after its cutoff.
+The 200 ms snapshot and 700 ms verified-set defaults are executable across the
+accepted `i2cTimeoutMs` range. A custom verified-set timeout must also retain
+the public `MIN_SET_TIME_OPERATION_BUDGET_MS` post-mutation proof interval.
 
 Every simple Status clearer for AF, TF, UF, EVF, PORF, and VLF applies this
 silicon rule: any Status-register write clears THF and TLF. If either omitted
@@ -246,12 +249,17 @@ deadline is reached, no further callback is
 started. If access-state cleanup was still required, the terminal error is
 `EEPROM_CLEANUP_FAILED` so an unproven safe state is never reported as a plain
 timeout. That terminal cleanup failure cancels remaining queued items and does
-not start another EEPROM command; the application must decide when it is safe
-to re-admit persistence work.
+not start another EEPROM command. `persistentAccessStateUnproven` then remains
+set in `SettingsSnapshot`, and new persistence is rejected until the
+application runs and proves `startPersistentAccessStateRecoveryJob()` with its
+intended C0. The synchronous primary-cell ensure operation obeys the same latch:
+it is rejected with zero I/O until recovery, and an ensure that cannot prove
+its own C0/Control 1 cleanup sets the latch.
 
 The generic queue status/count/depth surfaces do not describe explicit typed
 persistent jobs. Those jobs use `isJobBusy()`, `pollJob()`, and their typed
-result getters.
+result getters. The generic queue has separate fixed state, so advancing it
+never erases or replaces the last ordinary job status or result.
 
 `getEepromHardwareFlags()` reads the chip's EEbusy and sticky EEF bits; these
 are distinct from the library queue state returned by `isEepromBusy()`.
@@ -333,6 +341,11 @@ activation is 2 ms for disabled-to-Direct and 10 ms for disabled-to-Level.
 The job preserves non-BSM PMU bits, checks optional C0 queue capacity before
 mutation, writes at most once, reconciles by exact implemented-bit readback,
 and cannot report terminal success before the activation not-before boundary.
+The safe default rejects Direct/Level if the observed TCM field is nonzero.
+Boards with a compatible rechargeable source must state that intent explicitly
+with `BackupChargePolicy::ALLOW_BACKUP_CHARGING`; this may energize charging.
+The same safe default applies to `setTrickleChargeMode(nonzero)` when BSM is
+already Direct/Level, so charging cannot be enabled through the inverse update.
 Register proof does not prove physical retention, backup voltage/topology
 safety, or electrical timing on a real board.
 
@@ -368,8 +381,11 @@ RV3032::Status st = rtc.ensurePrimaryCellConfiguration(report);
 
 This operation requires single-attempt transport callbacks plus `nowMs` and
 `waitMs`. It rejects active cooperative work without consuming its lifecycle
-attempt. It directly reads persistent C0 before deciding and uses the exact
-target:
+attempt, and rejects an unproven persistent-access latch until explicit
+recovery succeeds. Its callbacks use the separate
+`primaryCellI2cTimeoutMs` (1..5 ms),
+not `i2cTimeoutMs`. It directly reads persistent C0 before deciding and uses
+the exact target:
 
 ```text
 (persistentC0 & 0x4C) | 0x20
@@ -534,9 +550,9 @@ writable path for the PlatformIO install/build command.
 .\scripts\pio.cmd run -e esp32s3dev
 .\scripts\pio.cmd run -e esp32s2dev
 python scripts/generate_version.py check
-python tools/check_core_timing_guard.py
-python tools/check_cli_contract.py
-python tools/check_docs_contract.py source
+python tools/check_portability.py
+python tools/check_abi.py
+python tools/check_package.py source
 doxygen Doxyfile
 python tools/hil_cli_runner.py --parser-self-test
 python tools/hil_cli_runner.py --dry-run

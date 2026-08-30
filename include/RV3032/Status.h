@@ -15,23 +15,23 @@ namespace RV3032 {
  */
 enum class Err : uint8_t {
   OK = 0,                ///< Operation successful
-  NOT_INITIALIZED,       ///< Library not initialized (call begin() first)
-  INVALID_CONFIG,        ///< Invalid configuration parameter
-  I2C_ERROR,             ///< I2C communication failure
-  TIMEOUT,               ///< Operation timed out (EEPROM write, etc.)
-  INVALID_PARAM,         ///< Invalid parameter value
-  INVALID_DATETIME,      ///< Invalid date/time value
-  DEVICE_NOT_FOUND,      ///< RTC device not responding on I2C bus
-  EEPROM_WRITE_FAILED,   ///< EEPROM update operation failed
-  REGISTER_READ_FAILED,  ///< Reserved legacy register-read failure category
-  REGISTER_WRITE_FAILED, ///< Register configuration/readback verification failed
-  QUEUE_FULL,            ///< EEPROM write queue is full (too many pending writes)
-  BUSY,                  ///< Operation not admitted or advanced because driver, guard, or hardware is busy
-  IN_PROGRESS,           ///< Work admitted; call pollJob(), pollEeprom(), or tick() as documented
-  I2C_NACK_ADDR,         ///< I2C address not acknowledged
-  I2C_NACK_DATA,         ///< I2C data byte not acknowledged
-  I2C_TIMEOUT,           ///< I2C transaction timed out
-  I2C_BUS,               ///< I2C bus error (arbitration lost, etc.)
+  NOT_INITIALIZED = 1,       ///< Library not initialized (call begin() first)
+  INVALID_CONFIG = 2,        ///< Invalid configuration parameter
+  I2C_ERROR = 3,             ///< I2C communication failure
+  TIMEOUT = 4,               ///< Operation timed out (EEPROM write, etc.)
+  INVALID_PARAM = 5,         ///< Invalid parameter value
+  INVALID_DATETIME = 6,      ///< Invalid date/time value
+  DEVICE_NOT_FOUND = 7,      ///< RTC device not responding on I2C bus
+  EEPROM_WRITE_FAILED = 8,   ///< EEPROM update operation failed
+  REGISTER_READ_FAILED = 9,  ///< Reserved legacy register-read failure category
+  REGISTER_WRITE_FAILED = 10, ///< Register configuration/readback verification failed
+  QUEUE_FULL = 11,           ///< EEPROM write queue is full (too many pending writes)
+  BUSY = 12,                 ///< Operation not admitted or advanced because driver, guard, or hardware is busy
+  IN_PROGRESS = 13,          ///< Work admitted; call pollJob(), pollEeprom(), or tick() as documented
+  I2C_NACK_ADDR = 14,        ///< I2C address not acknowledged
+  I2C_NACK_DATA = 15,        ///< I2C data byte not acknowledged
+  I2C_TIMEOUT = 16,          ///< I2C transaction timed out
+  I2C_BUS = 17,              ///< I2C bus error (arbitration lost, etc.)
   EEPROM_VERIFY_FAILED = 18,   ///< Readback or semantic verification did not match
   EEPROM_CLEANUP_FAILED = 19,  ///< Safe EEPROM access-state cleanup failed
   PRIMARY_CELL_ALREADY_ATTEMPTED = 20, ///< Ensure already called this lifecycle

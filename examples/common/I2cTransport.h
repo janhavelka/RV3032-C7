@@ -1,10 +1,12 @@
 /**
  * @file I2cTransport.h
- * @brief Wire-based I2C transport adapter for RV3032 examples.
+ * @brief Arduino-ESP32 Wire transport adapter for RV3032 examples.
  *
  * This example-only adapter keeps Wire ownership in the application. The
  * caller must serialize the shared bus and keep the Wire mutex uncontended for
  * the complete synchronous callback. Buffers are borrowed only until return.
+ * It targets the ESP32-S2/S3 Arduino core used by this repository; its Wire
+ * timeout and initialization APIs are not portable Arduino APIs.
  */
 
 #pragma once
@@ -21,6 +23,10 @@ namespace transport {
 static constexpr int32_t I2C_DETAIL_INVALID_ARGUMENT = -1;
 static constexpr int32_t I2C_DETAIL_INVALID_TIMEOUT = -2;
 static constexpr int32_t I2C_DETAIL_SHORT_STAGING = -3;
+// Arduino-ESP32 accepts no Wire buffer smaller than its 32-byte hardware FIFO.
+// The RV3032 driver's largest transfer is smaller, so this conservative cap
+// remains valid even if the application reduces Wire's default 128-byte buffer.
+static constexpr size_t MAX_TRANSFER_BYTES = 32U;
 
 class ScopedWireTimeout {
  public:
@@ -87,8 +93,16 @@ inline bool deadlineCrossed(uint32_t deadlineMs) {
   return !remainingBefore(millis(), deadlineMs, remainingMs);
 }
 
-/** Close a transaction already opened by beginTransmission(). */
+/**
+ * Discard staged data and close a transaction opened by beginTransmission().
+ *
+ * Arduino-ESP32 has no transaction-abort API. Its flush() clears the staged TX
+ * length, after which endTransmission(true) releases Wire's non-stop/mutex
+ * state with at most an address-only cleanup transaction. No staged register
+ * payload is sent by this cleanup path.
+ */
 inline bool releaseStartedTransaction(TwoWire& wire, uint32_t deadlineMs) {
+  wire.flush();
   uint32_t remainingMs = 0;
   const bool timeRemains = remainingBefore(millis(), deadlineMs, remainingMs);
   const uint16_t releaseTimeoutMs =
@@ -103,7 +117,8 @@ inline bool releaseStartedTransaction(TwoWire& wire, uint32_t deadlineMs) {
 inline RV3032::Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
                                 uint32_t timeoutMs, void* user) {
   TwoWire* wire = static_cast<TwoWire*>(user);
-  if (wire == nullptr || data == nullptr || len == 0U || len > 128U) {
+  if (wire == nullptr || data == nullptr || len == 0U ||
+      len > MAX_TRANSFER_BYTES) {
     return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
                                  "Invalid I2C callback argument",
                                  I2C_DETAIL_INVALID_ARGUMENT);
@@ -162,7 +177,8 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
                                     uint32_t timeoutMs, void* user) {
   TwoWire* wire = static_cast<TwoWire*>(user);
   if (wire == nullptr || tx == nullptr || rx == nullptr || txLen == 0U ||
-      rxLen == 0U || txLen > 128U || rxLen > 128U) {
+      rxLen == 0U || txLen > MAX_TRANSFER_BYTES ||
+      rxLen > MAX_TRANSFER_BYTES) {
     return RV3032::Status::Error(RV3032::Err::I2C_ERROR,
                                  "Invalid I2C callback argument",
                                  I2C_DETAIL_INVALID_ARGUMENT);

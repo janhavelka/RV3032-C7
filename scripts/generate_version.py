@@ -35,6 +35,10 @@ except Exception:
     ENV = None
 
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+UINT16_MAX = 65535
+VERSION_CODE_COMPONENT_MAX = 99
+
+
 def _find_project_root() -> Path:
     if ENV is not None:
         return Path(ENV["PROJECT_DIR"]).resolve()
@@ -67,7 +71,17 @@ def _parse_semver(version: str) -> Tuple[int, int, int]:
     match = SEMVER_RE.match(version)
     if not match:
         raise ValueError(f"Invalid semantic version: {version}")
-    return tuple(int(part) for part in match.groups())
+    major, minor, patch = (int(part) for part in match.groups())
+    if major > UINT16_MAX:
+        raise ValueError(
+            f"Version major exceeds generated uint16_t storage: {version}"
+        )
+    if minor > VERSION_CODE_COMPONENT_MAX or patch > VERSION_CODE_COMPONENT_MAX:
+        raise ValueError(
+            "Version minor and patch must be <= 99 for collision-free "
+            f"VERSION_CODE encoding: {version}"
+        )
+    return major, minor, patch
 
 
 def _bump_semver(version: str, part: str) -> str:
@@ -222,6 +236,8 @@ static constexpr uint16_t VERSION_PATCH = {patch};
 static constexpr const char* VERSION = {prefix}_VERSION_STRING;
 
 /// @brief Encoded version for numeric comparison: MAJOR*10000 + MINOR*100 + PATCH.
+/// @note Project versions constrain MINOR and PATCH to 0..99 so this encoding
+///       remains collision-free; the generator rejects larger components.
 static constexpr uint32_t VERSION_CODE = {version_code};
 
 /// @brief Build date string.

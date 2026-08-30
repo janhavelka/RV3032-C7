@@ -71,8 +71,8 @@ jobs:
       - name: Check generated version header
         run: python scripts/generate_version.py check
 
-      - name: Enforce core timing guard
-        run: python tools/check_core_timing_guard.py
+      - name: Check core portability contracts
+        run: python tools/check_portability.py
 
       - name: Run native tests
         run: pio test -e native
@@ -94,16 +94,16 @@ jobs:
       - name: Install Doxygen
         run: sudo apt-get update && sudo apt-get install -y doxygen
 
-      - name: Enforce example CLI contract
-        run: python tools/check_cli_contract.py
+      - name: Check public ABI contracts
+        run: python tools/check_abi.py
 
       - name: Check device-free HIL tooling
         run: |
           python -S tools/hil_cli_runner.py --parser-self-test
           python -S tools/hil_cli_runner.py --dry-run
 
-      - name: Check docs contract
-        run: python tools/check_docs_contract.py source
+      - name: Check source and package metadata
+        run: python tools/check_package.py source
 
       - name: Build public documentation
         run: doxygen Doxyfile
@@ -112,4 +112,4 @@ jobs:
         run: |
           mkdir -p dist
           pio pkg pack -o dist/RV3032-C7.tar.gz .
-          python tools/check_docs_contract.py package dist/RV3032-C7.tar.gz
+          python tools/check_package.py package dist/RV3032-C7.tar.gz

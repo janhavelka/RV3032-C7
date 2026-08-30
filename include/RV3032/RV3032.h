@@ -307,10 +307,11 @@ enum class ConfigurationEepromRegister : uint8_t {
 
 static constexpr uint8_t USER_EEPROM_SIZE = 32; ///< Persistent user EEPROM size.
 static constexpr uint8_t USER_EEPROM_JOB_MAX_BYTES = 16; ///< Per-job byte bound.
-static constexpr uint32_t READ_TIME_OPERATION_TIMEOUT_MS = 100; ///< Default snapshot deadline.
-static constexpr uint32_t SET_TIME_OPERATION_TIMEOUT_MS = 250; ///< Default verified-set deadline.
+static constexpr uint32_t READ_TIME_OPERATION_TIMEOUT_MS = 200; ///< Default snapshot deadline.
+static constexpr uint32_t SET_TIME_OPERATION_TIMEOUT_MS = 700; ///< Default verified-set deadline.
 static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MS = 250;
 static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MAX_MS = 1000;
+static constexpr uint32_t PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS = 1000;
 /// Reserved post-mutation verification interval; admission also needs margin.
 static constexpr uint32_t MIN_SET_TIME_OPERATION_BUDGET_MS = 125;
 
@@ -446,6 +447,10 @@ struct SettingsSnapshot {
   uint8_t consecutiveFailures = 0;             ///< Consecutive tracked callback failures
   uint32_t totalFailures = 0;                  ///< Tracked failures this lifecycle
   uint32_t totalSuccess = 0;                   ///< Tracked successes this lifecycle
+  /// Primary ensure callback timeout; appended for aggregate compatibility.
+  uint32_t primaryCellI2cTimeoutMs = 0;
+  /// EERD/C0 cleanup needs explicit recovery; appended for compatibility.
+  bool persistentAccessStateUnproven = false;
 };
 
 /** @brief Hardware EEPROM support flags read from TEMP_LSB. */
@@ -715,12 +720,13 @@ class RV3032 {
   // ===== Budgeted Job Operations =====
 
   /**
-   * @brief Check whether the shared budgeted job storage is active.
+   * @brief Check whether budgeted job processing is active.
    *
-   * @return true while an ordinary job or EEPROM-owned persistent job is active
-   * @note Continue using the polling surface that admitted the work:
-   *       pollJob() for ordinary jobs and pollEeprom()/tick() for queued
-   *       generic persistence.
+   * @return true while an ordinary job or an active generic EEPROM item is
+   *         using its independent fixed storage.
+   * @note Pending generic queue entries that have not started are reported by
+   *       isEepromBusy() but do not make this method true. Continue through the
+   *       polling surface that admitted the work.
    */
   bool isJobBusy() const;
 
@@ -964,6 +970,35 @@ class RV3032 {
    */
   Status getUserEepromWriteJobResult(UserEepromWriteReport& out) const;
 
+  /**
+   * @brief Start explicit recovery of an unproven EEPROM access state.
+   * @param desiredC0 Exact implemented active-PMU value to restore. Bit 7 and
+   *        all reserved bits must be zero.
+   * @param nowMs Current monotonic time.
+   * @param operationTimeoutMs Exclusive whole-operation deadline. Admission
+   *        derives the executable minimum from the EEPROM busy window, five
+   *        callbacks, and the selected backup activation settle.
+   * @param chargePolicy Safe default rejects a nonzero TCM combined with
+   *        Direct/Level BSM. ALLOW_BACKUP_CHARGING explicitly permits it.
+   * @return IN_PROGRESS when admitted, or a zero-I/O admission error.
+   * @note The job waits for EEbusy to clear, writes and verifies desiredC0,
+   *       clears and verifies EERD while preserving every other implemented
+   *       Control 1 bit, then honors the backup activation settle. It never
+   *       issues an EEPROM command. Only complete proof clears
+   *       SettingsSnapshot::persistentAccessStateUnproven.
+   */
+  Status startPersistentAccessStateRecoveryJob(
+      uint8_t desiredC0,
+      uint32_t nowMs,
+      uint32_t operationTimeoutMs =
+          PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS,
+      BackupChargePolicy chargePolicy =
+          BackupChargePolicy::REQUIRE_CHARGER_OFF);
+
+  /** @brief Copy the last persistent-access recovery report. */
+  Status getPersistentAccessStateRecoveryJobResult(
+      ConfigurationJobReport& out) const;
+
   // ===== Time/Date Operations =====
 
   /**
@@ -973,6 +1008,11 @@ class RV3032 {
    * @return OK on success, INVALID_DATETIME on invalid BCD, error on I2C failure
    * @note This helper does not read Status or clear flags. Use
    *       startReadTimeSnapshotJob() when validity flags must be checked first.
+   *       This single coherent read remains available while cooperative work is
+   *       pending; the application must still serialize transport ownership.
+   * @warning The hardware stores only a two-digit year and has no century bit.
+   *          After 2099 it wraps to `00`, which this API necessarily reports as
+   *          2000. The application must enforce its own century policy.
    */
   Status readTime(DateTime& out);
 
@@ -982,6 +1022,8 @@ class RV3032 {
    * @return OK on success, INVALID_DATETIME on malformed BCD, or transport error.
    * @note This is one independent read. Use it only when the application can
    *       tolerate rollover relative to a separate readTime() call.
+   *       It remains available while cooperative work is pending; the
+   *       application must still serialize transport ownership.
    */
   Status readHundredths(uint8_t& hundredths);
 
@@ -1004,7 +1046,9 @@ class RV3032 {
    * 
    * @param[out] out Unix timestamp (seconds since Jan 1, 1970 00:00:00 UTC)
    * @return Status::Ok() on success, error otherwise
-   * @note RTC does not store timezone information. Interprets time as UTC.
+   * @note RTC does not store timezone information. Interprets time as UTC. The
+   *       hardware has no century bit; after 2099 its `00` year is necessarily
+   *       reported as 2000.
    */
   Status readUnix(uint32_t& out);
 
@@ -1185,6 +1229,9 @@ class RV3032 {
    * @param nowMs Current monotonic time.
    * @param operationTimeoutMs Exclusive whole-operation deadline. Admission
    *        requires `4 * i2cTimeoutMs + activationMs + 1`, through 1000 ms.
+   * @param chargePolicy Safe default rejects Direct/Level when the observed
+   *        TCM field is nonzero. ALLOW_BACKUP_CHARGING is an explicit caller
+   *        assertion that charging the installed backup source is intended.
    * @return IN_PROGRESS when admitted or a zero-I/O admission error.
    * @note Requires BSIE=0, preserves all implemented non-BSM PMU bits, issues
    *       at most one PMU write, verifies active readback, then waits 2 ms for
@@ -1201,15 +1248,15 @@ class RV3032 {
    * @warning The trickle charger is gated by BSM *and* TCM together: it is
    *          active only when TCM != 00 AND BSM selects Direct or Level
    *          (App. Manual Rev. 1.3 section 4.3). Because this job preserves
-   *          the existing TCM, enabling switchover on a part whose C0 still
-   *          holds a non-zero TCM starts charging current into VBACKUP. Read
-   *          getTrickleChargeMode() first and set it to Off before enabling
-   *          switchover for a non-rechargeable primary cell.
+   *          the existing TCM, ALLOW_BACKUP_CHARGING may start charging current
+   *          into VBACKUP. Use it only with a compatible rechargeable source.
    */
   Status startSetBackupSwitchModeJob(
       BackupSwitchMode mode,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS);
+      uint32_t operationTimeoutMs = BACKUP_SWITCH_OPERATION_TIMEOUT_MS,
+      BackupChargePolicy chargePolicy =
+          BackupChargePolicy::REQUIRE_CHARGER_OFF);
 
   /**
    * @brief Read backup switchover mode from the active PMU mirror.
@@ -1224,11 +1271,18 @@ class RV3032 {
 
   /**
    * @brief Cooperatively set PMU trickle-charge voltage mode.
+   * @param mode Requested voltage mode; CHARGER_DISABLED clears TCM.
+   * @param chargePolicy Safe default rejects a nonzero mode when the observed
+   *        BSM is Direct/Level. ALLOW_BACKUP_CHARGING explicitly confirms a
+   *        compatible rechargeable backup source.
    * @note The electrical meaning depends on BSM and supply topology. When
    *       Config::enableEepromWrites is true, this queues a wear-limited C0
    *       update that must be advanced through tick()/pollEeprom().
    */
-  Status setTrickleChargeMode(TrickleChargeMode mode);
+  Status setTrickleChargeMode(
+      TrickleChargeMode mode,
+      BackupChargePolicy chargePolicy =
+          BackupChargePolicy::REQUIRE_CHARGER_OFF);
   /** @brief Read active PMU trickle-charge voltage mode. */
   Status getTrickleChargeMode(TrickleChargeMode& mode);
   /**
@@ -1260,9 +1314,16 @@ class RV3032 {
   ///       persistentTargetVerified and activeTargetVerified are set at their
   ///       direct-readback proof points and remain set if a later cleanup or
   ///       settle step fails. A safe BSM00/TCM00 hold is not active-target proof.
+  /// @note A cached unproven persistent-access state rejects this operation
+  ///       with zero I/O until startPersistentAccessStateRecoveryJob() proves
+  ///       recovery. Failure to prove this operation's own C0/Control 1 cleanup
+  ///       sets that cached state; an activation-settle failure after proof does
+  ///       not.
   /// @warning The application transport owner must place both i2cWrite and
   ///          i2cWriteRead in scoped single-physical-attempt mode for the whole
   ///          call. No ensure read or write may recover or retry internally.
+  /// @note Each ensure callback uses Config::primaryCellI2cTimeoutMs rather
+  ///       than the ordinary Config::i2cTimeoutMs bound.
   /// @warning The caller must prove stable VDD >=1.6 V for EEPROM writing,
   ///          VDD >=2.0 V when using 400 kHz, and VDD safely above the maximum
   ///          2.2 V LSM threshold through activation and the measured 10 ms
@@ -1898,7 +1959,8 @@ class RV3032 {
     READ_TIME_SNAPSHOT,
     SET_TIME_VERIFIED,
     PERSISTENT_READ,
-    USER_EEPROM_WRITE
+    USER_EEPROM_WRITE,
+    PERSISTENT_ACCESS_RECOVERY
   };
 
   enum class JobState : uint8_t {
@@ -1965,7 +2027,14 @@ class RV3032 {
     SET_TIME_WRITE_STATUS,
     SET_TIME_READ_STATUS_AFTER,
     SET_TIME_READ_FINAL_CALENDAR,
-    PERSISTENT
+    PERSISTENT,
+    RECOVERY_WAIT_READY,
+    RECOVERY_READ_CONTROL1,
+    RECOVERY_WRITE_PMU,
+    RECOVERY_VERIFY_PMU,
+    RECOVERY_WRITE_CONTROL1,
+    RECOVERY_VERIFY_CONTROL1,
+    RECOVERY_WAIT_ACTIVATION
   };
 
   struct EepromWrite {
@@ -1981,11 +2050,44 @@ class RV3032 {
   static constexpr size_t kEepromQueueSize = 8;  // Fixed-size queue (no heap allocation)
   static constexpr size_t kJobUserRamBufferSize = 16;
 
-  struct EepromOp {
+  struct PersistentOp {
     EepromState state = EepromState::IDLE;
+    Status operationStatus = Status::Ok();
+    Status cleanupStatus = Status::Ok();
+    uint32_t deadlineMs = 0;
+    uint32_t mutationCutoffMs = 0;
+    uint32_t phaseDeadlineMs = 0;
+    uint32_t notBeforeMs = 0;
+    bool deadlineActive = false;
+    bool mutationCutoffActive = false;
+    uint8_t address = 0;
+    uint8_t length = 0;
+    uint8_t index = 0;
+    uint8_t sentinel = 0;
+    uint8_t firstRead = 0;
+    uint8_t control1 = 0;
+    uint8_t activeC0 = 0;
+    uint8_t safeC0 = 0;
+    uint8_t desired = 0;
+    uint16_t readyChecks = 0;
+    bool control1Valid = false;
+    bool activeC0Valid = false;
+    bool safeC0Verified = false;
+    bool writeMode = false;
+    bool writeAttempted = false;
+    bool cleanupRequired = false;
+    bool cleanupProofPossible = true;
+    bool queueOwned = false;
+    uint8_t data[kJobUserRamBufferSize] = {0};
+    PersistentReadResult readResult{};
+    UserEepromWriteReport writeReport{};
+  };
+
+  struct EepromOp {
+    PersistentOp persistent{};
     uint8_t reg = 0;
     uint8_t value = 0;
-    
+
     // Circular buffer queue
     EepromWrite queue[kEepromQueueSize];
     uint8_t queueHead = 0;  // Next write position
@@ -2000,8 +2102,6 @@ class RV3032 {
     Status lastStatus = Status::Ok();
     ConfigurationJobReport configurationReport{};
     bool configurationCleanupWriteAttempted = false;
-    Status persistentOperationStatus = Status::Ok();
-    Status persistentCleanupStatus = Status::Ok();
     uint32_t deadlineMs = 0;
     uint32_t mutationCutoffMs = 0;
     bool deadlineActive = false;
@@ -2015,14 +2115,22 @@ class RV3032 {
     uint8_t periodicSafeControl2 = 0;
     uint8_t backupOriginalPmu = 0;
     uint8_t backupTargetPmu = 0;
-    uint32_t backupWriteCompletedMs = 0;
+    BackupChargePolicy backupChargePolicy =
+        BackupChargePolicy::REQUIRE_CHARGER_OFF;
     uint32_t backupActivationNotBeforeMs = 0;
     bool backupActivationRequired = false;
+    uint8_t recoveryControl1Target = 0;
+    uint32_t recoveryReadyDeadlineMs = 0;
+    uint32_t recoveryNotBeforeMs = 0;
+    uint16_t recoveryReadyChecks = 0;
+    bool recoveryPmuVerified = false;
+    bool recoveryControl1Verified = false;
     uint8_t registerUpdateReg = 0;
     uint8_t registerUpdateImplementedMask = 0xFF;
     uint8_t registerUpdateClearMask = 0;
     uint8_t registerUpdateSetMask = 0;
     uint8_t registerUpdateValue = 0;
+    bool enforceBackupChargePolicy = false;
     bool persistRegisterUpdate = false;
     QuiescenceGuard quiescenceGuard{};
     JobState quiescenceNextState = JobState::IDLE;
@@ -2049,28 +2157,7 @@ class RV3032 {
     TimeSnapshot timeSnapshot{};
     VerifiedTimeSetReport verifiedSet{};
     uint8_t calendarBuf[7] = {0};
-    EepromState persistentState = EepromState::IDLE;
-    uint8_t persistentAddress = 0;
-    uint8_t persistentLength = 0;
-    uint8_t persistentIndex = 0;
-    uint8_t persistentSentinel = 0;
-    uint8_t persistentFirstRead = 0;
-    uint8_t persistentControl1 = 0;
-    uint8_t persistentActiveC0 = 0;
-    uint8_t persistentSafeC0 = 0;
-    uint8_t persistentDesired = 0;
-    uint16_t persistentReadyChecks = 0;
-    uint32_t persistentNotBeforeMs = 0;
-    uint32_t persistentPhaseDeadlineMs = 0;
-    bool persistentControl1Valid = false;
-    bool persistentActiveC0Valid = false;
-    bool persistentSafeC0Verified = false;
-    bool persistentWriteMode = false;
-    bool persistentWriteAttempted = false;
-    bool persistentCleanupRequired = false;
-    bool persistentCleanupProofPossible = true;
-    PersistentReadResult persistentRead{};
-    UserEepromWriteReport userEepromWrite{};
+    PersistentOp persistent{};
   };
 
   Config _config;
@@ -2081,6 +2168,7 @@ class RV3032 {
   Status _eepromCleanupStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
   uint32_t _eepromWriteFailures = 0;
+  bool _persistentAccessStateUnproven = false;
   bool _primaryCellEnsureAttempted = false;
 
   // Driver state and health tracking
@@ -2172,16 +2260,18 @@ class RV3032 {
   bool eepromQueueContains(uint8_t reg, uint8_t value) const;
   bool eepromQueuePush(uint8_t reg, uint8_t value);
   bool eepromQueuePop(uint8_t& reg, uint8_t& value);
-  Status processPersistentJob(uint32_t& nowMs, bool& callbackUsed);
+  Status processPersistentJob(PersistentOp& op, uint32_t& nowMs,
+                              bool& callbackUsed);
   Status startPersistentReadJob(uint8_t address, uint8_t length,
                                 uint32_t nowMs, uint32_t timeoutMs);
   Status getConfigurationJobResult(
       JobKind kind, const char* inProgressMessage,
       const char* unavailableMessage, ConfigurationJobReport& out) const;
   uint32_t twoTransferJobMinimumTimeoutMs() const;
-  void exposePersistentEvidence();
+  static void exposePersistentEvidence(PersistentOp& op);
   Status finishJob(const Status& status);
   bool workIdle() const;
+  bool isOrdinaryJobBusy() const;
 
   // Health tracking (called only by tracked transport wrappers)
   Status _updateHealth(const Status& st);
@@ -2190,7 +2280,10 @@ class RV3032 {
 
   Status updateRegisterSingle(uint8_t reg, uint8_t implementedMask,
                               uint8_t clearMask, uint8_t setMask,
-                              const QuiescenceGuard& quiescenceGuard);
+                              const QuiescenceGuard& quiescenceGuard,
+                              bool enforceBackupChargePolicy = false,
+                              BackupChargePolicy chargePolicy =
+                                  BackupChargePolicy::REQUIRE_CHARGER_OFF);
   Status updateRegisterBit(uint8_t reg, uint8_t implementedMask,
                            uint8_t bitMask, bool enabled,
                            const QuiescenceGuard& quiescenceGuard);

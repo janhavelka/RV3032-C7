@@ -27,6 +27,8 @@ class TwoWire {
     writeCalls = 0;
     endTransmissionCalls = 0;
     requestCalls = 0;
+    flushCalls = 0;
+    physicalAttemptCalls = 0;
     transactionActive = false;
     configuredTimeoutMs = 50;
     stagedLengthLimit = SIZE_MAX;
@@ -42,6 +44,8 @@ class TwoWire {
     callCount = 0;
     rxLength = 0;
     rxIndex = 0;
+    stagedLength = 0;
+    lastPhysicalTxLength = 0;
   }
 
   bool begin(int, int) {
@@ -66,20 +70,31 @@ class TwoWire {
   void beginTransmission(uint8_t) {
     ++beginTransmissionCalls;
     transactionActive = true;
+    stagedLength = 0;
     record(Call::BEGIN_TRANSMISSION);
     arduinoStubMillis += beginDurationMs;
   }
-  size_t write(const uint8_t*, size_t len) {
+  size_t write(const uint8_t* data, size_t len) {
     ++writeCalls;
     record(Call::WRITE);
     arduinoStubMillis += writeDurationMs;
-    return len < stagedLengthLimit ? len : stagedLengthLimit;
+    size_t accepted = len < stagedLengthLimit ? len : stagedLengthLimit;
+    const size_t remaining = sizeof(stagedData) - stagedLength;
+    if (accepted > remaining) accepted = remaining;
+    if (data != nullptr && accepted > 0U) {
+      for (size_t i = 0; i < accepted; ++i) {
+        stagedData[stagedLength + i] = data[i];
+      }
+      stagedLength += accepted;
+    }
+    return accepted;
   }
   uint8_t endTransmission(bool stop = true) {
     ++endTransmissionCalls;
     record(stop ? Call::END_WITH_STOP : Call::END_WITHOUT_STOP);
     arduinoStubMillis += endDurationMs;
     if (stop) {
+      recordPhysicalAttempt();
       transactionActive = false;
     }
     if (endResultIndex < endResultCount) {
@@ -89,6 +104,7 @@ class TwoWire {
   }
   size_t requestFrom(uint8_t, size_t len, bool stop = true) {
     ++requestCalls;
+    recordPhysicalAttempt();
     if (stop) {
       record(Call::REQUEST_WITH_STOP);
       transactionActive = false;
@@ -101,6 +117,12 @@ class TwoWire {
     rxLength = available > sizeof(rxData) ? sizeof(rxData) : available;
     rxIndex = 0;
     return returned;
+  }
+  void flush() {
+    ++flushCalls;
+    stagedLength = 0;
+    rxLength = 0;
+    rxIndex = 0;
   }
   int available() const {
     return static_cast<int>(rxLength - rxIndex);
@@ -130,6 +152,8 @@ class TwoWire {
   uint32_t writeCalls = 0;
   uint32_t endTransmissionCalls = 0;
   uint32_t requestCalls = 0;
+  uint32_t flushCalls = 0;
+  uint32_t physicalAttemptCalls = 0;
   bool transactionActive = false;
   uint16_t configuredTimeoutMs = 50;
   size_t stagedLengthLimit = SIZE_MAX;
@@ -149,6 +173,10 @@ class TwoWire {
   uint8_t rxData[128] = {};
   size_t rxLength = 0;
   size_t rxIndex = 0;
+  uint8_t stagedData[128] = {};
+  size_t stagedLength = 0;
+  uint8_t lastPhysicalTxData[128] = {};
+  size_t lastPhysicalTxLength = 0;
 
  private:
   void record(Call call) {
@@ -157,6 +185,15 @@ class TwoWire {
       effectiveTimeouts[callCount] = configuredTimeoutMs;
       ++callCount;
     }
+  }
+
+  void recordPhysicalAttempt() {
+    ++physicalAttemptCalls;
+    lastPhysicalTxLength = stagedLength;
+    for (size_t i = 0; i < stagedLength; ++i) {
+      lastPhysicalTxData[i] = stagedData[i];
+    }
+    stagedLength = 0;
   }
 };
 
