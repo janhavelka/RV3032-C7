@@ -142,8 +142,8 @@ struct Config {
   bool enableEepromWrites = false;
 
   /// @brief EEPROM busy-poll window after the mandatory write settle (default: 100ms)
-  /// @note Valid range is 10..250 ms when generic persistence is enabled or
-  ///       persistent-access recovery is used. The required 10 ms
+  /// @note begin() always requires 10..250 ms, including when generic writes
+  ///       are disabled, so access-state recovery remains available. The 10 ms
   ///       post-WRITE_ONE wait is additional and is measured from
   ///       transport-callback completion.
   uint32_t eepromTimeoutMs = 100;

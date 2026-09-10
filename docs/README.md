@@ -27,6 +27,16 @@ the repository's
 layout, qualification, and application circuits. PDFs are excluded from the
 PlatformIO package.
 
+## Retained working documents
+
+| Document | Purpose |
+|---|---|
+| [`CODE_AUDIT.md`](CODE_AUDIT.md) | Original point-in-time review; retained for traceability. |
+| [`CODE_AUDIT_RESOLUTION.md`](CODE_AUDIT_RESOLUTION.md) | Findings, implementation decisions, and subsequent verification. |
+
+These working documents are excluded from the PlatformIO package and generated
+API documentation. They are historical review records, not maintained API contracts.
+
 ## Evidence policy
 
 - Native tests prove behavior against the bounded fake transport, not physical
@@ -37,5 +47,6 @@ PlatformIO package.
 - Hardware validation is retained only as a concise summary. Do not commit raw
   runner JSON, generated step tables, PID files, stdout/stderr captures, or
   full serial transcripts.
-- Completed prompts and point-in-time implementation audits remain available
-  in Git history and are not shipped as maintained documentation.
+- Completed prompts remain in Git history. The retained implementation audits
+  listed above also remain in this checkout and are not shipped as maintained
+  documentation.

@@ -175,3 +175,15 @@ class HardwareSerial {
 };
 
 inline HardwareSerial Serial;
+
+// ESP32 diagnostics used by the example's version command.
+struct EspClass {
+  const char* getChipModel() const { return "native ESP32 stub"; }
+  uint16_t getChipRevision() const { return 0; }
+  uint32_t getFlashChipSize() const { return 0; }
+  uint32_t getPsramSize() const { return 0; }
+  const char* getCoreVersion() const { return "stub"; }
+  const char* getSdkVersion() const { return "stub"; }
+};
+inline EspClass ESP;
+inline bool psramFound() { return false; }

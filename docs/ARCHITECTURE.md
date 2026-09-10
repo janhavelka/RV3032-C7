@@ -125,6 +125,23 @@ the gate, writes only when it is proven unsafe, writes at most once, and
 verifies once. An unreadable gate is not guessed. The fixed success/worst-case
 callback caps are 6/9, 5/8, 5/8, and 7/10 respectively.
 
+`RV3032::NO_WAIT_JOB_CALLBACK_CAPS` records the complete per-`JobKind` bounds
+in the driver. Native fault matrices use that table and exercise the four
+staged paths at the maximum callback timeout, including final-read failure
+and safe-disable cleanup, with and without a clock hook. These bounds cover
+time inside transport callbacks; the application's intervals between polls
+are additional. They introduce no new deadline or timeout result.
+
+| No-wait job | Maximum callbacks including cleanup | Callback-time bound at 100 ms |
+|---|---:|---:|
+| Timer | 9 | 900 ms |
+| Periodic update | 8 | 800 ms |
+| CLKOUT | 8 | 800 ms |
+| Temperature events | 10 | 1000 ms |
+| Register update, including guard/reset edge | 4 | 400 ms |
+| Temperature flag clear | 2 | 200 ms |
+| User RAM write | 2 | 200 ms |
+
 Backup uses readback-only reconciliation and a 4/4 callback cap. Public modes
 are explicitly encoded as Off=`00`, Direct=`01`, and Level=`10`; observed raw
 `11` is also disabled. The job requires BSIE=0, reserves optional C0 queue
@@ -135,8 +152,9 @@ completion; disabled-to-Level cannot complete before 10 ms. Admission requires
 the exclusive interval `4 * i2cTimeoutMs + activationMs + 1`, through 1000 ms.
 The wait state performs no callback. Software register proof is not physical
 retention, voltage/topology safety, or measured board timing evidence.
-The default `BackupChargePolicy::REQUIRE_CHARGER_OFF` rejects Direct/Level when
-TCM is nonzero. Preserving it requires the caller's explicit
+The default `BackupChargePolicy::REQUIRE_CHARGER_OFF` rejects changing to
+Direct/Level when TCM is nonzero. Re-requesting the current mode succeeds
+without an active PMU write. Changing modes while preserving TCM requires the caller's explicit
 `startSetBackupSwitchModeJobWithChargePolicy(...,
 ALLOW_BACKUP_CHARGING)` assertion for a rechargeable backup source. The same
 safe default applies when setting nonzero TCM over an enabled BSM; explicit
@@ -293,6 +311,8 @@ Generic persistence owns a `PersistentOp` separate from the ordinary job's
 abandoned cleanup sets `persistentAccessStateUnproven`, cancels queued work,
 and blocks new persistence plus the synchronous primary ensure operation. A
 primary ensure cleanup that lacks C0/Control 1 proof sets the same latch. A
+passive `end()`/`begin()` retains both terminal cleanup-failure evidence and
+any cleanup obligation abandoned while active, including callback rebinding. A
 fully proven cleanup remains proven even if a later electrical activation
 settle times out. The explicit cooperative
 `startPersistentAccessStateRecoveryJob()` waits for EEbusy, writes and verifies
@@ -300,6 +320,10 @@ the caller-selected implemented C0, and clears and verifies EERD. That exact
 access-state proof clears the latch; the job then honors BSM activation settle
 before reporting success. A settle deadline returns `TIMEOUT` without
 re-latching the proven access state. It issues no EEPROM command.
+EEbusy-read transport failure, timeout, or check-cap exhaustion remains the
+operation error but does not prevent bounded direct C0/EERD restoration:
+EEbusy gates EECMD dispatch only. `begin()` requires the 10..250 ms EEPROM
+window even with writes disabled so recovery cannot be disabled by configuration.
 
 ## Primary-cell provisioning boundary
 

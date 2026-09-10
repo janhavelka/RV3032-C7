@@ -7,8 +7,11 @@
 namespace cli_shell {
 
 inline constexpr size_t MAX_LINE_LENGTH = 127U;
+inline constexpr size_t MAX_INPUT_BYTES_PER_POLL = 256U;
 
-inline bool readLine(String& outLine) {
+// While busy, discard complete input and retain discard-until-newline state
+// for a partial line, so its tail cannot become a command after completion.
+inline bool readLine(String& outLine, bool discardInput = false) {
   static String buffer;
   static bool reserved = false;
   static bool overflowed = false;
@@ -18,8 +21,18 @@ inline bool readLine(String& outLine) {
     reserved = true;
   }
 
-  while (LOG_SERIAL.available() > 0) {
+  if (discardInput && buffer.length() != 0U) {
+    buffer = "";
+    overflowed = true;
+  }
+  for (size_t consumed = 0; consumed < MAX_INPUT_BYTES_PER_POLL &&
+       LOG_SERIAL.available() > 0; ++consumed) {
     const char c = static_cast<char>(LOG_SERIAL.read());
+
+    if (discardInput) {
+      overflowed = c != '\r' && c != '\n';
+      continue;
+    }
 
     if (c == '\b' || c == 0x7F) {
       if (!overflowed && buffer.length() > 0U) {

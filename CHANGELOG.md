@@ -7,8 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-09-09
+
+### Added
+
+- `isEepromPollable()` selects the generic polling surface when queued work
+  is waiting behind an ordinary job. Together with `isOrdinaryJobBusy()`, it
+  permits an owner loop to drain both surfaces without repeatedly polling a
+  surface that returns `BUSY`.
+- A per-job callback-bound table checked by native fault matrices, plus
+  maximum-timeout coverage for the four staged no-wait setters. Their existing
+  operation behavior is unchanged.
+- Native impossible-state coverage and regression probes for the CI contract
+  checkers, including transitive cooperative I/O and public enum/default guards.
+
+### Changed
+
+- The coherent-temperature default is 200 ms and the backup-switch default is
+  500 ms, admitting the supported 100 ms callback timeout without a clock hook.
+- `begin()` always validates the 10..250 ms EEPROM window so explicit access
+  recovery remains available with generic writes disabled.
+- Unproven persistent-access cleanup survives `end()`/`begin()` on the same
+  object, including abandonment of active cleanup and callback rebinding.
+- The CLI emits one diagnostic after 15 seconds of pending work and continues
+  polling. Serial input received while pending is discarded through complete
+  lines, including partial command tails.
+
 ### Fixed
 
+- The post-WRITE_ONE reserve now permits durable readback after the mutation
+  cutoff, retaining the original callback error without replaying the write.
+- Persistent-access recovery continues direct C0/EERD restoration after a
+  busy-read failure or timeout and preserves that original operation error.
+- Re-requesting the current backup mode succeeds without an active PMU write
+  even when TCM is nonzero; changes that enable charging remain guarded.
+- Invalid password spans fail closed. The ESP32 example adapter has an
+  explicit platform guard and a 64-byte fallback capacity; the largest legal
+  public register burst remains 46 bytes (`0x00..0x2D`).
+- Portability checks cover core stdio/parsers, transitive member calls, and an
+  exact health-owner allowlist. ABI checks cover all public enums and timeout/
+  size constants. Verification commands and retained-audit documentation agree.
 - Fresh audit verification preserved the exact legacy member-function types
   for backup-switch and trickle-charge setters while exposing explicit charge
   policy through distinctly named methods.
@@ -25,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.1.0] - 2026-08-30
 
+Development baseline without a published `v3.1.0` tag; subsequent changes are
+collected in 3.2.0. Its new `SettingsSnapshot::primaryCellI2cTimeoutMs` and
+`persistentAccessStateUnproven` trailing fields preserve source aggregate
+initialization compatibility but change binary layout. Rebuild consumers.
+
 ### Added
 
 - An explicit `BackupChargePolicy` makes rechargeable-backup intent mandatory
@@ -38,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `setTime()`, `setUnix()`, `writeRegister()`, `writeRegisters()`, and
+  `writeUserRam()` return `BUSY` while generic persistence is queued, even
+  before its first poll. Single-transfer reads remain available under the
+  application's transport serialization.
 - Generic EEPROM queue work now owns fixed persistence state independent of the
   ordinary job record, preserving completed job status and typed results.
 - Default snapshot and verified calendar-set deadlines are now 200 ms and

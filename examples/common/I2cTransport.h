@@ -11,6 +11,10 @@
 
 #pragma once
 
+#if !defined(ARDUINO_ARCH_ESP32)
+#error "The example I2cTransport adapter requires Arduino-ESP32."
+#else
+
 #include <Arduino.h>
 #include <Wire.h>
 
@@ -30,7 +34,7 @@ static constexpr int32_t I2C_DETAIL_SHORT_STAGING = -3;
 static constexpr size_t MAX_TRANSFER_BYTES =
     static_cast<size_t>(I2C_BUFFER_LENGTH);
 #else
-static constexpr size_t MAX_TRANSFER_BYTES = 32U;
+static constexpr size_t MAX_TRANSFER_BYTES = 64U;
 #endif
 
 class ScopedWireTimeout {
@@ -102,9 +106,10 @@ inline bool deadlineCrossed(uint32_t deadlineMs) {
  * Discard staged data and close a transaction opened by beginTransmission().
  *
  * Arduino-ESP32 has no transaction-abort API. Its flush() clears the staged TX
- * length, after which endTransmission(true) releases Wire's non-stop/mutex
- * state with at most an address-only cleanup transaction. No staged register
- * payload is sent by this cleanup path.
+ * length, after which endTransmission(true) releases the Wire mutex with at
+ * most an address-only cleanup transaction. It does not clear nonStop; the
+ * next beginTransmission()/requestFrom() does that. No staged register payload
+ * is sent by this cleanup path.
  */
 inline bool releaseStartedTransaction(TwoWire& wire, uint32_t deadlineMs) {
   wire.flush();
@@ -288,7 +293,6 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
 
 inline bool initWire(int sda, int scl, uint32_t freq = 400000,
                      uint16_t timeoutMs = 50) {
-#if defined(ARDUINO_ARCH_ESP32)
   // Optional application-owned recovery before the bus is initialized.
   pinMode(scl, OUTPUT);
   pinMode(sda, INPUT_PULLUP);
@@ -305,7 +309,6 @@ inline bool initWire(int sda, int scl, uint32_t freq = 400000,
   delayMicroseconds(5);
   digitalWrite(sda, HIGH);
   delayMicroseconds(5);
-#endif
 
   if (!Wire.begin(sda, scl, freq)) {
     return false;
@@ -315,3 +318,5 @@ inline bool initWire(int sda, int scl, uint32_t freq = 400000,
 }
 
 }  // namespace transport
+
+#endif  // ARDUINO_ARCH_ESP32

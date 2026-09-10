@@ -183,3 +183,75 @@ All device-free gates passed on the final worktree:
 No physical device was connected in this pass. The HIL firmware environments
 were compile-checked, and the device-free HIL parser/dry-run checks passed; no
 new physical HIL result is claimed.
+
+## Independent follow-up review, 2026-09-09
+
+Reviewed the 22-item follow-up against clean `main` at `f3db733`, after fetching
+and confirming it matched `origin/main`. This section supplements the earlier
+review; it does not reopen the original closed findings.
+
+| Item | Assessment and correction | Evidence |
+|---|---|---|
+| 1 | Valid: exclude a dispatched WRITE_ONE from the forward mutation cutoff. The reserved proof/cleanup interval now remains usable. | Cutoff-crossing tests prove one durable byte, retain `I2C_TIMEOUT`, and count exactly one WRITE_ONE. The smallest admitted timeout for the default fake configuration (516 ms) completes successfully. |
+| 2 | Valid: coherent-temperature default now uses `READ_TIME_OPERATION_TIMEOUT_MS` (200 ms). | A 100 ms callback configuration with no clock hook completes the two-sample job. |
+| 3 | Valid: `begin()` validates the EEPROM window even with writes disabled; redundant recovery-time validation was removed. | Invalid 0/9/251/UINT32_MAX windows are rejected with zero I/O; recovery after a failed persistence operation also runs with writes disabled. |
+| 4 | Valid: retain the unproven-access latch across passive lifecycle changes, including abandonment of active cleanup and callback rebinding. | Terminal-failure and active-abandonment tests preserve the latch through end/begin and clear it only after proven recovery. A sticky PORF read is not fresh access-state proof. |
+| 5 | Valid: ready-read failure, ready timeout, or exhausted check count records the cause and continues direct recovery. EEbusy gates EECMD only. | Busy and transport-failure tests restore C0/EERD while returning the first error; no EEPROM command is issued. |
+| 6 | Valid: backup default increased to 500 ms. | Direct tests at 60/100 ms callback limits, with and without a clock hook, complete disabled-to-Level activation. |
+| 7 | Valid documentation omission: all five write APIs document queued-persistence `BUSY`; 3.1.0 history records the behavior. | Existing synchronous-write admission regressions and Doxygen. |
+| 8 | Valid: the entire ESP32 adapter is now protected by an explicit architecture error/guard, including its Wire calls. | Native build explicitly selects ESP32 API stubs; embedded builds compile the production adapter. |
+| 9 | Valid safe subset: a 15-second, one-shot pending diagnostic retains ownership. Serial input is drained with a fixed per-poll byte cap and incomplete lines are discarded through their terminator. | CLI tests cover unsigned clock wrap, one callback per poll, one warning, continued ownership, and discarded command tails. |
+| 10 | Valid defensive correction: invalid spans count as unsupported in the password-range helper. | Direct invalid-span regression and the existing public zero-I/O allowlist tests. |
+| 11 | Valid checker gaps. Core includes/parsers, transitive member calls from cooperative engines, and exact health owners are checked. The report's three-owner count is incorrect: six actual owners are necessary (ordinary, explicit-timeout, presence, and timed completion wrappers). | Python mutation probes reject stdio/parser insertion, nested untimed I/O, and a fabricated tracked-sounding owner. Reviewed six-name allowlist replaces name-pattern trust. |
+| 12 | Valid: extend the ABI/default baseline to all 15 public enums including Err and both Config enums, and all eight public timeout/size constants. | Mutation probes alter enum representation, explicit/implicit values, and every constant. CI runs these probes. |
+| 13 | Valid coverage gap: test all five internal-error sites with native-only state injection through a friend accessor. No production fake or conditional runtime path was added. | Idle active jobs, invalid ordinary state, backup verification without a mutation, absent Control 1 cleanup evidence, and invalid persistent state all report typed errors. Mutated persistent state still performs bounded cleanup. |
+| 14 | Valid: password-command rejection now acts as a negative suite tripwire. | Twenty additional assertions alongside existing protocol-violation assertions, including generic persistence and primary-cell paths. |
+| 15 | Partially valid: the 32-byte fallback was too small and is now 64. The claimed legal 57-byte public read is incorrect: the direct allowlist ends at `REG_TS_EVI_YEAR` (0x2D), giving 46 bytes. | The adapter test reads all 46 legal bytes and proves a 57-byte public span is rejected before another physical attempt. The allowlist remains intact. |
+| 16 | Valid comment correction verified against installed Arduino-ESP32 3.3.11 `Wire.cpp`: flush clears staging; endTransmission(true) releases the mutex but not nonStop. | Existing address-only cleanup, timeout, and next-transaction tests. |
+| 17 | Valid: determine already-requested BSM before applying the charging guard. | Both Direct and Level no-ops with nonzero TCM return success after two reads and zero PMU writes. Actual charging-enabling changes still fail without explicit policy. |
+| 18 | Valid: add `isEepromPollable()`, document cross-surface BUSY, and distinguish ownership status from typed terminal evidence. | A combined owner loop drains persistence queued behind an ordinary update; existing typed-result retention tests cover the opposite ownership direction. README and IDF examples select one surface per pass. |
+| 19 | Recommendation announced before implementation: materialize the existing no-wait bounds without introducing new setter deadlines. `NO_WAIT_JOB_CALLBACK_CAPS` is indexed by JobKind and checked by native success/fault matrices. Temperature requires at most 10 callbacks, not 11; guarded timestamp reset explains the four-callback REGISTER_UPDATE bound. | Maximum-timeout tests exercise all four staged setters, successful completion and final-read failure/cleanup, with and without a clock hook. Architecture documentation distinguishes callback time from caller scheduling gaps. |
+| 20 | Valid documentation contradiction: list the two retained audit documents separately from maintained API documentation. | Documentation index and package exclusion checks. |
+| 21 | Valid: README now includes both HIL build environments. | README, CONTRIBUTING, and the CI matrix cover all four targets; checker regression tests are also listed. |
+| 22 | Valid release-hygiene concern. Follow-ups are collected in 3.2.0, with Version.h generated from library.json. A minor version follows the repository's rule for the new public polling predicate. 3.1.0 is identified as an untagged development baseline and its two trailing SettingsSnapshot fields are documented as source-compatible, binary-layout changes. | Version/ABI/package checks. No commit, tag, or publication is part of this review. |
+
+The latest hosted CI run for the starting commit passed all six jobs:
+[CI run 33322558762](https://github.com/janhavelka/RV3032-C7/actions/runs/33322558762).
+The workflow now also runs the contract-checker mutation tests. A hosted run
+for these uncommitted changes has not been created.
+
+### Follow-up final verification
+
+- Native: **131/131 passed**, with every test defined and registered once.
+- Embedded: **esp32s3dev, esp32s2dev, esp32s3hil, and
+  esp32s3hil_persistence all built successfully** against the pinned platform.
+- Version generation check, portability, ABI/default contracts, and source
+  package checks: passed.
+- Contract-checker tests: four test methods passed, including parameterized
+  mutation probes for every guarded enum and constant.
+- Device-free HIL parser self-test and the expected 26-step dry run: passed.
+- Doxygen with warnings treated as errors: passed.
+- PlatformIO package and archive validation: passed for
+  `dist/RV3032-C7.tar.gz` (version 3.2.0).
+- Separate compiler probes verified the 64-byte unpublished-capacity fallback
+  and the intentional non-ESP32 compile error.
+- `git diff --check`: passed. Changes remain uncommitted and untagged.
+
+The inherited `PLATFORMIO_CORE_DIR=C:\pio` selected an incomplete local compiler
+store. Embedded verification used the already-installed current-user store:
+
+```powershell
+$env:PLATFORMIO_CORE_DIR = Join-Path $env:USERPROFILE '.platformio'
+$env:PYTHONIOENCODING = 'utf-8'
+.\scripts\pio.cmd run -e esp32s3dev -e esp32s2dev -e esp32s3hil -e esp32s3hil_persistence
+```
+
+Its existing esptool 5.3.0 Python module worked, but the executable launcher
+failed with `uv trampoline failed to canonicalize script path`. The launcher
+was regenerated from the installed distribution's entry point using the same
+VS Code-managed Python interpreter. The original launcher was preserved as
+`.pio/audit-recheck-esptool-launcher.exe.bak`. No PlatformIO Core, dependency
+version, global environment setting, or repository toolchain pin was changed.
+
+These are host tests and firmware builds. No hardware was flashed and no new
+physical HIL, persistence endurance, or backup-retention result is claimed.

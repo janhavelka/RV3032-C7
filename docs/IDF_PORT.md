@@ -71,10 +71,10 @@ Admission methods perform no transfer. The I2C owner advances work explicitly:
 ```cpp
 const uint32_t now = idfNowMs(nullptr);
 uint8_t used = 0;
-RV3032::Status pollStatus;
+RV3032::Status pollStatus = RV3032::Status::Ok();
 if (rtc.isOrdinaryJobBusy()) {
   pollStatus = rtc.pollJob(now, 1, used);
-} else {
+} else if (rtc.isEepromPollable()) {
   pollStatus = rtc.pollEeprom(now, 1, used);
 }
 // Retain, report, or otherwise handle pollStatus according to product policy.

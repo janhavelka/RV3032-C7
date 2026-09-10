@@ -97,6 +97,9 @@ jobs:
       - name: Check public ABI contracts
         run: python tools/check_abi.py
 
+      - name: Test contract checker regression detection
+        run: python -m unittest discover -s tools -p 'test_check_*.py'
+
       - name: Check device-free HIL tooling
         run: |
           python -S tools/hil_cli_runner.py --parser-self-test

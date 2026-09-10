@@ -13,6 +13,21 @@
 
 using test_rv3032::FakeRv3032;
 
+namespace RV3032 {
+struct NativeTestAccess {
+  using JobState = RV3032::JobState;
+  using JobKind = RV3032::JobKind;
+  using EepromState = RV3032::EepromState;
+  static auto& job(RV3032& rtc) { return rtc._job; }
+  static uint8_t noWaitCallbackCap(JobKind kind) {
+    return RV3032::NO_WAIT_JOB_CALLBACK_CAPS[static_cast<size_t>(kind)];
+  }
+  static bool unsupportedRange(uint8_t reg, size_t len) {
+    return RV3032::intersectsUnsupportedPasswordRange(reg, len);
+  }
+};
+}  // namespace RV3032
+
 static_assert(!std::is_copy_constructible<RV3032::RV3032>::value,
               "RV3032 must not be copy constructible");
 static_assert(!std::is_copy_assignable<RV3032::RV3032>::value,
@@ -80,10 +95,17 @@ RV3032::Status pollJobToCompletion(RV3032::RV3032& rtc, FakeRv3032& fake,
                                    uint16_t callCap = 2000) {
   RV3032::Status st = RV3032::Status::Error(RV3032::Err::IN_PROGRESS,
                                              "not started");
+  const uint8_t callbackCap = RV3032::NativeTestAccess::noWaitCallbackCap(
+      RV3032::NativeTestAccess::job(rtc).activeKind);
+  const uint32_t callbacksAtStart = fake.callbackCount;
   for (uint16_t i = 0; i < callCap; ++i) {
     uint8_t used = 0;
     const uint32_t callbacksBeforePoll = fake.callbackCount;
     st = rtc.pollJob(fake.nowMs, budget, used);
+    if (callbackCap != 0) {
+      TEST_ASSERT_LESS_OR_EQUAL_UINT32(callbackCap,
+          fake.callbackCount - callbacksAtStart);
+    }
     TEST_ASSERT_LESS_OR_EQUAL_UINT8(budget, used);
     TEST_ASSERT_EQUAL_UINT32(
         used, fake.callbackCount - callbacksBeforePoll);
@@ -354,6 +376,7 @@ void assertPrimaryFaultCleanup(const FakeRv3032& fake,
   TEST_ASSERT_EQUAL_UINT16(0, fake.refreshAllAttempts);
   TEST_ASSERT_EQUAL_UINT8(0, rtc.eepromQueueDepth());
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   TEST_ASSERT_FALSE(fake.logOverflow);
 
@@ -572,7 +595,14 @@ void test_config_validation_is_zero_io_and_non_destructive() {
   cfg = fake.config(false, false);
   cfg.nowMs = nullptr;
   cfg.i2cTimeoutMs = 1;
-  cfg.eepromTimeoutMs = 0;
+  for (uint32_t invalidTimeout : {0U, 9U, 251U, UINT32_MAX}) {
+    cfg.eepromTimeoutMs = invalidTimeout;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INVALID_CONFIG),
+                          static_cast<int>(rtc.begin(cfg).code));
+    TEST_ASSERT_FALSE(rtc.isInitialized());
+    TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+  }
+  cfg.eepromTimeoutMs = 10;
   cfg.offlineThreshold = 1;
   TEST_ASSERT_TRUE(rtc.begin(cfg).ok());
   TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
@@ -1437,6 +1467,135 @@ void test_calendar_multi_instruction_budget_refreshes_deadlines_and_cutoffs() {
   }
 }
 
+void test_impossible_ordinary_states_fail_without_transport() {
+  using Access = RV3032::NativeTestAccess;
+  for (auto state : {Access::JobState::IDLE,
+                     static_cast<Access::JobState>(255)}) {
+    FakeRv3032 fake;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    TEST_ASSERT_TRUE(rtc.setClockInterruptEnabled(true).inProgress());
+    Access::job(rtc).state = state;
+    uint8_t used = 99;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+        static_cast<int>(rtc.pollJob(fake.nowMs, 1, used).code));
+    TEST_ASSERT_EQUAL_UINT8(0, used);
+    TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+    TEST_ASSERT_FALSE(rtc.isOrdinaryJobBusy());
+  }
+  FakeRv3032 fake;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+  TEST_ASSERT_TRUE(rtc.startSetBackupSwitchModeJob(
+      RV3032::BackupSwitchMode::Level, fake.nowMs).inProgress());
+  Access::job(rtc).state = Access::JobState::BACKUP_VERIFY_PMU;
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+      static_cast<int>(pollJobToCompletion(rtc, fake).code));
+  RV3032::ConfigurationJobReport report{};
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+      static_cast<int>(rtc.getSetBackupSwitchModeJobResult(report).code));
+  TEST_ASSERT_FALSE(report.mutationAttempted);
+  TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+}
+
+void test_impossible_persistent_states_preserve_cleanup_evidence() {
+  using Access = RV3032::NativeTestAccess;
+  for (bool missingControl1 : {false, true}) {
+    FakeRv3032 fake;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+    TEST_ASSERT_TRUE(rtc.startReadUserEepromJob(0, 1, fake.nowMs).inProgress());
+    auto& op = Access::job(rtc).persistent;
+    op.state = missingControl1 ? Access::EepromState::RESTORE_CONTROL1
+                              : static_cast<Access::EepromState>(255);
+    op.cleanupRequired = missingControl1;
+    const RV3032::Err expected = missingControl1
+        ? RV3032::Err::EEPROM_CLEANUP_FAILED : RV3032::Err::INTERNAL_STATE_ERROR;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected),
+        static_cast<int>(pollJobToCompletion(rtc, fake).code));
+    RV3032::PersistentReadResult report{};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected),
+        static_cast<int>(rtc.getPersistentReadJobResult(report).code));
+    const RV3032::Status cause = missingControl1
+        ? report.cleanupStatus : report.operationStatus;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+                          static_cast<int>(cause.code));
+    TEST_ASSERT_FALSE(report.cleanupVerified);
+    TEST_ASSERT_EQUAL(missingControl1,
+                      rtc.getSettings().persistentAccessStateUnproven);
+    TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+  }
+
+  // Corrupt an active access job after real EERD/safe-C0 staging: its saved
+  // restoration evidence must still drive bounded cleanup, with no EECMD.
+  FakeRv3032 fake;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(fake.config()).ok());
+  TEST_ASSERT_TRUE(rtc.startReadUserEepromJob(0, 1, fake.nowMs).inProgress());
+  uint8_t used = 0;
+  TEST_ASSERT_TRUE(rtc.pollJob(fake.nowMs, 7, used).inProgress());
+  TEST_ASSERT_TRUE(Access::job(rtc).persistent.safeC0Verified);
+  Access::job(rtc).persistent.state = static_cast<Access::EepromState>(255);
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+      static_cast<int>(pollJobToCompletion(rtc, fake).code));
+  RV3032::PersistentReadResult report{};
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INTERNAL_STATE_ERROR),
+      static_cast<int>(rtc.getPersistentReadJobResult(report).code));
+  TEST_ASSERT_TRUE(report.cleanupVerified);
+  TEST_ASSERT_FALSE(rtc.getSettings().persistentAccessStateUnproven);
+  TEST_ASSERT_EQUAL_UINT16(0, fake.readOneAttempts);
+  TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
+}
+
+void test_password_range_helper_rejects_invalid_spans() {
+  using Access = RV3032::NativeTestAccess;
+  TEST_ASSERT_TRUE(Access::unsupportedRange(0, 0));
+  TEST_ASSERT_TRUE(Access::unsupportedRange(255, 2));
+  TEST_ASSERT_TRUE(Access::unsupportedRange(0, SIZE_MAX));
+  TEST_ASSERT_FALSE(Access::unsupportedRange(0, 57));
+}
+
+void test_default_temperature_job_executes_without_clock_hook() {
+  FakeRv3032 fake;
+  RV3032::Config config = fake.config();
+  config.nowMs = nullptr;
+  config.i2cTimeoutMs = 100;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(config).ok());
+  TEST_ASSERT_TRUE(rtc.startReadCoherentTemperatureJob(0).inProgress());
+  TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+  uint8_t used = 0;
+  TEST_ASSERT_TRUE(rtc.pollJob(0, 2, used).ok());
+  TEST_ASSERT_EQUAL_UINT8(2, used);
+  RV3032::CoherentTemperatureResult result{};
+  TEST_ASSERT_TRUE(rtc.getReadCoherentTemperatureJobResult(result).ok());
+}
+
+void test_default_backup_job_executes_at_large_callback_timeouts() {
+  for (uint32_t timeoutMs : {60U, 100U}) {
+    for (bool clockHook : {false, true}) {
+      FakeRv3032 fake;
+      fake.activeConfig[0] = 0;
+      fake.callbackDurationMs = timeoutMs;
+      RV3032::Config config = fake.config();
+      config.i2cTimeoutMs = timeoutMs;
+      if (!clockHook) config.nowMs = nullptr;
+      RV3032::RV3032 rtc;
+      TEST_ASSERT_TRUE(rtc.begin(config).ok());
+      TEST_ASSERT_TRUE(rtc.startSetBackupSwitchModeJob(
+          RV3032::BackupSwitchMode::Level, fake.nowMs).inProgress());
+      TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
+      TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake, 1).ok());
+      TEST_ASSERT_EQUAL_UINT32(4, fake.callbackCount);
+      RV3032::ConfigurationJobReport report{};
+      TEST_ASSERT_TRUE(rtc.getSetBackupSwitchModeJobResult(report).ok());
+      TEST_ASSERT_EQUAL_INT(static_cast<int>(
+          RV3032::ConfigurationFinalState::REQUESTED_VERIFIED),
+          static_cast<int>(report.finalState));
+    }
+  }
+}
+
 void test_default_calendar_jobs_admit_without_clock_hook() {
   FakeRv3032 snapshotFake;
   RV3032::Config snapshotConfig = snapshotFake.config();
@@ -2046,6 +2205,7 @@ void test_persistent_inspection_uses_direct_two_read_proof() {
   TEST_ASSERT_EQUAL_UINT16(2, fake.readOneAttempts);
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
 }
 
 void test_persistent_read_result_contract_and_partial_evidence() {
@@ -2689,6 +2849,7 @@ void test_generic_persistence_uses_full_budget_and_durable_protocol() {
   TEST_ASSERT_EQUAL_UINT32(1, rtc.eepromWriteCount());
   TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   bool sawConfigurationAddress = false;
   for (size_t i = 0; i < fake.logCount; ++i) {
@@ -2744,6 +2905,7 @@ void test_generic_persistence_clears_stale_eef_and_restores_access_state() {
   }
   TEST_ASSERT_EQUAL_UINT32(1, clearEefWrites);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
 }
 
@@ -2853,6 +3015,7 @@ void test_generic_persistence_reports_low_vdd_and_initial_busy_failures() {
     TEST_ASSERT_BITS_HIGH(RV3032::cmd::EEPROM_EEF_MASK,
                           fake.direct[RV3032::cmd::REG_TEMP_LSB]);
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
     TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   }
 
@@ -2882,6 +3045,7 @@ void test_generic_persistence_reports_low_vdd_and_initial_busy_failures() {
     TEST_ASSERT_EQUAL_UINT32(0, countEepromCommands(
         fake, RV3032::cmd::EEPROM_CMD_READ_ONE));
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
     TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   }
 }
@@ -2902,6 +3066,7 @@ void test_generic_persistence_restores_intended_active_and_zero_write_compare() 
     TEST_ASSERT_EQUAL_HEX8(4, fake.activeConfig[1]);
     TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   }
 
   {
@@ -3050,6 +3215,7 @@ void test_generic_multi_instruction_poll_refreshes_mutation_cutoff() {
                           static_cast<uint8_t>(terminal.code));
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
 }
 
 void test_generic_persistence_staging_and_ambiguous_write_one_paths() {
@@ -3092,6 +3258,7 @@ void test_generic_persistence_staging_and_ambiguous_write_one_paths() {
     TEST_ASSERT_EQUAL_HEX8(persistentBefore, fake.persistent[0]);
     TEST_ASSERT_EQUAL_HEX8(expectedActive, fake.activeConfig[0]);
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
     TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   }
 
@@ -3122,6 +3289,7 @@ void test_generic_persistence_staging_and_ambiguous_write_one_paths() {
         static_cast<uint8_t>(snapshot.eepromOperationStatus.code));
     TEST_ASSERT_TRUE(snapshot.eepromCleanupStatus.ok());
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
     TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   }
 
@@ -3150,6 +3318,7 @@ void test_generic_persistence_staging_and_ambiguous_write_one_paths() {
     TEST_ASSERT_EQUAL_HEX8(persistentBefore, fake.persistent[0]);
     TEST_ASSERT_EQUAL_HEX8(expectedActive, fake.activeConfig[0]);
     TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
     TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
   }
 }
@@ -3337,6 +3506,7 @@ void test_primary_cell_updates_exact_target_once() {
   TEST_ASSERT_TRUE(report.writeDurablyVerified);
   assertPrimaryTargetEvidence(report, true, true);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
 }
 
@@ -3378,6 +3548,7 @@ void test_primary_cell_preserves_all_nclke_tcr_and_control1_bits() {
       TEST_ASSERT_TRUE(report.cleanupVerified);
       assertPrimaryTargetEvidence(report, true, true);
       TEST_ASSERT_FALSE(fake.protocolViolation);
+      TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
       TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
     }
   }
@@ -3447,6 +3618,7 @@ void test_primary_cell_repairs_stale_active_from_correct_persistence() {
   assertPrimaryTargetEvidence(report, true, true);
   TEST_ASSERT_TRUE(report.cleanupVerified);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
 }
 
@@ -3705,6 +3877,7 @@ void test_primary_cell_initial_66ms_busy_polls_at_one_ms_and_succeeds() {
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(1000, fake.nowMs);
   TEST_ASSERT_FALSE(fake.waitLogOverflow);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
 }
 
 void test_primary_cell_late_wait_is_detected_without_further_io() {
@@ -3772,6 +3945,7 @@ void test_primary_cell_staging_crossing_cutoff_starts_no_write_one() {
   TEST_ASSERT_TRUE(report.autoRefreshHeldDisabledForSafety);
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(1000, fake.nowMs);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
 }
 
@@ -3814,6 +3988,7 @@ void test_primary_cell_busy_phases_terminate_within_fixed_bounds() {
   TEST_ASSERT_FALSE(fake.logOverflow);
   TEST_ASSERT_FALSE(fake.waitLogOverflow);
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
 }
 
 void test_primary_cell_fault_ordinals_never_retry_write_one() {
@@ -4039,6 +4214,7 @@ void test_primary_cell_reconciles_committed_read_one_errors() {
           fake, RV3032::cmd::EEPROM_CMD_READ_ONE));
       TEST_ASSERT_EQUAL_UINT8(0, rtc.eepromQueueDepth());
       TEST_ASSERT_FALSE(fake.protocolViolation);
+      TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
       TEST_ASSERT_FALSE(fake.unsafeAccessStateAtCommand);
     }
   }
@@ -5182,6 +5358,7 @@ void test_fake_refresh_initial_busy_and_acked_ignore_faults() {
   TEST_ASSERT_TRUE(busyFake.waitedMs >= 5);
   TEST_ASSERT_EQUAL_UINT16(1, busyFake.readOneAttempts);
   TEST_ASSERT_FALSE(busyFake.protocolViolation);
+  TEST_ASSERT_FALSE(busyFake.passwordCommandAttempted);
 
   FakeRv3032 ignoredFake;
   const uint8_t value = 0x5A;
@@ -5691,6 +5868,43 @@ void test_queue_cleanup_failure_cancels_later_items() {
       reconciledRtc.getSettings().persistentAccessStateUnproven);
 }
 
+void test_polling_predicates_drain_queued_work_behind_ordinary_job() {
+  FakeRv3032 fake;
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_FALSE(rtc.isEepromPollable());
+  TEST_ASSERT_TRUE(rtc.begin(fake.config(true)).ok());
+  TEST_ASSERT_FALSE(rtc.isEepromPollable());
+  TEST_ASSERT_TRUE(rtc.setOffsetPpm(0.238418579f).inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+  TEST_ASSERT_TRUE(rtc.isEepromPollable());
+  TEST_ASSERT_TRUE(rtc.setTrickleChargeResistance(
+      RV3032::TrickleChargeResistance::KOHM_2).inProgress());
+  TEST_ASSERT_TRUE(rtc.isOrdinaryJobBusy());
+  TEST_ASSERT_TRUE(rtc.isEepromBusy());
+  TEST_ASSERT_FALSE(rtc.isEepromPollable());
+  const uint32_t before = fake.callbackCount;
+  uint8_t used = 99;
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::BUSY),
+      static_cast<int>(rtc.pollEeprom(fake.nowMs, 1, used).code));
+  TEST_ASSERT_EQUAL_UINT8(0, used);
+  TEST_ASSERT_EQUAL_UINT32(before, fake.callbackCount);
+  for (uint32_t polls = 0; polls < 1000U &&
+       (rtc.isOrdinaryJobBusy() || rtc.isEepromPollable()); ++polls) {
+    const uint32_t callbacksBefore = fake.callbackCount;
+    const RV3032::Status st = rtc.isOrdinaryJobBusy()
+        ? rtc.pollJob(fake.nowMs, 1, used) : rtc.pollEeprom(fake.nowMs, 1, used);
+    TEST_ASSERT_TRUE(st.ok() || st.inProgress());
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(1, fake.callbackCount - callbacksBefore);
+    ++fake.nowMs;
+  }
+  TEST_ASSERT_FALSE(rtc.isJobBusy());
+  TEST_ASSERT_FALSE(rtc.isEepromBusy());
+  TEST_ASSERT_FALSE(rtc.isEepromPollable());
+  TEST_ASSERT_EQUAL_UINT32(2, rtc.eepromWriteCount());
+  TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
+}
+
 void test_eeprom_queue_preserves_completed_ordinary_job_evidence() {
   FakeRv3032 fake;
   RV3032::RV3032 rtc;
@@ -5720,6 +5934,7 @@ void test_eeprom_queue_preserves_completed_ordinary_job_evidence() {
   TEST_ASSERT_TRUE(rtc.isJobBusy());
   TEST_ASSERT_FALSE(rtc.isOrdinaryJobBusy());
   TEST_ASSERT_TRUE(rtc.isEepromBusy());
+  TEST_ASSERT_TRUE(rtc.isEepromPollable());
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::BUSY),
                           static_cast<uint8_t>(rtc.getJobStatus().code));
   used = 99;
@@ -5820,6 +6035,25 @@ void test_auxiliary_cleanup_failures_preserve_access_state_proof() {
 }
 
 void test_backup_charge_policy_requires_explicit_rechargeable_intent() {
+  for (auto mode : {RV3032::BackupSwitchMode::Direct,
+                    RV3032::BackupSwitchMode::Level}) {
+    FakeRv3032 fake;
+    const uint8_t original = static_cast<uint8_t>(
+        (mode == RV3032::BackupSwitchMode::Direct
+             ? RV3032::cmd::PMU_BSM_DIRECT : RV3032::cmd::PMU_BSM_LEVEL) |
+        static_cast<uint8_t>(RV3032::TrickleChargeMode::V3_0));
+    fake.activeConfig[0] = original;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(false)).ok());
+    TEST_ASSERT_TRUE(rtc.startSetBackupSwitchModeJob(mode, fake.nowMs).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    TEST_ASSERT_EQUAL_UINT32(2, fake.callbackCount);
+    TEST_ASSERT_EQUAL_UINT32(0, countWritesTo(fake, RV3032::cmd::REG_ACTIVE_PMU));
+    TEST_ASSERT_EQUAL_HEX8(original, fake.activeConfig[0]);
+    RV3032::ConfigurationJobReport report{};
+    TEST_ASSERT_TRUE(rtc.getSetBackupSwitchModeJobResult(report).ok());
+    TEST_ASSERT_FALSE(report.mutationAttempted);
+  }
   const uint8_t inertCharger = 0x01;
   {
     FakeRv3032 fake;
@@ -5889,6 +6123,72 @@ void test_backup_charge_policy_requires_explicit_rechargeable_intent() {
   }
 }
 
+void test_abandoned_access_cleanup_stays_latched_across_lifecycles() {
+  for (bool generic : {false, true}) {
+    FakeRv3032 fake;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(true)).ok());
+    if (generic) {
+      TEST_ASSERT_TRUE(rtc.setOffsetPpm(0.238418579f).inProgress());
+      TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    } else {
+      TEST_ASSERT_TRUE(rtc.startReadUserEepromJob(0, 1, fake.nowMs).inProgress());
+    }
+    uint8_t used = 0;
+    const RV3032::Status st = generic
+        ? rtc.pollEeprom(fake.nowMs, 2, used) : rtc.pollJob(fake.nowMs, 2, used);
+    TEST_ASSERT_TRUE(st.inProgress());
+    TEST_ASSERT_BITS_HIGH(RV3032::cmd::CONTROL1_EERD_MASK,
+                          fake.direct[RV3032::cmd::REG_CONTROL1]);
+    const uint32_t callbacksBefore = fake.callbackCount;
+    rtc.end();
+    TEST_ASSERT_TRUE(rtc.begin(fake.config(false)).ok());
+    TEST_ASSERT_EQUAL_UINT32(callbacksBefore, fake.callbackCount);
+    TEST_ASSERT_TRUE(rtc.getSettings().persistentAccessStateUnproven);
+    TEST_ASSERT_TRUE(rtc.startPersistentAccessStateRecoveryJob(
+        RV3032::cmd::PMU_BSM_LEVEL, fake.nowMs).inProgress());
+    TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake).ok());
+    TEST_ASSERT_FALSE(rtc.getSettings().persistentAccessStateUnproven);
+  }
+}
+
+void test_access_recovery_restores_eerd_after_ready_failure() {
+  for (bool busyTimeout : {false, true}) {
+    FakeRv3032 fake;
+    fake.direct[RV3032::cmd::REG_CONTROL1] = RV3032::cmd::CONTROL1_EERD_MASK;
+    fake.activeConfig[0] = 0;
+    RV3032::Config config = fake.config(false);
+    config.eepromTimeoutMs = 10;
+    RV3032::RV3032 rtc;
+    TEST_ASSERT_TRUE(rtc.begin(config).ok());
+    if (busyTimeout) fake.setInitialBusy(500);
+    else fake.failOrdinal = 1;
+    TEST_ASSERT_TRUE(rtc.startPersistentAccessStateRecoveryJob(
+        RV3032::cmd::PMU_BSM_LEVEL, fake.nowMs).inProgress());
+    const RV3032::Err expected = busyTimeout
+        ? RV3032::Err::TIMEOUT : RV3032::Err::I2C_BUS;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected),
+        static_cast<int>(pollJobToCompletion(rtc, fake, 1).code));
+    RV3032::ConfigurationJobReport report{};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected), static_cast<int>(
+        rtc.getPersistentAccessStateRecoveryJobResult(report).code));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(expected),
+                          static_cast<int>(report.operationStatus.code));
+    TEST_ASSERT_TRUE(report.cleanupStatus.ok());
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(
+        RV3032::ConfigurationFinalState::REQUESTED_VERIFIED),
+        static_cast<int>(report.finalState));
+    TEST_ASSERT_BITS_LOW(RV3032::cmd::CONTROL1_EERD_MASK,
+                         fake.direct[RV3032::cmd::REG_CONTROL1]);
+    TEST_ASSERT_EQUAL_HEX8(RV3032::cmd::PMU_BSM_LEVEL, fake.activeConfig[0]);
+    TEST_ASSERT_FALSE(rtc.getSettings().persistentAccessStateUnproven);
+    TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
+    TEST_ASSERT_EQUAL_UINT16(0, fake.readOneAttempts);
+    TEST_ASSERT_FALSE(fake.protocolViolation);
+    TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
+  }
+}
+
 void test_persistent_access_state_recovery_is_explicit_and_proven() {
   FakeRv3032 fake;
   const uint8_t preservedControl1 = 0x3B;
@@ -5907,6 +6207,14 @@ void test_persistent_access_state_recovery_is_explicit_and_proven() {
       static_cast<uint8_t>(rtc.pollEeprom(fake.nowMs, 1, used).code));
   RV3032::SettingsSnapshot snapshot = rtc.getSettings();
   TEST_ASSERT_TRUE(snapshot.persistentAccessStateUnproven);
+
+  const uint32_t callbacksBeforeRebind = fake.callbackCount;
+  rtc.end();
+  TEST_ASSERT_TRUE(rtc.begin(fake.config(false)).ok());
+  TEST_ASSERT_EQUAL_UINT32(callbacksBeforeRebind, fake.callbackCount);
+  TEST_ASSERT_TRUE(rtc.getSettings().persistentAccessStateUnproven);
+  TEST_ASSERT_BITS_HIGH(RV3032::cmd::CONTROL1_EERD_MASK,
+                        fake.direct[RV3032::cmd::REG_CONTROL1]);
 
   RV3032::PrimaryCellConfigurationReport blockedEnsure{};
   const uint32_t callbacksBeforeRejectedEnsure = fake.callbackCount;
@@ -5929,7 +6237,7 @@ void test_persistent_access_state_recovery_is_explicit_and_proven() {
   const uint32_t commandsBeforeRecovery =
       countEepromCommands(fake, RV3032::cmd::EEPROM_CMD_WRITE_ONE) +
       countEepromCommands(fake, RV3032::cmd::EEPROM_CMD_READ_ONE);
-  fake.failOrdinal = fake.callbackCount + 1U;
+  fake.failOrdinal = fake.callbackCount + 2U;  // Control 1 needed for restoration.
   TEST_ASSERT_TRUE(rtc.startPersistentAccessStateRecoveryJob(
       desiredC0, fake.nowMs).inProgress());
   TEST_ASSERT_EQUAL_UINT8(
@@ -6339,7 +6647,7 @@ void test_persistent_phase_deadlines_are_exclusive_at_boundary_and_late() {
   }
 }
 
-void test_dispatched_write_one_crossing_cutoff_enters_cleanup_without_replay() {
+void test_dispatched_write_one_crossing_cutoff_proves_durability_without_replay() {
   FakeRv3032 baseline;
   RV3032::RV3032 baselineRtc;
   TEST_ASSERT_TRUE(baselineRtc.begin(baseline.config(true)).ok());
@@ -6392,9 +6700,37 @@ void test_dispatched_write_one_crossing_cutoff_enters_cleanup_without_replay() {
                         RV3032::cmd::CONFIG_EEPROM_START]);
     RV3032::UserEepromWriteReport report{};
     TEST_ASSERT_FALSE(rtc.getUserEepromWriteJobResult(report).ok());
-    TEST_ASSERT_EQUAL_UINT8(0, report.durablyVerifiedBytes);
+    TEST_ASSERT_EQUAL_UINT8(1, report.durablyVerifiedBytes);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::I2C_TIMEOUT),
+                          static_cast<int>(terminal.code));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::I2C_TIMEOUT),
+                          static_cast<int>(report.operationStatus.code));
     TEST_ASSERT_TRUE(report.cleanupVerified);
   }
+}
+
+void test_smallest_user_eeprom_write_budget_executes() {
+  FakeRv3032 fake;
+  const RV3032::Config config = fake.config(true);
+  RV3032::RV3032 rtc;
+  TEST_ASSERT_TRUE(rtc.begin(config).ok());
+  const uint32_t minimumMs = 10U + config.eepromTimeoutMs +
+      12U * config.i2cTimeoutMs + 2U * 25U +
+      250U + 6U * config.i2cTimeoutMs + 10U + config.i2cTimeoutMs + 1U;
+  const uint8_t desired = 0x5A;
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INVALID_PARAM),
+      static_cast<int>(rtc.startWriteUserEepromJob(
+          0, &desired, 1, fake.nowMs, minimumMs - 1U).code));
+  TEST_ASSERT_TRUE(rtc.startWriteUserEepromJob(
+      0, &desired, 1, fake.nowMs, minimumMs).inProgress());
+  TEST_ASSERT_TRUE(pollJobToCompletion(rtc, fake, 255).ok());
+  RV3032::UserEepromWriteReport report{};
+  TEST_ASSERT_TRUE(rtc.getUserEepromWriteJobResult(report).ok());
+  TEST_ASSERT_EQUAL_UINT8(1, report.durablyVerifiedBytes);
+  TEST_ASSERT_TRUE(report.cleanupVerified);
+  TEST_ASSERT_EQUAL_UINT16(1, fake.writeOneAttempts);
+  TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
 }
 
 void test_typed_vendor_controls_and_fake_register_semantics() {
@@ -6478,6 +6814,7 @@ void test_fixture_eeprom_command_and_transfer_evidence() {
   TEST_ASSERT_TRUE(FakeRv3032::writeCallback(
       RV3032::cmd::I2C_ADDR_7BIT, command, sizeof(command), 5, &fake).ok());
   TEST_ASSERT_FALSE(fake.protocolViolation);
+  TEST_ASSERT_FALSE(fake.passwordCommandAttempted);
   TEST_ASSERT_EQUAL_UINT8(0, fake.pendingCommand);
   TEST_ASSERT_EQUAL_UINT16(0, fake.writeOneAttempts);
 
@@ -7890,11 +8227,16 @@ uint8_t phase2ConfigurationSuccessCap(Phase2ConfigurationPath path) {
 }
 
 uint8_t phase2ConfigurationWorstCap(Phase2ConfigurationPath path) {
+  using Access = RV3032::NativeTestAccess;
   switch (path) {
-    case Phase2ConfigurationPath::TIMER: return 9;
-    case Phase2ConfigurationPath::PERIODIC: return 8;
-    case Phase2ConfigurationPath::CLKOUT: return 8;
-    case Phase2ConfigurationPath::TEMPERATURE: return 10;
+    case Phase2ConfigurationPath::TIMER:
+      return Access::noWaitCallbackCap(Access::JobKind::SET_TIMER);
+    case Phase2ConfigurationPath::PERIODIC:
+      return Access::noWaitCallbackCap(Access::JobKind::SET_PERIODIC_UPDATE);
+    case Phase2ConfigurationPath::CLKOUT:
+      return Access::noWaitCallbackCap(Access::JobKind::SET_CLKOUT_CONFIG);
+    case Phase2ConfigurationPath::TEMPERATURE:
+      return Access::noWaitCallbackCap(Access::JobKind::SET_TEMPERATURE_EVENT_CONFIG);
     default: return 0;
   }
 }
@@ -7968,6 +8310,47 @@ void assertPhase2RequestedWritesNotReplayed(
         maximum,
         countWritesMatching(actual, expected.reg,
                             expected.data, expected.length));
+  }
+}
+
+void test_staged_callback_time_bounds_at_maximum_transfer_timeout() {
+  for (auto path : {Phase2ConfigurationPath::TIMER,
+                    Phase2ConfigurationPath::PERIODIC,
+                    Phase2ConfigurationPath::CLKOUT,
+                    Phase2ConfigurationPath::TEMPERATURE}) {
+    for (bool failFinalRead : {false, true}) {
+      for (bool clockHook : {false, true}) {
+        FakeRv3032 fake;
+        RV3032::Config config = fake.config(false);
+        config.i2cTimeoutMs = 100;
+        fake.callbackDurationMs = config.i2cTimeoutMs;
+        if (!clockHook) config.nowMs = nullptr;
+        if (failFinalRead) fake.failOrdinal = phase2ConfigurationSuccessCap(path);
+        RV3032::RV3032 rtc;
+        TEST_ASSERT_TRUE(rtc.begin(config).ok());
+        TEST_ASSERT_TRUE(startPhase2ConfigurationPath(path, rtc).inProgress());
+        RV3032::Status st;
+        for (uint8_t polls = 0; polls < 16U && rtc.isOrdinaryJobBusy(); ++polls) {
+          uint8_t used = 0;
+          st = rtc.pollJob(fake.nowMs, 1, used);
+          TEST_ASSERT_LESS_OR_EQUAL_UINT8(1, used);
+        }
+        TEST_ASSERT_FALSE(rtc.isOrdinaryJobBusy());
+        const uint8_t expectedCallbacks = failFinalRead
+            ? phase2ConfigurationWorstCap(path) : phase2ConfigurationSuccessCap(path);
+        TEST_ASSERT_EQUAL_UINT32(expectedCallbacks, fake.callbackCount);
+        TEST_ASSERT_EQUAL_UINT32(expectedCallbacks * config.i2cTimeoutMs, fake.nowMs);
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(failFinalRead
+            ? RV3032::Err::I2C_BUS : RV3032::Err::OK), static_cast<int>(st.code));
+        RV3032::ConfigurationJobReport report{};
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(st.code), static_cast<int>(
+            getPhase2ConfigurationPathResult(path, rtc, report).code));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(failFinalRead
+            ? RV3032::ConfigurationFinalState::SAFE_DISABLED_VERIFIED
+            : RV3032::ConfigurationFinalState::REQUESTED_VERIFIED),
+            static_cast<int>(report.finalState));
+      }
+    }
   }
 }
 
@@ -9475,10 +9858,9 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
   TEST_ASSERT_TRUE(g_pendingOperation.ordinaryStatus.ok());
 
   Serial.inject("status\n");
-  const int queuedInput = Serial.available();
   const uint32_t callbacksBeforeBlockedLoop = success.callbackCount;
   loop();
-  TEST_ASSERT_EQUAL_INT(queuedInput, Serial.available());
+  TEST_ASSERT_EQUAL_INT(0, Serial.available());
   TEST_ASSERT_LESS_OR_EQUAL_UINT32(
       1U, success.callbackCount - callbacksBeforeBlockedLoop);
   Serial.resetInput();
@@ -9706,7 +10088,7 @@ void test_phase3_wire_validation_and_closed_status_domain() {
   TEST_ASSERT_EQUAL_UINT32(0, rtc.totalSuccess());
 
   static_assert(transport::MAX_TRANSFER_BYTES >= 46U,
-                "selected ESP32 Wire core must support full register bursts");
+                "Wire must support the public 0x00..0x2D register burst");
   wire.reset();
   arduinoStubMillis = 10;
   uint8_t registerFile[46] = {};
@@ -9715,6 +10097,11 @@ void test_phase3_wire_validation_and_closed_status_domain() {
       sizeof(registerFile)).ok());
   TEST_ASSERT_EQUAL_UINT32(1, wire.physicalAttemptCalls);
   TEST_ASSERT_EQUAL_UINT32(sizeof(registerFile), wire.rxLength);
+  uint8_t unsupportedSpan[57] = {};
+  TEST_ASSERT_EQUAL_INT(static_cast<int>(RV3032::Err::INVALID_PARAM),
+      static_cast<int>(rtc.readRegisters(0, unsupportedSpan,
+                                         sizeof(unsupportedSpan)).code));
+  TEST_ASSERT_EQUAL_UINT32(1, wire.physicalAttemptCalls);
 }
 
 void test_phase3_wire_complete_deadline_timeout_restoration_and_order() {
@@ -10024,6 +10411,40 @@ void test_phase3_strict_cli_numeric_tokens_preserve_outputs() {
   }
 }
 
+void test_cli_pending_warning_and_serial_discard_preserve_owner() {
+  FakeRv3032 fake;
+  beginCliHarness(fake, false);
+  arduinoStubMillis = UINT32_MAX - 10000U;
+  const uint32_t startMs = arduinoStubMillis;
+  TEST_ASSERT_TRUE(operationAccepted("timer configuration",
+      g_rtc.setTimer(50, RV3032::TimerFrequency::Hz1, true)));
+  TEST_ASSERT_EQUAL_UINT32(startMs, g_pendingOperation.startedMs);
+  Serial.inject("verbose 1\nclear_porf");
+  arduinoStubMillis = startMs + PENDING_WARNING_MS - 1U;
+  loop();
+  TEST_ASSERT_EQUAL_INT(0, Serial.available());
+  TEST_ASSERT_FALSE(g_verbose);
+  TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
+  TEST_ASSERT_EQUAL_UINT32(1, fake.callbackCount);
+  TEST_ASSERT_TRUE(Serial.output().find("exceeded 15 s") == std::string::npos);
+  loop();
+  TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
+  TEST_ASSERT_TRUE(g_pendingOperation.overdueReported);
+  const std::string warning = Serial.output();
+  TEST_ASSERT_TRUE(warning.find("Pending ordinary job operation 'timer configuration'")
+                   != std::string::npos);
+  TEST_ASSERT_TRUE(warning.find("IN_PROGRESS") != std::string::npos);
+  loop();
+  TEST_ASSERT_EQUAL_STRING(warning.c_str(), Serial.output().c_str());
+  driveCliPending(fake);
+  const uint32_t before = fake.callbackCount;
+  Serial.inject("\nverbose 1\n");
+  loop();
+  TEST_ASSERT_TRUE(g_verbose);
+  TEST_ASSERT_EQUAL_UINT32(before, fake.callbackCount);
+  TEST_ASSERT_FALSE(g_pendingOperation.overdueReported);
+}
+
 void test_phase3_cli_line_reader_discards_overflow_through_terminator() {
   FakeRv3032 fake;
   beginCliHarness(fake, true);
@@ -10076,6 +10497,11 @@ int main(int, char**) {
   RUN_TEST(test_verified_calendar_set_validation_and_wrapped_deadline_are_zero_io);
   RUN_TEST(test_calendar_multi_instruction_budget_refreshes_deadlines_and_cutoffs);
   RUN_TEST(test_default_calendar_jobs_admit_without_clock_hook);
+  RUN_TEST(test_default_temperature_job_executes_without_clock_hook);
+  RUN_TEST(test_impossible_ordinary_states_fail_without_transport);
+  RUN_TEST(test_impossible_persistent_states_preserve_cleanup_evidence);
+  RUN_TEST(test_password_range_helper_rejects_invalid_spans);
+  RUN_TEST(test_default_backup_job_executes_at_large_callback_timeouts);
   RUN_TEST(test_verified_calendar_retains_callback_status_on_timed_reconciliation);
   RUN_TEST(test_verified_calendar_accepts_one_second_rollover);
   RUN_TEST(test_verified_calendar_rejects_backward_final_read);
@@ -10141,15 +10567,19 @@ int main(int, char**) {
   RUN_TEST(test_phase1_mutating_jobs_do_not_replay_ambiguous_writes);
   RUN_TEST(test_queue_cleanup_failure_cancels_later_items);
   RUN_TEST(test_eeprom_queue_preserves_completed_ordinary_job_evidence);
+  RUN_TEST(test_polling_predicates_drain_queued_work_behind_ordinary_job);
   RUN_TEST(test_auxiliary_cleanup_failures_preserve_access_state_proof);
   RUN_TEST(test_backup_charge_policy_requires_explicit_rechargeable_intent);
   RUN_TEST(test_persistent_access_state_recovery_is_explicit_and_proven);
+  RUN_TEST(test_access_recovery_restores_eerd_after_ready_failure);
+  RUN_TEST(test_abandoned_access_cleanup_stays_latched_across_lifecycles);
   RUN_TEST(test_persistent_deadlines_stop_callbacks_and_report_unverified_cleanup);
   RUN_TEST(test_recovery_settle_timeout_preserves_proven_access_state);
   RUN_TEST(test_persistent_settle_timeout_preserves_proven_cleanup);
   RUN_TEST(test_persistent_whole_deadline_preserves_effective_callback_failure);
   RUN_TEST(test_persistent_phase_deadlines_are_exclusive_at_boundary_and_late);
-  RUN_TEST(test_dispatched_write_one_crossing_cutoff_enters_cleanup_without_replay);
+  RUN_TEST(test_dispatched_write_one_crossing_cutoff_proves_durability_without_replay);
+  RUN_TEST(test_smallest_user_eeprom_write_budget_executes);
   RUN_TEST(test_typed_vendor_controls_and_fake_register_semantics);
   RUN_TEST(test_fixture_eeprom_command_and_transfer_evidence);
   RUN_TEST(test_primary_busy_matrix_and_preserves_unrelated_device_state);
@@ -10160,6 +10590,7 @@ int main(int, char**) {
   RUN_TEST(test_phase2_backup_activation_reconciliation_and_admission);
   RUN_TEST(test_phase2_backup_fault_timing_and_evidence_matrix);
   RUN_TEST(test_phase2_staged_fault_ordinals_getters_and_no_replay);
+  RUN_TEST(test_staged_callback_time_bounds_at_maximum_transfer_timeout);
   RUN_TEST(test_phase2_staged_cleanup_fault_matrix_and_caps);
   RUN_TEST(test_clkout_verification_reports_last_byte_mismatch_safely);
   RUN_TEST(test_phase4_staged_safe_payloads_preserve_neighbor_bits);
@@ -10179,5 +10610,6 @@ int main(int, char**) {
   RUN_TEST(test_phase3_wire_short_stage_release_and_initialization);
   RUN_TEST(test_phase3_strict_cli_numeric_tokens_preserve_outputs);
   RUN_TEST(test_phase3_cli_line_reader_discards_overflow_through_terminator);
+  RUN_TEST(test_cli_pending_warning_and_serial_discard_preserve_owner);
   return UNITY_END();
 }

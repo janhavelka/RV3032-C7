@@ -309,7 +309,7 @@ static constexpr uint8_t USER_EEPROM_SIZE = 32; ///< Persistent user EEPROM size
 static constexpr uint8_t USER_EEPROM_JOB_MAX_BYTES = 16; ///< Per-job byte bound.
 static constexpr uint32_t READ_TIME_OPERATION_TIMEOUT_MS = 200; ///< Default snapshot deadline.
 static constexpr uint32_t SET_TIME_OPERATION_TIMEOUT_MS = 700; ///< Default verified-set deadline.
-static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MS = 250;
+static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MS = 500;
 static constexpr uint32_t BACKUP_SWITCH_OPERATION_TIMEOUT_MAX_MS = 1000;
 static constexpr uint32_t PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS = 1000;
 /// Reserved post-mutation verification interval; admission also needs margin.
@@ -450,6 +450,9 @@ struct SettingsSnapshot {
   /// Primary ensure callback timeout; appended for aggregate compatibility.
   uint32_t primaryCellI2cTimeoutMs = 0;
   /// EERD/C0 cleanup needs explicit recovery; appended for compatibility.
+  /// Retained across end()/begin() on this object, including a callback rebind.
+  /// Lifecycle reset and a raw PORF observation do not prove access cleanup.
+  /// Cleared only by verified access-state recovery/cleanup.
   bool persistentAccessStateUnproven = false;
 };
 
@@ -516,6 +519,7 @@ class RV3032 {
    * @note Performs zero transport/wait callbacks and does not prove presence,
    *       apply PMU policy, clear flags, or queue persistence. Call probe()
    *       explicitly when address-communication evidence is required.
+   *       Retains any persistentAccessStateUnproven evidence across lifecycles.
    */
   Status begin(const Config& config);
 
@@ -541,6 +545,8 @@ class RV3032 {
    *       C0/Control 1 restoration snapshot; after rebinding, the application
    *       must explicitly reinitialize affected product policy or follow its
    *       documented power-cycle and reprovisioning procedure.
+   *       Abandoned access cleanup retains persistentAccessStateUnproven;
+   *       rebinding this object does not clear that evidence.
    */
   void end();
 
@@ -663,6 +669,14 @@ class RV3032 {
   bool isEepromBusy() const;
 
   /**
+   * @brief Check whether generic EEPROM work can advance on its own surface.
+   * @return true when initialized, generic work is queued/active, and no
+   *         ordinary job owns the device. Select pollEeprom()/tick() with this
+   *         predicate; otherwise advance isOrdinaryJobBusy() via pollJob().
+   */
+  bool isEepromPollable() const;
+
+  /**
    * @brief Get status of the current or last generic persistence batch.
    * 
    * @return IN_PROGRESS while generic work is active; otherwise semantic
@@ -706,6 +720,8 @@ class RV3032 {
    * @return NOT_INITIALIZED before begin(), BUSY while an ordinary job owns
    *         the engine, IN_PROGRESS while generic work remains, otherwise the
    *         cached terminal batch status (which may be OK or an earlier error).
+   * @note BUSY means poll the other surface with pollJob(). isEepromBusy()
+   *       may still be true for queued items; use isEepromPollable() to dispatch.
    * @note The method may use the full supplied budget. tick(now_ms) delegates
    *       with a budget of one instruction. A zero budget performs no I2C and
    *       returns the current progress or terminal status.
@@ -739,7 +755,7 @@ class RV3032 {
    * @note Use this predicate to select the polling surface. isJobBusy()
    *       retains its legacy combined behavior and also reports an active
    *       generic EEPROM item; isEepromBusy() reports generic active or queued
-   *       work.
+   *       work. isEepromPollable() selects the available generic surface.
    */
   bool isOrdinaryJobBusy() const;
 
@@ -749,6 +765,9 @@ class RV3032 {
    * @return IN_PROGRESS while an ordinary job is active, BUSY while an active
    *         generic EEPROM item owns its separate polling surface, otherwise
    *         the last terminal ordinary-job status.
+   * @note BUSY describes current ownership. Completed typed get*JobResult()
+   *       accessors still return their real terminal Status and saved report
+   *       while generic EEPROM work runs; their evidence is not overwritten.
    */
   Status getJobStatus() const;
 
@@ -846,6 +865,8 @@ class RV3032 {
    *         unqualified timeout.
    * @note A zero budget performs no I2C and returns the current progress or
    *       terminal status.
+   * @note BUSY means poll the other surface with pollEeprom()/tick(). Select
+   *       this method with isOrdinaryJobBusy(), not the combined isJobBusy().
    * @warning If INTERNAL_STATE_ERROR follows an already-issued staged
    *          mutation and no existing reconciliation path applies, the final
    *          hardware state is unverified. Reinspect and reinitialize the
@@ -1048,6 +1069,7 @@ class RV3032 {
    * 
    * @param time Date/time structure with values to set
    * @return Status::Ok() on success, error on validation or I2C failure
+   * @return BUSY while ordinary work or queued/active persistence is pending.
    * @note Weekday is user-assigned: values 0..6 are accepted without requiring
    *       agreement with the date and are written unchanged. Writing Seconds resets the
    *       chip's hundredths counter and the 4096 Hz through 1 Hz prescalers.
@@ -1073,6 +1095,7 @@ class RV3032 {
    * 
    * @param ts Unix timestamp (seconds since epoch)
    * @return Status::Ok() on success, error otherwise
+   * @return BUSY while ordinary work or queued/active persistence is pending.
    * @note Active-only calendar mutation; no EEPROM is involved.
    */
   Status setUnix(uint32_t ts);
@@ -1261,7 +1284,9 @@ class RV3032 {
    * @warning The trickle charger is gated by BSM *and* TCM together: it is
    *          active only when TCM != 00 AND BSM selects Direct or Level
    *          (App. Manual Rev. 1.3 section 4.3). Because this job preserves
-   *          the existing TCM, the safe legacy method rejects a nonzero TCM.
+   *          the existing TCM, the safe legacy method rejects a nonzero TCM
+   *          when changing to an enabled BSM. An already-selected mode succeeds
+   *          without an active PMU write; it cannot newly enable charging.
    *          Use startSetBackupSwitchModeJobWithChargePolicy() only with a
    *          compatible rechargeable source.
    */
@@ -1562,7 +1587,8 @@ class RV3032 {
    *       hook; without one it is derived from the two callback bounds.
    */
   Status startReadCoherentTemperatureJob(
-      uint32_t nowMs, uint32_t operationTimeoutMs = 100);
+      uint32_t nowMs,
+      uint32_t operationTimeoutMs = READ_TIME_OPERATION_TIMEOUT_MS);
   /** @brief Copy the completed coherent temperature result. */
   Status getReadCoherentTemperatureJobResult(
       CoherentTemperatureResult& result) const;
@@ -1812,6 +1838,7 @@ class RV3032 {
    * @return OK after one burst for lengths up to 15; IN_PROGRESS for the full
    *         16-byte cooperative job, whose terminal result is returned by
    *         pollJob(); or a validation/transport error.
+   * @return BUSY while ordinary work or queued/active persistence is pending.
    * @note User RAM is volatile; this operation never uses EEPROM.
    */
   Status writeUserRam(uint8_t offset, const uint8_t* buf, size_t len);
@@ -1839,6 +1866,7 @@ class RV3032 {
    * @param reg Register address
    * @param value Value to write
    * @return Status::Ok() on success, error otherwise
+   * @return BUSY while ordinary work or queued/active persistence is pending.
    * @note Uses a reviewed per-register direct-write allowlist. Status,
    *       control, unsupported password, EEPROM staging/command, indirect EEPROM,
    *       read-only, and reserved registers are rejected before I2C.
@@ -1876,6 +1904,7 @@ class RV3032 {
    *       wraparound, and blocks that cross undocumented address gaps. This is
    *       a diagnostic/control helper using tracked I2C bounded by
    *       Config::i2cTimeoutMs; it is not the managed EEPROM persistence path.
+   * @return BUSY while ordinary work or queued/active persistence is pending.
    * @warning Every byte must pass the reviewed direct-write allowlist. Only
    *          temperature thresholds and volatile user RAM are writable.
    */
@@ -1936,6 +1965,9 @@ class RV3032 {
   static Status dateTimeToUnix(const DateTime& time, uint32_t& timestamp);
 
  private:
+  // Defined only by native tests to inject otherwise unreachable state faults.
+  friend struct NativeTestAccess;
+
   enum class EepromState : uint8_t {
     IDLE,
     READ_CONTROL1,
@@ -1996,6 +2028,33 @@ class RV3032 {
     USER_EEPROM_WRITE,
     PERSISTENT_ACCESS_RECOVERY
   };
+
+  // Indexed by JobKind. Nonzero entries bound the complete acyclic no-wait
+  // job, including safe-state cleanup: callback time <= cap * i2cTimeoutMs.
+  // Caller scheduling gaps are additional. Zero marks an idle kind or a job
+  // with its own explicit operation deadline. Native fault matrices check
+  // these bounds; adding a transfer requires reviewing the table and docs.
+  static constexpr uint8_t NO_WAIT_JOB_CALLBACK_CAPS[] = {
+      0,   // NONE
+      9,   // SET_TIMER: 6 forward + 3 cleanup
+      8,   // SET_PERIODIC_UPDATE: 5 forward + 3 cleanup
+      0,   // SET_BACKUP_SWITCH_MODE: deadline plus vendor activation wait
+      8,   // SET_CLKOUT_CONFIG: 5 forward + 3 cleanup
+      10,  // SET_TEMPERATURE_EVENT_CONFIG: 7 forward + 3 cleanup
+      4,   // REGISTER_UPDATE: optional guard plus reset edge
+      2,   // TEMP_LSB_FLAG_CLEAR
+      2,   // WRITE_USER_RAM: at most two chunks
+      0,   // READ_COHERENT_TEMPERATURE: deadline
+      0,   // READ_TIME_SNAPSHOT: deadline
+      0,   // SET_TIME_VERIFIED: deadline
+      0,   // PERSISTENT_READ: deadline and waits
+      0,   // USER_EEPROM_WRITE: deadline and waits
+      0,   // PERSISTENT_ACCESS_RECOVERY: deadline and waits
+  };
+  static_assert(sizeof(NO_WAIT_JOB_CALLBACK_CAPS) /
+                    sizeof(NO_WAIT_JOB_CALLBACK_CAPS[0]) ==
+                static_cast<size_t>(JobKind::PERSISTENT_ACCESS_RECOVERY) + 1U,
+                "Every JobKind needs an explicit timing classification");
 
   enum class JobState : uint8_t {
     IDLE,
@@ -2202,6 +2261,7 @@ class RV3032 {
   Status _eepromCleanupStatus = Status::Ok();
   uint32_t _eepromWriteCount = 0;
   uint32_t _eepromWriteFailures = 0;
+  // Object-lifetime evidence: passive lifecycle changes cannot prove chip state.
   bool _persistentAccessStateUnproven = false;
   bool _primaryCellEnsureAttempted = false;
 

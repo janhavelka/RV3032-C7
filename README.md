@@ -91,15 +91,15 @@ void setup() {
 
 void loop() {
   const uint32_t now = nowMs(nullptr);
-  RV3032::Status persistence = rtc.tick(now); // one EEPROM instruction
-  if (!persistence.ok() && !persistence.inProgress() &&
-      persistence.code != RV3032::Err::BUSY) {
-    handleRtcPersistenceFailure(persistence);
-  }
   if (rtc.isOrdinaryJobBusy()) {
     uint8_t used = 0;
     RV3032::Status job = rtc.pollJob(now, 1, used);
     handleRtcJobProgress(job);          // at most one library callback
+  } else if (rtc.isEepromPollable()) {
+    RV3032::Status persistence = rtc.tick(now); // one EEPROM instruction
+    if (!persistence.ok() && !persistence.inProgress()) {
+      handleRtcPersistenceFailure(persistence);
+    }
   }
 }
 ```
@@ -108,6 +108,13 @@ This is a lifecycle sketch: the transport callbacks and application error
 handlers are intentionally project-owned. See
 `examples/01_basic_bringup_cli/main.cpp` and `examples/common/I2cTransport.h`
 for a complete Arduino-ESP32 integration.
+
+Use `isOrdinaryJobBusy()` and `isEepromPollable()` to select one polling
+surface per owner pass. `isJobBusy()` combines active work; `isEepromBusy()`
+also includes queued persistence that may be waiting for an ordinary job.
+Either poller's `BUSY` result means advance the other surface. While generic
+work owns the device, `getJobStatus()` reports `BUSY`, but completed typed
+`get*JobResult()` accessors retain the ordinary job's terminal status and report.
 
 `waitMs` is optional for ordinary cooperative use. It is required only by the
 explicit synchronous primary-cell ensure operation. It must sleep/yield for at
@@ -255,6 +262,11 @@ application runs and proves `startPersistentAccessStateRecoveryJob()` with its
 intended C0. The synchronous primary-cell ensure operation obeys the same latch:
 it is rejected with zero I/O until recovery, and an ensure that cannot prove
 its own C0/Control 1 cleanup sets the latch.
+The latch survives `end()`/`begin()` on the same driver object, including
+abandoned active cleanup and callback rebinding. Recovery remains available
+with generic writes disabled; `begin()` always validates its EEPROM timeout.
+An EEbusy read failure or timeout is retained as the recovery operation error
+while bounded direct C0/EERD restoration still proceeds.
 
 The generic queue status/count/depth surfaces do not describe explicit typed
 persistent jobs. Those jobs use `isOrdinaryJobBusy()`, `pollJob()`, and their
@@ -344,7 +356,8 @@ activation is 2 ms for disabled-to-Direct and 10 ms for disabled-to-Level.
 The job preserves non-BSM PMU bits, checks optional C0 queue capacity before
 mutation, writes at most once, reconciles by exact implemented-bit readback,
 and cannot report terminal success before the activation not-before boundary.
-The safe default rejects Direct/Level if the observed TCM field is nonzero.
+The safe default rejects a change to Direct/Level if the observed TCM field is
+nonzero. Re-requesting the current mode succeeds without an active PMU write.
 Boards with a compatible rechargeable source must state that intent explicitly
 with `startSetBackupSwitchModeJobWithChargePolicy(...,
 BackupChargePolicy::ALLOW_BACKUP_CHARGING)`; this may energize charging.
@@ -555,13 +568,16 @@ writable path for the PlatformIO install/build command.
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e esp32s3dev
 .\scripts\pio.cmd run -e esp32s2dev
+.\scripts\pio.cmd run -e esp32s3hil
+.\scripts\pio.cmd run -e esp32s3hil_persistence
 python scripts/generate_version.py check
 python tools/check_portability.py
 python tools/check_abi.py
+python -m unittest discover -s tools -p 'test_check_*.py'
 python tools/check_package.py source
 doxygen Doxyfile
-python tools/hil_cli_runner.py --parser-self-test
-python tools/hil_cli_runner.py --dry-run
+python -S tools/hil_cli_runner.py --parser-self-test
+python -S tools/hil_cli_runner.py --dry-run
 ```
 
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM

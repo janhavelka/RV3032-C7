@@ -185,8 +185,7 @@ Status RV3032::begin(const Config& config) {
         Err::INVALID_CONFIG,
         "Primary-cell I2C timeout must be 1..5 ms");
   }
-  if (config.enableEepromWrites &&
-      (config.eepromTimeoutMs < 10 || config.eepromTimeoutMs > 250)) {
+  if (config.eepromTimeoutMs < 10 || config.eepromTimeoutMs > 250) {
     return Status::Error(Err::INVALID_CONFIG, "EEPROM timeout must be 10..250 ms");
   }
   if (config.offlineThreshold < 1) {
@@ -256,6 +255,10 @@ bool RV3032::isJobBusy() const {
 
 bool RV3032::isOrdinaryJobBusy() const {
   return _job.state != JobState::IDLE;
+}
+
+bool RV3032::isEepromPollable() const {
+  return _initialized && isEepromBusy() && !isOrdinaryJobBusy();
 }
 
 Status RV3032::getJobStatus() const {
@@ -948,7 +951,11 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         const uint8_t observedBsm = static_cast<uint8_t>(
             _job.backupOriginalPmu & cmd::PMU_BSM_MASK);
         const bool requestedOff = requestedBsm == cmd::PMU_BSM_DISABLED;
-        if (!requestedOff &&
+        const bool alreadyRequested = requestedOff
+            ? (observedBsm == cmd::PMU_BSM_DISABLED ||
+               observedBsm == cmd::PMU_BSM_DISABLED_ALT)
+            : observedBsm == requestedBsm;
+        if (!alreadyRequested && !requestedOff &&
             (_job.backupOriginalPmu & cmd::PMU_TCM_MASK) != 0 &&
             _job.backupChargePolicy ==
                 BackupChargePolicy::REQUIRE_CHARGER_OFF) {
@@ -958,10 +965,6 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
               _job.backupOriginalPmu);
           return failConfiguration(st, JobState::BACKUP_VERIFY_PMU);
         }
-        const bool alreadyRequested = requestedOff
-            ? (observedBsm == cmd::PMU_BSM_DISABLED ||
-               observedBsm == cmd::PMU_BSM_DISABLED_ALT)
-            : observedBsm == requestedBsm;
         if (alreadyRequested) {
           _job.backupTargetPmu = _job.backupOriginalPmu;
         }
@@ -1761,9 +1764,9 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
                               _job.recoveryReadyDeadlineMs)) {
           rememberConfigurationOperationFailure(Status::Error(
               Err::TIMEOUT, "EEPROM busy during access-state recovery"));
-          _job.configurationReport.finalState =
-              ConfigurationFinalState::UNCHANGED;
-          return finishJob(_job.configurationReport.operationStatus);
+          // EEbusy gates EECMD dispatch, not direct C0/EERD restoration.
+          _job.state = JobState::RECOVERY_READ_CONTROL1;
+          break;
         }
         uint8_t temp = 0;
         const uint32_t boundary = earlierDeadline(
@@ -1774,9 +1777,8 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
         if (transfer.callbackInvoked) ++instructionsUsed;
         if (!transfer.status.ok()) {
           rememberConfigurationOperationFailure(transfer.status);
-          _job.configurationReport.finalState =
-              ConfigurationFinalState::UNCHANGED;
-          return finishJob(_job.configurationReport.operationStatus);
+          _job.state = JobState::RECOVERY_READ_CONTROL1;
+          break;
         }
         if ((temp & cmd::EEPROM_BUSY_MASK) != 0) {
           const uint16_t checkCap = static_cast<uint16_t>(
@@ -1784,9 +1786,8 @@ Status RV3032::pollJob(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instru
           if (++_job.recoveryReadyChecks >= checkCap) {
             rememberConfigurationOperationFailure(Status::Error(
                 Err::TIMEOUT, "EEPROM busy check cap reached"));
-            _job.configurationReport.finalState =
-                ConfigurationFinalState::UNCHANGED;
-            return finishJob(_job.configurationReport.operationStatus);
+            _job.state = JobState::RECOVERY_READ_CONTROL1;
+            break;
           }
           _job.recoveryNotBeforeMs =
               currentNowMs + EEPROM_BUSY_POLL_INTERVAL_MS;
@@ -2388,11 +2389,6 @@ Status RV3032::startPersistentAccessStateRecoveryJob(
   if (!workIdle()) {
     return Status::Error(Err::BUSY, "Driver work already in progress");
   }
-  if (_config.eepromTimeoutMs < 10 || _config.eepromTimeoutMs > 250) {
-    return Status::Error(
-        Err::INVALID_CONFIG,
-        "Recovery EEPROM timeout requires 10..250 ms");
-  }
   if ((desiredC0 & ~cmd::PMU_IMPLEMENTED_MASK) != 0) {
     return Status::Error(Err::INVALID_PARAM,
                          "Recovery PMU value touches reserved bits");
@@ -2773,6 +2769,13 @@ uint32_t RV3032::_nowMs() const {
 }
 
 void RV3032::_resetRuntimeState() {
+  // Discarding a saved restoration snapshot cannot prove that the chip left
+  // persistent-access mode. Preserve both terminal and still-active evidence.
+  _persistentAccessStateUnproven = _persistentAccessStateUnproven ||
+      _job.persistent.cleanupRequired || _eeprom.persistent.cleanupRequired ||
+      (_job.activeKind == JobKind::PERSISTENT_ACCESS_RECOVERY &&
+       _job.configurationReport.mutationAttempted &&
+       !(_job.recoveryPmuVerified && _job.recoveryControl1Verified));
   _config = Config{};
   _initialized = false;
   _driverState = DriverState::UNINIT;
@@ -2782,7 +2785,6 @@ void RV3032::_resetRuntimeState() {
   _eepromCleanupStatus = Status::Ok();
   _eepromWriteCount = 0;
   _eepromWriteFailures = 0;
-  _persistentAccessStateUnproven = false;
   _primaryCellEnsureAttempted = false;
   _lastOkMs = 0;
   _lastError = Status::Ok();
@@ -4474,7 +4476,7 @@ Status RV3032::writeRegs(uint8_t reg, const uint8_t* buf, size_t len) {
 
 bool RV3032::intersectsUnsupportedPasswordRange(uint8_t reg, size_t len) {
   if (!validRegisterSpan(reg, len)) {
-    return false;
+    return true;
   }
   const uint16_t start = reg;
   const uint16_t lastAddress = static_cast<uint16_t>(start + len - 1U);
@@ -4983,7 +4985,8 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
       boundary = earlierDeadline(
           nowMs, boundary, op.phaseDeadlineMs);
     }
-    if (forwardWrite && !isCleanupState() && op.mutationCutoffActive) {
+    if (forwardWrite && !op.writeAttempted && !isCleanupState() &&
+        op.mutationCutoffActive) {
       boundary = earlierDeadline(nowMs, boundary, op.mutationCutoffMs);
     }
     return boundary;

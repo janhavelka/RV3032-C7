@@ -19,6 +19,7 @@ Thank you for considering contributing to this project!
    python scripts/generate_version.py check
    python tools/check_portability.py
    python tools/check_abi.py
+   python -m unittest discover -s tools -p 'test_check_*.py'
    python -S tools/hil_cli_runner.py --parser-self-test
    python -S tools/hil_cli_runner.py --dry-run
    python tools/check_package.py source

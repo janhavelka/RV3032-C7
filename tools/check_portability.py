@@ -8,15 +8,25 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CODE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".ino"}
 FORBIDDEN_CORE_CALLS = ("millis", "micros", "delay", "delayMicroseconds", "yield")
-FORBIDDEN_EXAMPLE_PATTERNS = {
+FORBIDDEN_PARSER_PATTERNS = {
     "atoi": r"\batoi\s*\(",
     "sscanf": r"\bsscanf\s*\(",
+    "strtol": r"\bstrtol\s*\(",
+    "sprintf": r"\bsprintf\s*\(",
+}
+FORBIDDEN_EXAMPLE_PATTERNS = {
+    **FORBIDDEN_PARSER_PATTERNS,
     "parseInt": r"\bparseInt\s*\(",
     "String.toInt": r"\.toInt\s*\(",
     "String.toFloat": r"\.toFloat\s*\(",
     "parallel tick owner": r"\bg_rtc\s*\.\s*tick\s*\(",
     "inferred job owner": r"\bg_rtc\s*\.\s*isJobBusy\s*\(",
     "direct EEPROM command": r"\bREG_EE_COMMAND\b",
+}
+HEALTH_UPDATE_OWNERS = {
+    "_i2cWriteReadTracked", "_i2cWriteTracked",
+    "_i2cWriteReadTrackedTimeout", "_i2cWriteTrackedTimeout",
+    "_i2cWriteReadPresenceTracked", "finishTrackedTransferBefore",
 }
 
 
@@ -102,35 +112,32 @@ def source_files(directory: str) -> list[pathlib.Path]:
     )
 
 
-def main() -> int:
+def core_source_errors(raw: str, rel: str) -> list[str]:
     errors: list[str] = []
-
-    for path in source_files("src") + source_files("include"):
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        code = mask_non_code(raw)
-        rel = path.relative_to(ROOT).as_posix()
+    code = mask_non_code(raw)
+    for header in ("Arduino.h", "cstdio", "stdio.h"):
         includes = re.finditer(
-            r'^\s*#\s*include\s*[<"]Arduino\.h[>"]', raw, re.MULTILINE
-        )
-        if any(code[match.start()] == "#" or "#" in code[match.start():match.end()]
-               for match in includes):
-            errors.append(f"{rel}: core must not include Arduino.h")
-        for call in FORBIDDEN_CORE_CALLS:
-            if re.search(rf"\b{call}\s*\(", code):
-                errors.append(f"{rel}: forbidden platform call {call}()")
+            rf'^\s*#\s*include\s*[<"]{re.escape(header)}[>"]', raw, re.MULTILINE)
+        if any("#" in code[match.start():match.end()] for match in includes):
+            errors.append(f"{rel}: core must not include {header}")
+    for call in FORBIDDEN_CORE_CALLS:
+        if re.search(rf"\b{call}\s*\(", code):
+            errors.append(f"{rel}: forbidden platform call {call}()")
+    for label, pattern in FORBIDDEN_PARSER_PATTERNS.items():
+        if re.search(pattern, code):
+            errors.append(f"{rel}: forbidden {label} path")
+    return errors
 
-    source_path = ROOT / "src/RV3032.cpp"
-    source = source_path.read_text(encoding="utf-8", errors="replace")
+
+def cooperative_contract_errors(source: str) -> list[str]:
+    errors: list[str] = []
     code = mask_non_code(source)
     spans = function_spans(code)
     for call in re.finditer(r"(?<!::)\b_updateHealth\s*\(", code):
         owner = next(
             (name for name, start, end in spans if start <= call.start() < end), None
         )
-        tracked = owner == "finishTrackedTransferBefore" or (
-            owner is not None and owner.startswith("_i2c") and "Tracked" in owner
-        )
-        if not tracked:
+        if owner not in HEALTH_UPDATE_OWNERS:
             line = source.count("\n", 0, call.start()) + 1
             errors.append(f"src/RV3032.cpp:{line}: health update outside tracked transport")
 
@@ -145,12 +152,37 @@ def main() -> int:
             errors.append(f"src/RV3032.cpp: cooperative engine {required}() not found")
     if not any(name.startswith("processPersistent") for name in found):
         errors.append("src/RV3032.cpp: persistent cooperative engine not found")
-    for engine, start, end in engines:
-        span = (start, end)
-        for call in untimed.finditer(code[span[0]:span[1]]):
-            position = span[0] + call.start()
-            line = source.count("\n", 0, position) + 1
-            errors.append(f"src/RV3032.cpp:{line}: untimed register I/O in {engine}()")
+    members: dict[str, list[tuple[int, int]]] = {}
+    for name, start, end in spans:
+        members.setdefault(name, []).append((code.index("{", start) + 1, end))
+    pending = list(found)
+    reachable: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        for start, end in members[name]:
+            calls = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", code[start:end]))
+            pending.extend(calls.intersection(members).difference(reachable))
+    for engine in sorted(reachable):
+        for start, end in members[engine]:
+            for call in untimed.finditer(code[start:end]):
+                position = start + call.start()
+                line = source.count("\n", 0, position) + 1
+                errors.append(
+                    f"src/RV3032.cpp:{line}: untimed register I/O in {engine}()")
+    return errors
+
+
+def main() -> int:
+    errors: list[str] = []
+    for path in source_files("src") + source_files("include"):
+        errors.extend(core_source_errors(
+            path.read_text(encoding="utf-8", errors="replace"),
+            path.relative_to(ROOT).as_posix()))
+    errors.extend(cooperative_contract_errors(
+        (ROOT / "src/RV3032.cpp").read_text(encoding="utf-8")))
 
     for path in source_files("examples"):
         code = mask_non_code(path.read_text(encoding="utf-8", errors="replace"))

@@ -40,15 +40,22 @@ struct PendingOperation {
   PendingSurface surface = PendingSurface::NONE;
   const char* name = nullptr;
   RV3032::Status ordinaryStatus = RV3032::Status::Ok();
+  RV3032::Status lastStatus = RV3032::Status::Ok();
+  uint32_t startedMs = 0;
+  bool overdueReported = false;
 };
 
 static PendingOperation g_pendingOperation{};
+static constexpr uint32_t PENDING_WARNING_MS = 15000U;
 
 static bool operationAccepted(const char* name, const RV3032::Status& status) {
   if (status.inProgress()) {
+    g_pendingOperation = PendingOperation{};
     g_pendingOperation.surface = PendingSurface::ORDINARY_JOB;
     g_pendingOperation.name = name;
     g_pendingOperation.ordinaryStatus = RV3032::Status::Ok();
+    g_pendingOperation.lastStatus = status;
+    g_pendingOperation.startedMs = millis();
     return true;
   }
   return status.ok();
@@ -218,12 +225,28 @@ static void reportPendingCompletion(const RV3032::Status* persistenceStatus) {
   }
 }
 
+static void reportPendingOverdue(uint32_t nowMs) {
+  if (g_pendingOperation.overdueReported ||
+      nowMs - g_pendingOperation.startedMs < PENDING_WARNING_MS) return;
+  g_pendingOperation.overdueReported = true;
+  LOGE("Pending %s operation '%s' exceeded 15 s: %s (detail=%ld, message=%s); polling continues",
+       g_pendingOperation.surface == PendingSurface::ORDINARY_JOB
+           ? "ordinary job" : "EEPROM",
+       g_pendingOperation.name == nullptr ? "unnamed" : g_pendingOperation.name,
+       errToStr(g_pendingOperation.lastStatus.code),
+       static_cast<long>(g_pendingOperation.lastStatus.detail),
+       g_pendingOperation.lastStatus.msg == nullptr
+           ? "" : g_pendingOperation.lastStatus.msg);
+}
+
 static void pollPendingOperation(uint32_t nowMs) {
   if (g_pendingOperation.surface == PendingSurface::ORDINARY_JOB) {
     uint8_t instructionsUsed = 0;
     const RV3032::Status status =
         g_rtc.pollJob(nowMs, 1, instructionsUsed);
+    g_pendingOperation.lastStatus = status;
     if (status.inProgress()) {
+      reportPendingOverdue(nowMs);
       return;
     }
     g_pendingOperation.ordinaryStatus = status;
@@ -241,7 +264,9 @@ static void pollPendingOperation(uint32_t nowMs) {
     uint8_t instructionsUsed = 0;
     const RV3032::Status status =
         g_rtc.pollEeprom(nowMs, 1, instructionsUsed);
+    g_pendingOperation.lastStatus = status;
     if (status.inProgress() || g_rtc.isEepromBusy()) {
+      reportPendingOverdue(nowMs);
       return;
     }
     reportPendingCompletion(&status);
@@ -2323,6 +2348,8 @@ void setup() {
 
 void loop() {
   if (g_pendingOperation.surface != PendingSurface::NONE) {
+    String discarded;
+    (void)cli_shell::readLine(discarded, true);
     pollPendingOperation(millis());
     delay(10);
     return;

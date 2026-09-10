@@ -37,14 +37,55 @@ EXPECTED_ERR_VALUES = {
 }
 
 
-def parse_err_values(header: str) -> dict[str, int]:
+EXPECTED_ENUM_VALUES = {
+    "DriverState": {"UNINIT": 0, "READY": 1, "DEGRADED": 2, "OFFLINE": 3},
+    "TimestampSource": {"TLow": 0, "THigh": 1, "Evi": 2},
+    "ClkoutFrequency": {"Hz32768": 0, "Hz1024": 1, "Hz64": 2, "Hz1": 3},
+    "TimerFrequency": {"Hz4096": 0, "Hz64": 1, "Hz1": 2, "Hz1_60": 3},
+    "EviDebounce": {"None": 0, "Hz256": 1, "Hz64": 2, "Hz8": 3},
+    "PeriodicUpdateFrequency": {"SECOND": 0, "MINUTE": 1},
+    "TrickleChargeMode": {"CHARGER_DISABLED": 0, "V1_75": 1, "V3_0": 2, "V4_5": 3},
+    "TrickleChargeResistance": {"OHM_600": 0, "KOHM_2": 1, "KOHM_7": 2, "KOHM_12": 3},
+    "ConfigurationEepromRegister": {
+        "PMU": 0xC0, "OFFSET": 0xC1, "CLKOUT1": 0xC2, "CLKOUT2": 0xC3,
+        "TEMPERATURE_REFERENCE0": 0xC4, "TEMPERATURE_REFERENCE1": 0xC5,
+    },
+    "ConfigurationFinalState": {
+        "UNCHANGED": 0, "REQUESTED_VERIFIED": 1, "SAFE_DISABLED_VERIFIED": 2, "UNKNOWN": 3,
+    },
+    "PrimaryCellConfigurationOutcome": {
+        "NOT_ATTEMPTED": 0, "ALREADY_CONFIGURED": 1, "EEPROM_UPDATED": 2, "FAILED": 3,
+    },
+    "PrimaryCellFailureStage": {
+        "NONE": 0, "PRECONDITION": 1, "PREPARE_ACCESS": 2, "READ_PERSISTENT": 3,
+        "WRITE_PERSISTENT": 4, "VERIFY_PERSISTENT": 5, "CLEANUP": 6, "SETTLE": 7,
+    },
+    "BackupSwitchMode": {"Off": 0, "Level": 1, "Direct": 2},
+    "BackupChargePolicy": {"REQUIRE_CHARGER_OFF": 0, "ALLOW_BACKUP_CHARGING": 1},
+    "Err": EXPECTED_ERR_VALUES,
+}
+# These defaults/sizes are compiled into consumer code. Changes require an
+# intentional baseline update and release note, even if the ABI still links.
+EXPECTED_PUBLIC_CONSTANTS = {
+    "USER_EEPROM_SIZE": ("uint8_t", 32),
+    "USER_EEPROM_JOB_MAX_BYTES": ("uint8_t", 16),
+    "READ_TIME_OPERATION_TIMEOUT_MS": ("uint32_t", 200),
+    "SET_TIME_OPERATION_TIMEOUT_MS": ("uint32_t", 700),
+    "BACKUP_SWITCH_OPERATION_TIMEOUT_MS": ("uint32_t", 500),
+    "BACKUP_SWITCH_OPERATION_TIMEOUT_MAX_MS": ("uint32_t", 1000),
+    "PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS": ("uint32_t", 1000),
+    "MIN_SET_TIME_OPERATION_BUDGET_MS": ("uint32_t", 125),
+}
+
+
+def parse_enum_values(header: str, name: str) -> dict[str, int]:
     match = re.search(
-        r"enum\s+class\s+Err\s*:\s*uint8_t\s*\{(.*?)\}\s*;",
+        rf"enum\s+class\s+{re.escape(name)}\s*:\s*uint8_t\s*\{{(.*?)\}}\s*;",
         header,
         re.DOTALL,
     )
     if match is None:
-        raise ValueError("cannot locate Err enum")
+        raise ValueError(f"cannot locate {name} enum with uint8_t representation")
     block = re.sub(r"/\*.*?\*/|//[^\n]*", "", match.group(1), flags=re.DOTALL)
     values: dict[str, int] = {}
     current = -1
@@ -52,12 +93,30 @@ def parse_err_values(header: str) -> dict[str, int]:
         entry = entry.strip()
         if not entry:
             continue
-        item = re.fullmatch(r"([A-Z][A-Z0-9_]*)(?:\s*=\s*(0[xX][0-9A-Fa-f]+|\d+))?", entry)
+        item = re.fullmatch(r"([A-Za-z_]\w*)(?:\s*=\s*(0[xX][0-9A-Fa-f]+|\d+))?", entry)
         if item is None:
-            raise ValueError(f"unsupported Err declaration: {entry!r}")
+            raise ValueError(f"unsupported {name} declaration: {entry!r}")
         current = int(item.group(2), 0) if item.group(2) is not None else current + 1
         values[item.group(1)] = current
     return values
+
+
+def public_contract_errors(header: str) -> list[str]:
+    errors: list[str] = []
+    for name, expected in EXPECTED_ENUM_VALUES.items():
+        try:
+            observed = parse_enum_values(header, name)
+            if observed != expected:
+                errors.append(f"{name} value table changed: {observed}")
+        except ValueError as exc:
+            errors.append(str(exc))
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", "", header, flags=re.DOTALL)
+    for name, (expected_type, expected_value) in EXPECTED_PUBLIC_CONSTANTS.items():
+        match = re.search(
+            rf"\bstatic\s+constexpr\s+(\w+)\s+{name}\s*=\s*(\d+)\s*;", code)
+        if match is None or (match[1], int(match[2])) != (expected_type, expected_value):
+            errors.append(f"public constant {name} changed (expected {expected_type} {expected_value})")
+    return errors
 
 
 def header_integer(header: str, name: str) -> int | None:
@@ -69,14 +128,9 @@ def header_integer(header: str, name: str) -> int | None:
 
 
 def main() -> int:
-    errors: list[str] = []
-    status_header = (ROOT / "include/RV3032/Status.h").read_text(encoding="utf-8")
-    try:
-        observed = parse_err_values(status_header)
-        if observed != EXPECTED_ERR_VALUES:
-            errors.append(f"Err value table changed: {observed}")
-    except ValueError as exc:
-        errors.append(str(exc))
+    header = "\n".join((ROOT / "include/RV3032" / name).read_text(encoding="utf-8")
+                       for name in ("Status.h", "Config.h", "RV3032.h"))
+    errors = public_contract_errors(header)
 
     manifest = json.loads((ROOT / "library.json").read_text(encoding="utf-8"))
     version = manifest.get("version")
