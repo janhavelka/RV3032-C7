@@ -941,8 +941,11 @@ class RV3032 {
    *            are unsupported and deliberately excluded.
    * @param nowMs Current monotonic time.
    * @param operationTimeoutMs Whole-operation timeout in the derived minimum
-   *       through `10000` ms. The minimum is cleanup reserve plus one forward
-   *       callback timeout plus one millisecond.
+   *       through `10000` ms. The minimum reserves cleanup, two 1 ms READ_ONE
+   *       settles, a 1 ms deadline margin, and one callback timeout with a
+   *       clock hook (21 without one). This admits one byte with fast callbacks;
+   *       allow extra time for slow callbacks, more bytes, an initially busy
+   *       device, and owner scheduling gaps.
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    * @note The start call performs zero I2C. Reads remain available when generic
    *       writes are disabled, but direct access temporarily changes EERD and
@@ -951,7 +954,7 @@ class RV3032 {
   Status startReadConfigurationEepromJob(
       ConfigurationEepromRegister reg,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = 1000);
+      uint32_t operationTimeoutMs = 4000);
   /**
    * @brief Start an indirect, directly verified user EEPROM read job.
    * @param offset Public user EEPROM offset in `0..31`.
@@ -967,7 +970,7 @@ class RV3032 {
       uint8_t offset,
       uint8_t length,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = 1000);
+      uint32_t operationTimeoutMs = 4000);
   /**
    * @brief Start a compare-before-write, directly verified user EEPROM write.
    * @param offset Public user EEPROM offset in `0..31`.
@@ -979,6 +982,11 @@ class RV3032 {
    * @return IN_PROGRESS when admitted, or a zero-I/O validation/admission error.
    * @note Requires Config::enableEepromWrites. Every changed byte permits at
    *       most one WRITE_ONE command and requires direct persistent readback.
+   *       The minimum reserves post-write proof/cleanup, two 1 ms READ_ONE
+   *       settles, a 1 ms deadline margin, and one callback timeout with a
+   *       clock hook (27 without one). This admits the first byte with fast
+   *       callbacks. Allow extra time for slow callbacks, more bytes, an
+   *       initially busy device, and owner scheduling gaps.
    *       A failure stops before later bytes and the report retains verified
    *       partial progress.
    */
@@ -987,7 +995,7 @@ class RV3032 {
       const uint8_t* data,
       uint8_t length,
       uint32_t nowMs,
-      uint32_t operationTimeoutMs = 4000);
+      uint32_t operationTimeoutMs = 6000);
   /**
    * @brief Copy the completed persistent-read result without consuming it.
    * @return IN_PROGRESS while the matching job is active,

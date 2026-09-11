@@ -305,6 +305,23 @@ The final cleanup reserve is derived as
 the 10 ms write settle, the configured EEbusy window, twelve fixed proof
 callbacks, two 25 ms READ_ONE poll windows, and that complete final cleanup.
 This prevents a dispatched wear-limited command from being stranded mid-proof.
+Direct read/write admission also includes both 1 ms comparison waits and a
+strict 1 ms deadline margin before that cutoff. With a clock hook, the minimum
+forward allowance is one callback timeout; actual callback durations determine
+progress. Without a clock hook, it covers all 21 read / 27 write callbacks for
+the first byte. The READ_ONE ready callback leaves time for its data read in
+the same 25 ms phase. Longer requests, initial EEbusy, slow clocked callbacks,
+and owner scheduling gaps may require a larger operation budget.
+
+Direct read/write defaults are 4000/6000 ms, admitting the supported timeout
+range without a clock hook. The generic item deadline is the larger of 4000 ms
+and the post-write reserve plus the full 27-callback forward allowance, both
+comparison waits, a 1 ms margin, and the initial 250 ms ready window. Its
+maximum is 5323 ms with 100 ms I2C and 250 ms EEPROM timeouts. This prevents
+valid slow configurations from being admitted to a queue that can never
+dispatch WRITE_ONE. A cleanup ready-phase timeout is retained as cleanup
+failure evidence while C0/Control 1 restoration continues within the remaining
+whole-operation deadline; EEbusy only gates EEPROM commands.
 
 Generic persistence owns a `PersistentOp` separate from the ordinary job's
 `PersistentOp`; a queue poll cannot reset a completed ordinary result. Any

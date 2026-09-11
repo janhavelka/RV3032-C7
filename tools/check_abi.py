@@ -76,17 +76,32 @@ EXPECTED_PUBLIC_CONSTANTS = {
     "PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS": ("uint32_t", 1000),
     "MIN_SET_TIME_OPERATION_BUDGET_MS": ("uint32_t", 125),
 }
+# Default arguments are also compiled into callers. Guard the declaration as
+# well as its named constant so a replacement literal cannot bypass the check.
+EXPECTED_OPERATION_TIMEOUT_DEFAULTS = {
+    "startReadTimeSnapshotJob": "READ_TIME_OPERATION_TIMEOUT_MS",
+    "startSetTimeAndClearInvalidFlagsVerifiedJob": "SET_TIME_OPERATION_TIMEOUT_MS",
+    "startReadConfigurationEepromJob": "4000",
+    "startReadUserEepromJob": "4000",
+    "startWriteUserEepromJob": "6000",
+    "startPersistentAccessStateRecoveryJob": "PERSISTENT_ACCESS_RECOVERY_OPERATION_TIMEOUT_MS",
+    "startSetBackupSwitchModeJob": "BACKUP_SWITCH_OPERATION_TIMEOUT_MS",
+    "startReadCoherentTemperatureJob": "READ_TIME_OPERATION_TIMEOUT_MS",
+}
 
 
 def parse_enum_values(header: str, name: str) -> dict[str, int]:
+    # Doxygen examples or a retained old declaration must not supply the ABI
+    # baseline when the active enum has changed.
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", "", header, flags=re.DOTALL)
     match = re.search(
         rf"enum\s+class\s+{re.escape(name)}\s*:\s*uint8_t\s*\{{(.*?)\}}\s*;",
-        header,
+        code,
         re.DOTALL,
     )
     if match is None:
         raise ValueError(f"cannot locate {name} enum with uint8_t representation")
-    block = re.sub(r"/\*.*?\*/|//[^\n]*", "", match.group(1), flags=re.DOTALL)
+    block = match.group(1)
     values: dict[str, int] = {}
     current = -1
     for entry in block.split(","):
@@ -116,6 +131,17 @@ def public_contract_errors(header: str) -> list[str]:
             rf"\bstatic\s+constexpr\s+(\w+)\s+{name}\s*=\s*(\d+)\s*;", code)
         if match is None or (match[1], int(match[2])) != (expected_type, expected_value):
             errors.append(f"public constant {name} changed (expected {expected_type} {expected_value})")
+    defaults: dict[str, str] = {}
+    for method in re.finditer(r"\bStatus\s+(\w+)\s*\(([^;{}]*)\)\s*;", code):
+        argument = re.search(r"\buint32_t\s+operationTimeoutMs\s*=\s*([^,)]+)", method[2])
+        if argument is not None:
+            defaults[method[1]] = re.sub(r"\s+", "", argument[1])
+    for name in sorted(defaults.keys() | EXPECTED_OPERATION_TIMEOUT_DEFAULTS.keys()):
+        expected = EXPECTED_OPERATION_TIMEOUT_DEFAULTS.get(name)
+        if defaults.get(name) != expected:
+            errors.append(
+                f"{name} operationTimeoutMs default changed "
+                f"(expected {expected}, observed {defaults.get(name)})")
     return errors
 
 

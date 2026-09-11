@@ -209,7 +209,8 @@ User EEPROM writes require `Config::enableEepromWrites=true`:
 
 ```cpp
 const uint32_t now = nowMs(nullptr);
-rtc.startWriteUserEepromJob(offset, data, length, now, 4000);
+RV3032::Status st = rtc.startWriteUserEepromJob(offset, data, length, now);
+if (!st.inProgress()) handleRtcJobAdmissionFailure(st);
 ```
 
 Public user EEPROM offsets are `0..31`; each job is limited to 16 bytes. Write
@@ -241,6 +242,18 @@ intervals start after the command transport callback completes; the generic
 `eepromTimeoutMs` window begins after the mandatory 10 ms WRITE_ONE settle.
 Successful cleanup restores and verifies the queued intended active C0..C5
 mirror as well as the saved safe-access state.
+
+Direct EEPROM read/write budgets include the two READ_ONE waits before the
+cleanup cutoff. Without `nowMs`, admission also budgets all first-byte
+callbacks conservatively. For example, `i2cTimeoutMs=5` and
+`eepromTimeoutMs=100` require at least 298/518 ms for a read/write with a clock
+hook, or 398/648 ms without one. Allow extra time for slow callbacks, additional
+bytes, initial EEbusy, and scheduling gaps; see the public API for the formulas.
+The direct-read default is 4000 ms and the direct-write default is 6000 ms.
+Queued items use at least 4000 ms, extended when necessary to cover the
+configured first-byte callback bound, initial ready wait, and post-write
+proof/cleanup reserve. At the maximum supported timeout settings, that bound
+is 5323 ms per queued item. Caller scheduling gaps still consume these budgets.
 
 Forward-operation and access-state-cleanup evidence are separate. Typed read
 and write reports retain `operationStatus`, `cleanupStatus`, durable proof, and

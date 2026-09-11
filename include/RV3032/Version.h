@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #ifndef RV3032_VERSION_STRING
-#define RV3032_VERSION_STRING "3.2.0"
+#define RV3032_VERSION_STRING "3.2.1"
 #endif
 
 #ifndef RV3032_BUILD_DATE
@@ -48,7 +48,7 @@ static constexpr uint16_t VERSION_MAJOR = 3;
 static constexpr uint16_t VERSION_MINOR = 2;
 
 /// @brief Patch version (backward-compatible fixes).
-static constexpr uint16_t VERSION_PATCH = 0;
+static constexpr uint16_t VERSION_PATCH = 1;
 
 /// @brief Full semantic version string.
 static constexpr const char* VERSION = RV3032_VERSION_STRING;
@@ -56,7 +56,7 @@ static constexpr const char* VERSION = RV3032_VERSION_STRING;
 /// @brief Encoded version for numeric comparison: MAJOR*10000 + MINOR*100 + PATCH.
 /// @note Project versions constrain MINOR and PATCH to 0..99 so this encoding
 ///       remains collision-free; the generator rejects larger components.
-static constexpr uint32_t VERSION_CODE = 30200;
+static constexpr uint32_t VERSION_CODE = 30201;
 
 /// @brief Build date string.
 static constexpr const char* BUILD_DATE = RV3032_BUILD_DATE;

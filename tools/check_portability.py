@@ -94,13 +94,62 @@ def matching_brace(code: str, opening: int) -> int | None:
 
 def function_spans(code: str) -> list[tuple[str, int, int]]:
     spans: list[tuple[str, int, int]] = []
-    for match in re.finditer(r"\bRV3032::([A-Za-z_]\w*)\s*\(", code):
-        opening = code.find("{", match.end())
-        if opening < 0:
+    # A qualified call is not a definition: require the function body directly
+    # after a balanced parameter list, qualifiers, and optional trailing return.
+    # Balancing prevents an enclosing if (...) { from looking like a body.
+    signature = r"([A-Za-z_]\w*)\s*\("
+
+    def body_after_parameters(opening: int) -> int | None:
+        depth = 1
+        position = opening + 1
+        while position < len(code) and depth:
+            if code[position] == "(":
+                depth += 1
+            elif code[position] == ")":
+                depth -= 1
+            position += 1
+        if depth:
+            return None
+        suffix = re.match(
+            r"\s*(?:(?:const|volatile)\b\s*)*(?:&&?\s*)?"
+            r"(?:noexcept\b\s*(?:\([^;{}]*\)\s*)?)?"
+            r"(?:->\s*[^;{}]+)?\{", code[position:])
+        return None if suffix is None else position + suffix.end() - 1
+
+    for match in re.finditer(r"\bRV3032::" + signature, code):
+        opening = body_after_parameters(match.end() - 1)
+        if opening is None:
             continue
         end = matching_brace(code, opening)
         if end is not None:
             spans.append((match.group(1), match.start(), end))
+
+    # Include bodies defined in the driver class itself, while excluding nested
+    # state/report structs. This lets the call graph cross .cpp/header boundaries.
+    for driver in re.finditer(r"\bclass\s+RV3032\s*(?:final\s*)?\{", code):
+        opening = driver.end() - 1
+        end = matching_brace(code, opening)
+        if end is None:
+            continue
+        depth = 0
+        top_level: set[int] = set()
+        for index in range(opening + 1, end - 1):
+            if depth == 0:
+                top_level.add(index)
+            if code[index] == "{":
+                depth += 1
+            elif code[index] == "}":
+                depth -= 1
+        for match in re.finditer(signature, code[opening + 1:end - 1]):
+            start = opening + 1 + match.start()
+            if start not in top_level:
+                continue
+            body = body_after_parameters(opening + match.end())
+            if body is None:
+                continue
+            body_end = matching_brace(code, body)
+            if body_end is not None:
+                spans.append((match.group(1), start, body_end))
     return spans
 
 
@@ -129,17 +178,36 @@ def core_source_errors(raw: str, rel: str) -> list[str]:
     return errors
 
 
-def cooperative_contract_errors(source: str) -> list[str]:
+def cooperative_contract_errors(source: str | dict[str, str]) -> list[str]:
     errors: list[str] = []
+    sources = {"src/RV3032.cpp": source} if isinstance(source, str) else source
+    locations: list[tuple[str, int, int]] = []
+    parts: list[str] = []
+    offset = 0
+    for rel, raw in sources.items():
+        parts.append(raw + "\n")
+        locations.append((rel, offset, offset + len(raw)))
+        offset += len(raw) + 1
+    source = "".join(parts)
+
+    def location(position: int) -> str:
+        for rel, start, end in locations:
+            if start <= position <= end:
+                return f"{rel}:{source.count(chr(10), start, position) + 1}"
+        return "core"
+
     code = mask_non_code(source)
     spans = function_spans(code)
-    for call in re.finditer(r"(?<!::)\b_updateHealth\s*\(", code):
+    declarations = {match.start(1) for match in re.finditer(
+        r"\b(?:Status|auto)\s+(?:RV3032::)?(_updateHealth)\s*\(", code)}
+    for call in re.finditer(r"\b_updateHealth\s*\(", code):
+        if call.start() in declarations:
+            continue
         owner = next(
             (name for name, start, end in spans if start <= call.start() < end), None
         )
         if owner not in HEALTH_UPDATE_OWNERS:
-            line = source.count("\n", 0, call.start()) + 1
-            errors.append(f"src/RV3032.cpp:{line}: health update outside tracked transport")
+            errors.append(f"{location(call.start())}: health update outside tracked transport")
 
     untimed = re.compile(r"(?<![A-Za-z0-9_])(?:readRegs|writeRegs)\s*\(")
     engines = [
@@ -169,20 +237,19 @@ def cooperative_contract_errors(source: str) -> list[str]:
         for start, end in members[engine]:
             for call in untimed.finditer(code[start:end]):
                 position = start + call.start()
-                line = source.count("\n", 0, position) + 1
                 errors.append(
-                    f"src/RV3032.cpp:{line}: untimed register I/O in {engine}()")
+                    f"{location(position)}: untimed register I/O in {engine}()")
     return errors
 
 
 def main() -> int:
     errors: list[str] = []
+    core_sources: dict[str, str] = {}
     for path in source_files("src") + source_files("include"):
-        errors.extend(core_source_errors(
-            path.read_text(encoding="utf-8", errors="replace"),
-            path.relative_to(ROOT).as_posix()))
-    errors.extend(cooperative_contract_errors(
-        (ROOT / "src/RV3032.cpp").read_text(encoding="utf-8")))
+        rel = path.relative_to(ROOT).as_posix()
+        core_sources[rel] = path.read_text(encoding="utf-8", errors="replace")
+        errors.extend(core_source_errors(core_sources[rel], rel))
+    errors.extend(cooperative_contract_errors(core_sources))
 
     for path in source_files("examples"):
         code = mask_non_code(path.read_text(encoding="utf-8", errors="replace"))

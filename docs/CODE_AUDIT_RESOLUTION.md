@@ -1,5 +1,8 @@
 # Code audit resolution
 
+Latest verification: [2026-09-10 complete correction review](#2026-09-10-complete-correction-review).
+Earlier sections retain the state and conclusions of their respective reviews.
+
 Date: 2026-08-30
 Audit reviewed: `docs/CODE_AUDIT.md`
 
@@ -255,3 +258,162 @@ version, global environment setting, or repository toolchain pin was changed.
 
 These are host tests and firmware builds. No hardware was flashed and no new
 physical HIL, persistence endurance, or backup-retention result is claimed.
+
+## 2026-09-10 landing re-audit
+
+Fetched all remotes, confirmed a clean worktree, and fast-forward checked
+`main`. Both local `HEAD` and `origin/main` were
+`16b700b87bb91ce88e0fcbc47945e5ac05d5e222` (`Enhance ABI and Portability Checks`).
+That commit contains all 22 changed files from the preceding implementation.
+Its [hosted CI run 34495585317](https://github.com/janhavelka/RV3032-C7/actions/runs/34495585317)
+passed all six jobs, including native tests, four embedded targets, and library
+validation. The unchanged baseline also passed all 131 native tests locally.
+
+The changes had landed, but the prior claim of full closure was too broad:
+items **1, 9, 11, and 22** still had gaps. The other 18 items were confirmed
+against implementation, public contracts, and their registered regressions.
+The corrections below are local follow-up work, prepared as **3.2.1**; they
+have not been committed, pushed, tagged, or published by this re-audit.
+
+### Remaining gaps reproduced and corrected
+
+1. **EEPROM admission and proof timing (item 1).** At `i2cTimeoutMs=1`,
+   `eepromTimeoutMs=100`, and with the clock hook enabled, the accepted 440 ms
+   write budget expired after the two mandatory comparison waits: zero
+   WRITE_ONE attempts, zero durable bytes. Clockless configurations at their
+   accepted minimum failed even earlier. Giving a clockless 100 ms callback
+   configuration a larger operation budget also exposed READ_ONE ready polling
+   consuming the entire phase allowance before its data read.
+   Admission now includes both waits; without a clock hook it charges the
+   complete first-byte forward sequence (21 read / 27 write callbacks).
+   Ready polling leaves a data-read allowance inside the existing 25 ms phase.
+   Clocked admission continues to allow fast callbacks instead of forcing the
+   pessimistic clockless bound on the default ESP32 CLI configuration.
+   The existing post-WRITE_ONE cutoff correction remains intact: dispatched
+   writes are reconciled once, retain their original error, and are not replayed.
+2. **Busy CLI backlog (item 9).** Injecting 256 newlines followed by a command
+   immediately before the final timer callback left the command queued. On the
+   next loop it executed despite having arrived while the CLI was busy.
+   The reader now carries the unconsumed input snapshot across completion.
+   The regression also proves partial tails are discarded, newly received
+   complete lines survive, and no additional transport callback is issued.
+3. **Cooperative-checker bypasses (item 11).** Both an inline driver member
+   calling untimed `readRegs()` and a qualified
+   `RV3032::_updateHealth(st)` call from an unauthorized owner passed the old
+   checker. The graph now includes inline members and all core source/header
+   files, and health-call checks distinguish declarations from qualified calls.
+   Mutation probes cover inline I/O, a separate implementation file, qualified
+   health calls, and allowed timed calls.
+4. **Changelog references (item 22).** The old Unreleased and 3.1.0 links still
+   referenced nonexistent `v3.1.0`; 3.2.0 had no comparison reference.
+   Development comparisons now use the existing `f3db733` and `16b700b` commits.
+   Git tags and GitHub releases confirm `v3.0.1` is the latest published release.
+   The 3.2.1 follow-up is explicitly marked prepared and unpublished, and its
+   version header was generated from `library.json`.
+
+### Item-by-item disposition
+
+| Item | At pushed `16b700b` | Re-audit evidence / final disposition |
+|---|---|---|
+| 1 | Partial | Cutoff guard and ambiguous-write proof landed correctly. Minimum-budget coverage was too narrow; corrected locally with `test_smallest_persistent_budgets_execute`. |
+| 2 | Complete | Coherent-temperature default references the 200 ms constant; no-clock 100 ms callback regression passes. |
+| 3 | Complete | `begin()` unconditionally rejects EEPROM windows outside 10..250 with zero I/O. Writes-disabled recovery remains available. |
+| 4 | Complete | `_resetRuntimeState()` preserves terminal and abandoned active cleanup obligations. Lifecycle/rebinding tests prove the latch survives and explicit recovery clears it. |
+| 5 | Complete | Ready timeout, transport failure, and check-cap paths advance to `RECOVERY_READ_CONTROL1`; tests verify C0/EERD restoration while retaining the original cause. |
+| 6 | Complete | Backup default is 500 ms; 60/100 ms callback configurations pass with and without a clock hook. |
+| 7 | Complete | All five named write APIs document queued-persistence BUSY. Changelog and synchronous-write admission regressions agree. |
+| 8 | Complete | The architecture error precedes all ESP32 dependencies and the full adapter body is guarded; both ESP32 builds and the negative compiler probe agree. |
+| 9 | Partial | One-shot 15-second warning and retained ownership were correct. Input beyond one drain budget leaked across completion; corrected locally and reproduced by a failing-then-passing CLI test. |
+| 10 | Complete | Invalid spans return true from the password-range helper; zero length, overflow, and SIZE_MAX regressions pass. |
+| 11 | Partial | Core parser bans and exact six-owner allowlist landed. Inline/cross-file graph traversal and qualified health-call handling needed the local correction. Six owners, rather than the report's proposed three, remain required by the actual wrapper architecture. |
+| 12 | Complete | Baselines cover all 15 public enums and eight public size/timeout constants. Mutation tests reject changed widths, explicit/implicit ordinals, and each changed constant. |
+| 13 | Complete | Tests force all five INTERNAL_STATE_ERROR sites, including missing Control 1 evidence and corrupt persistent state after real access staging. Cleanup obligations survive corruption. |
+| 14 | Complete | Negative password-command assertions accompany protocol-violation checks throughout the persistence suite. The fake's deliberate positive probe remains separate. |
+| 15 | Complete with report correction | Fallback is 64. The actual public allowlist permits 46 contiguous bytes, not 57; tests transfer 46 and reject 57 before transport. |
+| 16 | Complete | The cleanup comment correctly separates staging/mutex cleanup from nonStop reset. The installed pinned Wire implementation and transaction-order regressions agree. |
+| 17 | Complete | `alreadyRequested` is evaluated before the charging guard. Direct/Level no-ops with nonzero TCM use two reads and zero PMU writes. |
+| 18 | Complete | `isEepromPollable()` excludes an ordinary owner; both cross-surface BUSY contracts and typed-result distinction are documented. The combined owner regression drains queued work. |
+| 19 | Complete | The chosen table exists for every JobKind and is checked by success/fault matrices. Four staged-setter maximum-timeout tests prove the derived callback bounds. This does not impose deadlines on caller scheduling gaps. Temperature's actual maximum is ten callbacks. |
+| 20 | Complete | Both historical audit files are listed as retained working documents and excluded from package/API documentation. |
+| 21 | Complete | README, CONTRIBUTING, and CI list all four embedded environments. |
+| 22 | Partial | Version 3.2.0 and SettingsSnapshot binary-layout notes landed. Invalid comparison links remained; corrected locally alongside the explicitly unpublished 3.2.1 patch entry. |
+
+### Re-audit verification
+
+- Native suite: **132/132 passed**. The persistent minimum-budget test covers
+  **144 combinations**: read/write, clock present/absent, 1/5/50/100 ms callback
+  limits, 10/100/250 ms EEPROM windows, clock wrap, and zero/full clipped
+  callback durations in clockless mode. Clocked minima are exercised with
+  fast callbacks, as the public admission contract permits.
+- Contract-checker suite: **6 test methods passed**, including the new
+  qualified-call and inline/cross-file mutation probes.
+- All four embedded environments built successfully against the pinned
+  platform using the existing current-user PlatformIO installation.
+- Generated version, portability, ABI, source/package validation, device-free
+  HIL parser and 26-step dry run, Doxygen, and `git diff --check`: passed.
+- The negative non-ESP32 and 64-byte fallback compiler probes passed.
+- Hosted CI is green for the pushed baseline above. These local corrections
+  require a future commit/push before hosted CI can validate them.
+
+No physical HIL or new hardware evidence is claimed. The latest tagged release
+remains v3.0.1; preparing version metadata does not publish a release.
+
+## 2026-09-10 complete correction review
+
+The user requested a further independent re-audit and full correction of the
+remaining work. The starting worktree contained the preceding 3.2.1 edits;
+they were preserved. Fetch and fast-forward checks confirmed that local and
+upstream `main` still point to `16b700b`, with no divergence or conflicts.
+The previous fixes therefore remain local, while the hosted six-job CI run
+for `16b700b` is green.
+
+Three independent subagents reviewed EEPROM timing/cleanup, portability/ABI
+checks, and CLI/transport/API completeness. The parent reproduced findings,
+reviewed their corrections, and retained the existing 22-item disposition
+above as historical evidence. This pass found further gaps behind the earlier
+closure claims:
+
+| Finding | Reproduction and complete correction |
+|---|---|
+| 1: defaults and generic timing | With a clockless 100 ms transport and 250 ms EEPROM window, the accepted generic queue timed out before WRITE_ONE even with zero-duration callbacks. The previous direct-write default was also below the new admission minimum. Direct read/write defaults are now 4000/6000 ms. The generic budget is `max(4000, postWriteReserve + fullForwardMinimum + 250)`, bounded by 5323 ms across the accepted Config range. The obsolete fixed-budget `begin()` guard was removed. |
+| 5: cleanup phase expiry | After safe C0/EERD staging and a forward failure, polling at the cleanup ready-phase deadline left the chip in access mode even though the whole-operation budget still had time. Expiry/check-cap now records the cleanup timeout and proceeds with direct restoration; whole-operation expiry still stops all callbacks. |
+| 9: terminal callback input | A callback that injected `verbose 1` immediately before returning terminal status let the command execute on the next CLI loop. Both terminal polling surfaces now mark that input before reporting completion. Marking reads no bytes, so the existing 256-byte drain limit remains intact. |
+| 11: normal C++ signature variants | Trailing-return and reference-qualified helper definitions, plus inline members in a final class, could bypass graph traversal. Balanced parameter parsing now recognizes these forms and distinguishes qualified calls inside conditions from definitions. |
+| 12: documented enum and literal defaults | A commented old enum could hide a changed active ordinal. Enum discovery now ignores comments. The guard also baselines all eight public operation-timeout default arguments, including literal EEPROM defaults, and tests changes/removal of each. |
+
+Independent review confirmed the remaining original findings, including the
+46-byte public-read correction, all five impossible-state error sites,
+six legitimate health-update owners, charged backup no-ops, the JobKind
+callback-bound table, and source/package documentation consistency. No
+additional change to the chosen no-wait setter architecture was needed.
+
+The first-byte budget is an executable admission bound with the documented
+clock assumptions; it does not promise completion of every 16-byte request
+under arbitrary scheduling delays. A larger user-selected budget may be
+needed, and typed results continue to retain verified partial progress.
+
+### Final integrated verification
+
+- **135/135 native tests passed**, all defined and registered exactly once.
+  This includes 768 default-budget scenarios across all four persistence
+  surfaces, 288 minimum-budget scenarios, eight cleanup expiry/cap scenarios,
+  and four terminal-callback CLI input scenarios.
+- An additional independent 192-case recovery probe passed at exact admission
+  minima, including clock modes, timeout extremes, instruction budgets, wrap,
+  permanent busy, and first-ready-read failures.
+- **10 checker tests passed**. They cover active enum declarations, all 15
+  public enum tables, eight public constants, eight operation-timeout defaults,
+  core parser bans, health ownership, and transitive member-call detection.
+- **All four embedded builds passed**: esp32s3dev, esp32s2dev, esp32s3hil,
+  and esp32s3hil_persistence, using the pinned platform and existing managed
+  PlatformIO installation.
+- Version, portability, ABI, source/package checks, device-free HIL parser
+  and 26-step dry run, Doxygen, fallback/non-ESP32 compiler probes, and
+  `git diff --check`: passed.
+- The 3.2.1 archive was rebuilt and validated at `dist/RV3032-C7.tar.gz`.
+- Independent review of the final combined implementation found no further
+  concrete correctness or operation-bound defects within the audit scope.
+
+All requested code corrections are implemented and verified locally. At this
+verification point, commit/push remains outstanding; hosted CI has validated
+only `16b700b`. No release tag or hardware test was performed in this pass.

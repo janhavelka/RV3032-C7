@@ -8,6 +8,14 @@ namespace cli_shell {
 
 inline constexpr size_t MAX_LINE_LENGTH = 127U;
 inline constexpr size_t MAX_INPUT_BYTES_PER_POLL = 256U;
+inline size_t discardRemaining = 0U;
+
+// Snapshot pending-time input without consuming another per-loop byte budget.
+// The owner calls this at terminal completion before publishing its prompt.
+inline void markPendingInputForDiscard() {
+  const int available = LOG_SERIAL.available();
+  discardRemaining = available > 0 ? static_cast<size_t>(available) : 0U;
+}
 
 // While busy, discard complete input and retain discard-until-newline state
 // for a partial line, so its tail cannot become a command after completion.
@@ -21,15 +29,21 @@ inline bool readLine(String& outLine, bool discardInput = false) {
     reserved = true;
   }
 
-  if (discardInput && buffer.length() != 0U) {
-    buffer = "";
-    overflowed = true;
+  if (discardInput) {
+    markPendingInputForDiscard();
+    if (buffer.length() != 0U) {
+      buffer = "";
+      overflowed = true;
+    }
   }
   for (size_t consumed = 0; consumed < MAX_INPUT_BYTES_PER_POLL &&
        LOG_SERIAL.available() > 0; ++consumed) {
     const char c = static_cast<char>(LOG_SERIAL.read());
 
-    if (discardInput) {
+    if (discardInput || discardRemaining != 0U) {
+      // A job may finish before the bounded drain consumes its input snapshot.
+      // Carry that backlog across completion without discarding newer lines.
+      if (discardRemaining != 0U) --discardRemaining;
       overflowed = c != '\r' && c != '\n';
       continue;
     }

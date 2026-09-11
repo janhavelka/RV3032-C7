@@ -65,6 +65,31 @@ constexpr uint32_t persistentPostWriteReserveMs(
          persistentCleanupReserveMs(i2cTimeoutMs);
 }
 
+// Allow one byte to make forward progress before the cleanup/write cutoff:
+// seven access callbacks, fourteen comparison callbacks, and (for a changed
+// byte) six write callbacks. The comparison also needs two READ_ONE settles.
+// A clock hook measures actual callback time, so fast callbacks may share a
+// smaller forward window. Without one every callback is charged its timeout.
+// Longer requests can still return partial progress when their budget expires.
+constexpr uint32_t persistentForwardMinimumMs(uint32_t i2cTimeoutMs,
+                                              bool writeMode, bool hasClock) {
+  const uint32_t callbacks = hasClock ? 1U : (writeMode ? 27U : 21U);
+  return callbacks * i2cTimeoutMs +
+         2U * EEPROM_READ_SETTLE_MS + 1U;
+}
+
+// Keep the established four-second budget for ordinary configurations, but
+// also admit one changed byte when every callback consumes its full timeout.
+// The initial ready window is additional to the comparison/write prefix.
+constexpr uint32_t genericEepromOperationTimeoutMs(
+    uint32_t i2cTimeoutMs, uint32_t eepromTimeoutMs) {
+  const uint32_t executableMs = persistentPostWriteReserveMs(
+      i2cTimeoutMs, eepromTimeoutMs) + persistentForwardMinimumMs(
+      i2cTimeoutMs, true, false) + EEPROM_READY_TIMEOUT_MS;
+  return executableMs > GENERIC_EEPROM_OPERATION_TIMEOUT_MS
+      ? executableMs : GENERIC_EEPROM_OPERATION_TIMEOUT_MS;
+}
+
 int16_t decodeTemperatureRaw(const uint8_t* bytes) {
   const uint16_t raw = static_cast<uint16_t>(
       (static_cast<uint16_t>(bytes[1]) << 4) | (bytes[0] >> 4));
@@ -191,14 +216,6 @@ Status RV3032::begin(const Config& config) {
   if (config.offlineThreshold < 1) {
     return Status::Error(Err::INVALID_CONFIG, "Offline threshold must be at least 1");
   }
-  const uint32_t cleanupReserveMs = persistentPostWriteReserveMs(
-      config.i2cTimeoutMs, config.eepromTimeoutMs);
-  if (config.enableEepromWrites && GENERIC_EEPROM_OPERATION_TIMEOUT_MS <
-      cleanupReserveMs + config.i2cTimeoutMs + 1U) {
-    return Status::Error(Err::INVALID_CONFIG,
-                         "I2C timeout leaves no EEPROM cleanup reserve");
-  }
-
   _resetRuntimeState();
   _config = config;
   _initialized = true;
@@ -2270,7 +2287,8 @@ Status RV3032::startPersistentReadJob(uint8_t address, uint8_t length,
   const uint32_t cleanupReserveMs =
       persistentCleanupReserveMs(_config.i2cTimeoutMs);
   const uint32_t minimumTimeoutMs =
-      cleanupReserveMs + _config.i2cTimeoutMs + 1U;
+      cleanupReserveMs + persistentForwardMinimumMs(
+          _config.i2cTimeoutMs, false, _config.nowMs != nullptr);
   if (length == 0 || length > USER_EEPROM_JOB_MAX_BYTES ||
       !validPersistentSpan(address, length) ||
       timeoutMs < minimumTimeoutMs || timeoutMs > 10000) {
@@ -2332,7 +2350,8 @@ Status RV3032::startWriteUserEepromJob(uint8_t offset, const uint8_t* data,
   const uint32_t cleanupReserveMs = persistentPostWriteReserveMs(
       _config.i2cTimeoutMs, _config.eepromTimeoutMs);
   const uint32_t minimumTimeoutMs =
-      cleanupReserveMs + _config.i2cTimeoutMs + 1U;
+      cleanupReserveMs + persistentForwardMinimumMs(
+          _config.i2cTimeoutMs, true, _config.nowMs != nullptr);
   if (data == nullptr || offset >= USER_EEPROM_SIZE || length == 0 ||
       length > USER_EEPROM_JOB_MAX_BYTES ||
       length > static_cast<uint8_t>(USER_EEPROM_SIZE - offset) ||
@@ -4993,8 +5012,19 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
   };
   auto readPersistent = [&](uint8_t reg, uint8_t* data,
                             size_t len) -> Status {
+    uint32_t boundary = transferBoundary(false);
+    if (op.state == EepromState::POLL_READ1 ||
+        op.state == EepromState::POLL_READ2) {
+      // Ready is followed by a data read in this same phase. Leave at least
+      // one millisecond for that callback plus the strict deadline margin.
+      // Without a clock hook each callback consumes its entire timeout;
+      // giving the ready read all remaining time makes proof impossible.
+      uint32_t remainingMs = 0;
+      boundary = remainingBefore(nowMs, boundary, remainingMs) && remainingMs > 2U
+          ? boundary - 2U : nowMs;
+    }
     const TimedTransferResult result =
-        readRegsBefore(reg, data, len, nowMs, transferBoundary(false));
+        readRegsBefore(reg, data, len, nowMs, boundary);
     callbackUsed = result.callbackInvoked;
     return result.status;
   };
@@ -5568,11 +5598,13 @@ Status RV3032::processPersistentJob(PersistentOp& op, uint32_t& nowMs, bool& cal
       }
       if (hasDeadlinePassed(nowMs, op.phaseDeadlineMs) ||
           op.readyChecks >= EEPROM_CLEANUP_CHECK_CAP) {
-        // Deadline reached: the contract forbids starting another callback,
-        // so the access state stays unproven and is reported as such.
-        return finishCleanupFailure(Status::Error(
+        // Only the busy-wait phase ended. Direct C0/Control 1 restoration
+        // needs no EEbusy clearance and retains its whole-operation reserve.
+        rememberCleanupFailure(Status::Error(
             Err::TIMEOUT,
-            "EEPROM busy during cleanup"));
+            "EEPROM busy during cleanup"), true);
+        beginActiveRestore();
+        return inProgress;
       }
       uint8_t temp = 0;
       Status st = readPersistent(cmd::REG_TEMP_LSB, &temp, 1);
@@ -5771,10 +5803,12 @@ Status RV3032::processEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& 
       _eeprom.persistent.data[0] = _eeprom.value;
       const uint32_t cleanupReserveMs = persistentPostWriteReserveMs(
           _config.i2cTimeoutMs, _config.eepromTimeoutMs);
+      const uint32_t operationTimeoutMs = genericEepromOperationTimeoutMs(
+          _config.i2cTimeoutMs, _config.eepromTimeoutMs);
       _eeprom.persistent.deadlineMs =
-          currentNowMs + GENERIC_EEPROM_OPERATION_TIMEOUT_MS;
+          currentNowMs + operationTimeoutMs;
       _eeprom.persistent.mutationCutoffMs = currentNowMs +
-          (GENERIC_EEPROM_OPERATION_TIMEOUT_MS - cleanupReserveMs);
+          (operationTimeoutMs - cleanupReserveMs);
       _eeprom.persistent.deadlineActive = true;
       _eeprom.persistent.mutationCutoffActive = true;
     }

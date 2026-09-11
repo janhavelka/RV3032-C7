@@ -254,6 +254,7 @@ static void pollPendingOperation(uint32_t nowMs) {
       g_pendingOperation.surface = PendingSurface::EEPROM;
       return;
     }
+    cli_shell::markPendingInputForDiscard();
     reportPendingCompletion(nullptr);
     g_pendingOperation = PendingOperation{};
     cli::printPrompt();
@@ -269,6 +270,7 @@ static void pollPendingOperation(uint32_t nowMs) {
       reportPendingOverdue(nowMs);
       return;
     }
+    cli_shell::markPendingInputForDiscard();
     reportPendingCompletion(&status);
     g_pendingOperation = PendingOperation{};
     cli::printPrompt();

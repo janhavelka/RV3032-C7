@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 3.2.1 - 2026-09-10
+
+Prepared follow-up to the committed 3.2.0 development baseline; not yet tagged
+or published.
+
+### Fixed
+
+- Direct EEPROM read/write admission includes both READ_ONE waits before the
+  cleanup cutoff and charges the complete first-byte callback sequence when
+  there is no clock hook. At a 5 ms I2C / 100 ms EEPROM timeout the minimum
+  read/write budgets are 298/518 ms with a clock hook, or 398/648 ms without
+  one. Slower callbacks, longer requests, and scheduling gaps need extra time.
+- READ_ONE ready polling preserves time for the following data read, including
+  when a clockless transport consumes its full clipped callback timeout.
+- Direct EEPROM read/write defaults are 4000/6000 ms. Generic item deadlines
+  retain a 4000 ms floor and grow to a calculated maximum of 5323 ms for the
+  slowest supported transport settings, including initial-ready and cleanup
+  allowances. Accepted clockless configurations can complete their writes.
+- Expiration of the cleanup ready phase retains the failure and continues
+  direct C0/EERD restoration within the whole-operation deadline.
+- Busy CLI input exceeding the 256-byte per-poll drain remains marked for
+  discard after the job finishes; complete queued commands and partial tails
+  cannot become fresh commands. Input arriving during the terminal transport
+  callback is captured before completion is reported.
+- Cooperative contract checks follow inline members and members defined in
+  other core files. Qualified health updates are checked against the same
+  exact owner allowlist as unqualified calls. Trailing-return/reference-qualified
+  members and final classes are recognized, and ABI guards ignore commented
+  enum examples and cover public operation-timeout default arguments.
+- Development changelog links use existing commits instead of the nonexistent
+  `v3.1.0` tag. The latest published release remains `v3.0.1`.
+
 ## [3.2.0] - 2026-09-09
 
 ### Added
@@ -605,8 +637,9 @@ initialization compatibility but change binary layout. Rebuild consumers.
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.1.0...HEAD
-[3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...v3.1.0
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
+[3.2.0]: https://github.com/janhavelka/RV3032-C7/compare/f3db733...16b700b
+[3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...f3db733
 [3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
