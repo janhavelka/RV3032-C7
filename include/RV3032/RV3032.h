@@ -465,9 +465,13 @@ struct EepromHardwareFlags {
 /**
  * @brief Typed driver for the supported RV-3032-C7 functions
  * 
- * This class provides typed control of the supported RV-3032-C7 functions
- * following the begin/tick/end lifecycle pattern. Password management is
- * deliberately unsupported.
+ * begin() and end() are passive, zero-I/O lifecycle operations. probe() is
+ * an explicit diagnostic read. Ordinary multi-transfer work advances through
+ * pollJob(); queued generic persistence advances through pollEeprom() or
+ * tick(). ensurePrimaryCellConfiguration() is the sole bounded synchronous
+ * multi-callback operation and is never invoked by the lifecycle.
+ * Password management is deliberately unsupported. Calendar and Unix
+ * conversions cover 2000..2099; timezone and DST policy belong to the caller.
  * 
  * @par Threading Model
  * Not thread-safe. The application must serialize both this instance and the
@@ -482,21 +486,34 @@ struct EepromHardwareFlags {
  * The EEPROM engine never advances concurrently; unrelated jobs return BUSY.
  * 
  * @par Timing
- * tick() advances at most one bounded transport instruction in the generic
- * EEPROM state machine. Its wall time is therefore bounded by the configured
- * per-transfer timeout and the application transport contract.
+ * pollJob() and pollEeprom() invoke at most maxInstructions transport callbacks;
+ * a zero budget performs no I/O. tick() selects the generic surface with a
+ * budget of one. Use isOrdinaryJobBusy() and isEepromPollable() to select the
+ * surface that can advance. No-wait jobs have fixed callback bounds; jobs with
+ * vendor waits also have exclusive, wrap-safe phase and operation deadlines.
+ * Caller scheduling gaps are additional to no-wait callback bounds and consume
+ * the elapsed-time budgets of deadline-driven jobs. The application must poll
+ * often enough to leave time for verification and cleanup.
  * 
  * @par Resource Ownership
- * I2C transport passed via Config. No hardcoded pins or resources.
+ * Config supplies synchronous transport callbacks and borrowed user contexts.
+ * The application owns pins, bus setup, interrupts, recovery, and scheduling.
+ * Callback code and user contexts must remain valid through end(); callbacks
+ * must not re-enter this instance.
  * 
  * @par Memory
  * The driver uses only fixed-capacity storage and performs no heap allocation.
  * 
  * @par Error Handling
- * All errors returned as Status. No silent failures.
+ * Status::inProgress() means work was admitted or remains pending, not that
+ * the requested mutation is complete. Preserve terminal Status and inspect
+ * the matching typed report for partial progress and cleanup evidence.
  */
 class RV3032 {
  public:
+  /** @name Lifecycle and configuration
+   * @{
+   */
   /**
    * @brief The driver object is neither copyable nor movable.
    * @details It owns live fixed-capacity cooperative state and a borrowed
@@ -542,11 +559,12 @@ class RV3032 {
    * 
    * @note Queued and active work is abandoned. An already issued silicon write
    *       cannot be undone. Abandoning persistent cleanup discards the saved
-   *       C0/Control 1 restoration snapshot; after rebinding, the application
-   *       must explicitly reinitialize affected product policy or follow its
-   *       documented power-cycle and reprovisioning procedure.
-   *       Abandoned access cleanup retains persistentAccessStateUnproven;
-   *       rebinding this object does not clear that evidence.
+   *       C0/Control 1 restoration snapshot. Abandoned access cleanup retains
+   *       SettingsSnapshot::persistentAccessStateUnproven across rebinding.
+   *       After a new begin(), explicitly start and poll
+   *       startPersistentAccessStateRecoveryJob() with the application's
+   *       intended C0, then inspect the restoration report. Neither begin(),
+   *       probe(), nor recover() proves access cleanup or clears this latch.
    */
   void end();
 
@@ -564,7 +582,11 @@ class RV3032 {
    */
   const Config& getConfig() const { return _config; }
 
-  // ===== Driver State and Health =====
+  /** @} */
+
+  /** @name Driver State and Health
+   * @{
+   */
 
   /**
    * @brief Probe address response and Status-register communication
@@ -657,7 +679,11 @@ class RV3032 {
    */
   uint32_t lastErrorMs() const { return _lastErrorMs; }
 
-  // ===== EEPROM Status =====
+  /** @} */
+
+  /** @name EEPROM Status
+   * @{
+   */
 
   /**
    * @brief Check whether generic configuration persistence is active or queued.
@@ -735,7 +761,11 @@ class RV3032 {
    */
   Status pollEeprom(uint32_t now_ms, uint8_t maxInstructions, uint8_t& instructionsUsed);
 
-  // ===== Budgeted Job Operations =====
+  /** @} */
+
+  /** @name Budgeted Job Operations
+   * @{
+   */
 
   /**
    * @brief Check whether budgeted job processing is active.
@@ -1031,6 +1061,11 @@ class RV3032 {
    *       issues an EEPROM command. Exact C0/Control 1 proof clears
    *       SettingsSnapshot::persistentAccessStateUnproven; a later settle
    *       timeout remains an operation timeout without re-latching it.
+   *       This explicit recovery remains available with generic writes disabled
+   *       and after end()/begin() on the same object. The caller supplies the
+   *       intended C0 because end() discards the former restoration snapshot.
+   *       A failed EEbusy read or ready-phase timeout is retained as the
+   *       operation error while bounded direct restoration still proceeds.
    */
   Status startPersistentAccessStateRecoveryJob(
       uint8_t desiredC0,
@@ -1044,7 +1079,11 @@ class RV3032 {
   Status getPersistentAccessStateRecoveryJobResult(
       ConfigurationJobReport& out) const;
 
-  // ===== Time/Date Operations =====
+  /** @} */
+
+  /** @name Time/Date Operations
+   * @{
+   */
 
   /**
    * @brief Read current time and date in one strict calendar burst.
@@ -1108,7 +1147,11 @@ class RV3032 {
    */
   Status setUnix(uint32_t ts);
 
-  // ===== Alarm Operations =====
+  /** @} */
+
+  /** @name Alarm Operations
+   * @{
+   */
 
   /**
    * @brief Set alarm time values
@@ -1190,7 +1233,11 @@ class RV3032 {
    */
   Status getAlarmInterruptEnabled(bool& enabled);
 
-  // ===== Timer Operations =====
+  /** @} */
+
+  /** @name Timer Operations
+   * @{
+   */
 
   /**
    * @brief Configure periodic countdown timer
@@ -1267,7 +1314,11 @@ class RV3032 {
    */
   Status clearPeriodicUpdateFlag();
 
-  // ===== Power Management / Backup Operations =====
+  /** @} */
+
+  /** @name Power Management / Backup Operations
+   * @{
+   */
 
   /**
    * @brief Start a verified cooperative backup-switchover configuration.
@@ -1401,7 +1452,11 @@ class RV3032 {
   Status ensurePrimaryCellConfiguration(
       PrimaryCellConfigurationReport& report);
 
-  // ===== Clock Output Operations =====
+  /** @} */
+
+  /** @name Clock Output Operations
+   * @{
+   */
 
   /**
    * @brief Enable or disable direct clock output through PMU.NCLKE
@@ -1498,7 +1553,11 @@ class RV3032 {
    */
   Status clearClockOutputFlag();
 
-  // ===== Calibration Operations =====
+  /** @} */
+
+  /** @name Calibration Operations
+   * @{
+   */
 
   /**
    * @brief Set frequency offset in parts-per-million
@@ -1545,7 +1604,11 @@ class RV3032 {
   /** @brief Read the active Voltage-Low interrupt enable (VLIE). */
   Status getVoltageLowInterruptEnabled(bool& enabled);
 
-  // ===== Temperature Sensor =====
+  /** @} */
+
+  /** @name Temperature Sensor
+   * @{
+   */
 
   /**
    * @brief Read die temperature
@@ -1601,7 +1664,11 @@ class RV3032 {
   Status getReadCoherentTemperatureJobResult(
       CoherentTemperatureResult& result) const;
 
-  // ===== External Event Input =====
+  /** @} */
+
+  /** @name External Event Input
+   * @{
+   */
 
   /**
    * @brief Set external event input edge sensitivity
@@ -1729,7 +1796,11 @@ class RV3032 {
    */
   Status resetTimestamp(TimestampSource source); ///< Active-only timestamp reset.
 
-  // ===== Status Operations =====
+  /** @} */
+
+  /** @name Status Operations
+   * @{
+   */
 
   /**
    * @brief Read RTC status register
@@ -1825,7 +1896,11 @@ class RV3032 {
    */
   Status clearEepromErrorFlag();
 
-  // ===== User RAM Operations =====
+  /** @} */
+
+  /** @name User RAM Operations
+   * @{
+   */
 
   /**
    * @brief Read the 16-byte volatile user RAM area.
@@ -1851,7 +1926,11 @@ class RV3032 {
    */
   Status writeUserRam(uint8_t offset, const uint8_t* buf, size_t len);
 
-  // ===== Low-Level Diagnostic Register Operations =====
+  /** @} */
+
+  /** @name Low-Level Diagnostic Register Operations
+   * @{
+   */
 
   /**
    * @brief Read single RTC register
@@ -1918,7 +1997,11 @@ class RV3032 {
    */
   Status writeRegisters(uint8_t reg, const uint8_t* buf, size_t len);
 
-  // ===== Static Utility Functions =====
+  /** @} */
+
+  /** @name Static Utility Functions
+   * @{
+   */
 
   /**
    * @brief Validate date/time structure
@@ -1971,6 +2054,8 @@ class RV3032 {
    *       2099-12-31 23:59:59 in the library's UTC conversion domain.
    */
   static Status dateTimeToUnix(const DateTime& time, uint32_t& timestamp);
+
+  /** @} */
 
  private:
   // Defined only by native tests to inject otherwise unreachable state faults.

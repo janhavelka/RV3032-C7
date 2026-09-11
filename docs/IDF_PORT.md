@@ -131,8 +131,11 @@ delay therefore needs both upward tick rounding and one entry-phase guard tick.
 - Password management is unsupported. Password protection must be disabled;
   a protected part requires out-of-band service.
 - Call `end()` before rebinding; a second `begin()` is intentionally `BUSY`.
-  `end()` performs zero I/O and abandons active local work, so reinitialize any
-  affected product policy after abandoning persistent cleanup.
+  `end()` performs zero I/O and abandons active local work. An unproven
+  persistent-access state survives rebinding on the same object; explicitly
+  run `startPersistentAccessStateRecoveryJob()` with the intended C0 and
+  inspect its restoration evidence. `begin()`, `probe()`, and `recover()`
+  cannot clear that evidence.
 - Keep consumer dependency pins and application-version metadata in the
   consumer project. This repository's generator owns only the RV3032
   `Version.h` and build metadata; an adapter must not turn it into a shared
@@ -140,6 +143,6 @@ delay therefore needs both upward tick rounding and one entry-phase guard tick.
 
 ## Local verification
 
-Use the single command list in the root [README](../README.md#verification).
+Use the single command list in the root [README](https://github.com/janhavelka/RV3032-C7#verification).
 Those checks do not prove hardware wiring, power-loss behavior, backup-cell
 chemistry, EEPROM endurance, or long-term timing accuracy.

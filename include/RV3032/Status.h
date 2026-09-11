@@ -46,8 +46,12 @@ enum class Err : uint8_t {
  * @struct Status
  * @brief Status result from library operations
  * 
- * All fallible operations return Status to indicate success or failure.
- * Check status.ok() to determine if operation succeeded.
+ * All fallible operations return Status. ok() reports only Err::OK;
+ * IN_PROGRESS means admitted or continuing work and must be advanced through
+ * the operation's documented polling surface. BUSY is not an admission token.
+ * A terminal job error may accompany a typed report containing partial progress
+ * or durable-write evidence; inspect that report before deciding product policy.
+ * No Status owns its message: msg must point to static storage.
  */
 struct Status {
   Err code = Err::OK;      ///< Error category
@@ -84,7 +88,7 @@ struct Status {
   constexpr bool inProgress() const { return code == Err::IN_PROGRESS; }
 
   /**
-   * @brief Implicit truthiness for success checks.
+   * @brief Explicit boolean conversion for terminal success checks.
    * @return true if operation succeeded
    */
   explicit constexpr operator bool() const { return ok(); }

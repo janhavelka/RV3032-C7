@@ -85,8 +85,11 @@ using WaitMsFn = void (*)(uint32_t delayMs, void* user);
  * @struct Config
  * @brief RTC configuration parameters
  *
- * All hardware resources are application-provided. Library does not
- * define any pin defaults - board-specific values must be passed by user.
+ * The application configures pins and the shared bus in its transport owner;
+ * this struct binds callbacks rather than owning those resources. begin()
+ * copies this configuration and validates it without invoking callbacks.
+ * Callback code and the objects behind i2cUser/timeUser must remain valid
+ * until end(). Callbacks must not re-enter this driver instance.
  */
 struct Config {
   /// @brief I2C write callback (required, always single-attempt).

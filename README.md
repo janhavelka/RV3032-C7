@@ -6,14 +6,23 @@ heap allocation. Applications inject bounded transport and timing callbacks.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
+The maintained integration is Arduino on ESP32-S2/S3. Start with the
+[integration sketch](#integration-sketch), then choose the
+[calendar](#calendar-apis), [persistent storage](#persistent-apis), or
+[configuration](#cooperative-configuration-evidence) contract your owner loop
+needs. The [architecture](docs/ARCHITECTURE.md) and
+[device reference](docs/DEVICE_REFERENCE.md) explain the underlying protocol.
+
 ## Design contract
 
 - `begin()` validates and binds callbacks with exactly zero device I/O.
 - `probe()` is one raw Status-register communication check at address `0x51`.
   It proves only that transaction's address response, not chip identity.
 - `end()` always abandons local queued/active work with zero I/O. It cannot
-  undo an already-issued silicon write; abandoned persistent cleanup requires
-  explicit product-policy reinitialization after rebinding.
+  undo an already-issued silicon write. Abandoned persistent cleanup retains
+  `persistentAccessStateUnproven` across rebinding; explicitly run
+  `startPersistentAccessStateRecoveryJob()` with the application's intended C0
+  and inspect its restoration evidence before further persistence.
 - A driver object cannot be copied or moved because it owns live cooperative
   state and a borrowed transport binding.
 - `recover()` is one tracked read-only health re-probe; physical bus recovery
@@ -495,6 +504,28 @@ RAM; they cannot reach calendar, alarm, timer, Status/control, unsupported passw
 staging/command, indirect EEPROM, read-only, or reserved registers. Use typed
 methods for side-effecting features.
 
+### Support boundaries and known gaps
+
+The completed code audit found no remaining concrete correctness or timing-bound
+defects within its reviewed scope. Its corrections landed in `a76e613`, and
+[all six CI jobs passed](https://github.com/janhavelka/RV3032-C7/actions/runs/34596228063).
+That evidence covers software checks and embedded builds; the physical evidence
+has the separate scope described under [verification](#verification).
+
+The following capabilities are deliberately outside the current library:
+
+| Capability | Current boundary |
+|---|---|
+| Password management | Password ranges are denied. An already protected device requires out-of-band service. |
+| Native ESP-IDF package | No native component, maintained example, or ESP-IDF-only CI build is shipped. [Adapter notes](docs/IDF_PORT.md) describe the callback integration. |
+| Dates and civil-time policy | Calendar and Unix conversions cover 2000..2099. The application owns timezone, DST, and clock synchronization policy. |
+| Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
+| Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
+
+These boundaries are not pending corrections to the audit. Release publication
+is separate: see [versioning](#versioning) for the current development and tagged
+versions.
+
 ## Status and health
 
 All fallible APIs return:
@@ -540,6 +571,12 @@ optional EEPROM persistence. It prints completion only after terminal ordinary
 and persistence evidence is available; there is no parallel `tick()` path. An
 item-level persistence failure does not release ownership while later queue
 entries remain, so no queued work is orphaned.
+
+After 15 seconds it prints one pending-work diagnostic and keeps ownership
+until the operation terminates. Each loop discards at most 256 bytes of busy
+serial input; queued lines and partial tails remain marked for discard after
+completion. Input arriving during the terminal callback is also discarded, so
+an old command cannot execute as a new command after the completion prompt.
 
 ## Repository and examples
 
@@ -596,7 +633,7 @@ python -S tools/hil_cli_runner.py --dry-run
 Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
 execution, voltage/backfeed, power-cycle, and retention work require separate
 authorization. The latest retained physical evidence is summarized in the
-<a href="docs/reports/HIL_SUMMARY.md">HIL summary</a>,
+[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reports/HIL_SUMMARY.md),
 which is also included in the release package.
 
 After such fresh authorization, `--destructive-setup` additionally requires
@@ -608,10 +645,26 @@ mismatched scope before opening the serial port and records it in HIL results.
 
 ## Versioning
 
+The current development version is **3.2.1**, committed and synchronized with
+`main`; it has no release tag or published release yet. The latest published
+release is **v3.0.1**. The [changelog](CHANGELOG.md) distinguishes development
+baselines from published releases and links their actual commits.
+
 `library.json` is the single version source. `include/RV3032/Version.h` is
 generated and must not be edited manually. `scripts/generate_version.py`
 generates only this library's version header and build defines. Dependency-pin
 or application-version metadata belongs to the consuming project.
+
+## API documentation
+
+Run `doxygen Doxyfile` with Doxygen 1.9.7 or newer from the repository root and open
+`docs/doxygen/html/index.html`. The generated reference uses this README as its
+entry page and includes the changelog, contributor guide, architecture, device
+reference, and ESP-IDF notes. The driver reference groups methods by feature;
+each operation documents admission, polling, result, and device side effects.
+`Config.h` defines transport and timing contracts, `Status.h` defines result
+semantics, and `CommandTable.h` records silicon addresses without granting raw
+access to restricted ranges. Documentation warnings fail the CI build.
 
 ## License
 

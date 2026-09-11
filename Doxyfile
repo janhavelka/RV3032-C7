@@ -9,6 +9,8 @@ ALLOW_UNICODE_NAMES    = NO
 OUTPUT_LANGUAGE        = English
 
 MARKDOWN_SUPPORT       = YES
+# Doxygen 1.9.7+: share section links with GitHub's README rendering.
+MARKDOWN_ID_STYLE      = GITHUB
 TOC_INCLUDE_HEADINGS   = 3
 AUTOLINK_SUPPORT       = YES
 BUILTIN_STL_SUPPORT    = YES
@@ -30,7 +32,7 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md CONTRIBUTING.md include \
+INPUT                  = README.md CHANGELOG.md CONTRIBUTING.md include/RV3032 \
                          docs/ARCHITECTURE.md docs/DEVICE_REFERENCE.md \
                          docs/IDF_PORT.md
 FILE_PATTERNS          = *.h *.md
@@ -39,13 +41,16 @@ EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/refe
 
 USE_MDFILE_AS_MAINPAGE = README.md
 FULL_PATH_NAMES        = NO
-SORT_MEMBER_DOCS       = YES
+# Keep the public header's lifecycle and feature-group order.
+SORT_MEMBER_DOCS       = NO
+SUBGROUPING            = NO
 SORT_BRIEF_DOCS        = YES
 SORT_MEMBERS_CTORS_1ST = YES
 
 GENERATE_HTML          = YES
 HTML_OUTPUT            = html
 HTML_COLORSTYLE        = AUTO_LIGHT
+GENERATE_TREEVIEW       = YES
 GENERATE_LATEX         = NO
 GENERATE_XML           = NO
 GENERATE_RTF           = NO

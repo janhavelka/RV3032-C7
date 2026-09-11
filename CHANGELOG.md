@@ -7,10 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## 3.2.1 - 2026-09-10
+### Changed
 
-Prepared follow-up to the committed 3.2.0 development baseline; not yet tagged
-or published.
+- README now collects supported platforms, intentional feature boundaries,
+  audit landing evidence, release status, and API documentation navigation.
+- Doxygen groups driver methods by feature and clarifies passive lifecycle,
+  explicit persistent-access recovery, polling budgets, callback ownership,
+  and the distinction between admission and terminal success.
+
+### Fixed
+
+- Generated API pages link correctly to the retained HIL summary and the
+  ESP-IDF notes' verification instructions.
+
+## [3.2.1] - 2026-09-10
+
+Development version committed as `a76e613` and pushed to `main`; all six jobs in
+[its CI run](https://github.com/janhavelka/RV3032-C7/actions/runs/34596228063)
+passed. This version is not tagged or published. The latest published release
+remains `v3.0.1`.
 
 ### Fixed
 
@@ -40,6 +55,8 @@ or published.
   `v3.1.0` tag. The latest published release remains `v3.0.1`.
 
 ## [3.2.0] - 2026-09-09
+
+Development baseline committed as `16b700b`; no `v3.2.0` release tag was published.
 
 ### Added
 
@@ -637,7 +654,8 @@ initialization compatibility but change binary layout. Rebuild consumers.
 ### Removed
 - N/A (initial RV3032 release)
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/a76e613...HEAD
+[3.2.1]: https://github.com/janhavelka/RV3032-C7/compare/16b700b...a76e613
 [3.2.0]: https://github.com/janhavelka/RV3032-C7/compare/f3db733...16b700b
 [3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...f3db733
 [3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1

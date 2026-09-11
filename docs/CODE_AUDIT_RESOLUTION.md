@@ -1,6 +1,6 @@
 # Code audit resolution
 
-Latest verification: [2026-09-10 complete correction review](#2026-09-10-complete-correction-review).
+Latest landing status: [2026-09-11 commit and CI verification](#2026-09-11-commit-and-ci-verification).
 Earlier sections retain the state and conclusions of their respective reviews.
 
 Date: 2026-08-30
@@ -417,3 +417,17 @@ needed, and typed results continue to retain verified partial progress.
 All requested code corrections are implemented and verified locally. At this
 verification point, commit/push remains outstanding; hosted CI has validated
 only `16b700b`. No release tag or hardware test was performed in this pass.
+
+## 2026-09-11 commit and CI verification
+
+All corrections from the complete review above landed in commit `a76e613`
+(`fix: complete EEPROM timing and audit corrections`) and were pushed to
+`origin/main`. The worktree was clean and local/upstream commits matched.
+[Hosted CI run 34596228063](https://github.com/janhavelka/RV3032-C7/actions/runs/34596228063)
+passed all six jobs: native tests, library validation (including Doxygen and
+package checks), and the four maintained embedded builds.
+
+The earlier references to outstanding commit/push describe their historical
+verification points. No known code correction from this audit remains unlanded.
+Version 3.2.1 is still untagged and unpublished; v3.0.1 remains the latest
+published release. No new physical HIL evidence is claimed.
