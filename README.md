@@ -506,12 +506,6 @@ methods for side-effecting features.
 
 ### Support boundaries and known gaps
 
-The completed code audit found no remaining concrete correctness or timing-bound
-defects within its reviewed scope. Its corrections landed in `a76e613`, and
-[all six CI jobs passed](https://github.com/janhavelka/RV3032-C7/actions/runs/34596228063).
-That evidence covers software checks and embedded builds; the physical evidence
-has the separate scope described under [verification](#verification).
-
 The following capabilities are deliberately outside the current library:
 
 | Capability | Current boundary |
@@ -522,8 +516,7 @@ The following capabilities are deliberately outside the current library:
 | Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
 | Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
 
-These boundaries are not pending corrections to the audit. Release publication
-is separate: see [versioning](#versioning) for the current development and tagged
+For release publication status, see [versioning](#versioning) for the current development and tagged
 versions.
 
 ## Status and health
@@ -562,7 +555,7 @@ Wire mutex uncontended during the synchronous callback; the adapter does not
 add a second lock or scheduler.
 Zero/partial reads return `I2C_ERROR` with the received-byte count because
 Wire discards the backend error. They do not prove an address NACK; an
-explicit NACK result still maps to `DEVICE_NOT_FOUND` in the core.
+explicit address-NACK result still maps to `DEVICE_NOT_FOUND` in the core.
 
 The example's `initWire()` is startup-only, before Wire owns the pins. It uses
 open-drain bus-clear pulses and one bounded SCL-wait budget, and fails if either
@@ -593,7 +586,7 @@ an old command cannot execute as a new command after the completion prompt.
 - `examples/common/` — example-only board/transport glue, not library code
 - `examples/01_basic_bringup_cli/` — interactive product-neutral bring-up CLI
 - [`docs/`](https://github.com/janhavelka/RV3032-C7/tree/main/docs) — architecture,
-  device reference, ESP-IDF adapter notes, HIL summary, and repository-only
+  device reference, ESP-IDF adapter notes, verification guidance, and repository-only
   vendor PDFs
 - `test/test_native/` — host unit/integration tests against the bounded fake
 - `test/test_hil/`, `test/test_hil_persistence/` — on-device harnesses
@@ -622,58 +615,16 @@ installation can exceed `MAX_PATH` while unpacking bundled headers. Enable
 Windows long-path support or temporarily set `PLATFORMIO_CACHE_DIR` to a short,
 writable path for the PlatformIO install/build command.
 
-```powershell
-.\scripts\pio.cmd test -e native
-.\scripts\pio.cmd run -e esp32s3dev
-.\scripts\pio.cmd run -e esp32s2dev
-.\scripts\pio.cmd run -e esp32s3hil
-.\scripts\pio.cmd run -e esp32s3hil_persistence
-python scripts/generate_version.py check
-python tools/check_portability.py
-python tools/check_abi.py
-python -m unittest discover -s tools -p 'test_check_*.py'
-python tools/check_package.py source
-doxygen Doxyfile
-python -S tools/hil_cli_runner.py --parser-self-test
-python -S tools/test_hil_cli_runner.py
-python -S tools/test_hil_health_snapshot.py
-python -S tools/hil_cli_runner.py --dry-run
-```
+Run the complete [software verification gate](docs/VERIFICATION.md), which
+covers native tests, all four embedded builds, host tooling, version/ABI and
+portability contracts, Doxygen, and the release package. These checks require
+no attached RTC and do not flash a device.
 
-Parser self-test and dry-run are device-free. Physical HIL, flashing, EEPROM
-execution, voltage/backfeed, power-cycle, and retention work require separate
-authorization. The latest retained physical evidence is summarized in the
-[HIL summary](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reports/HIL_SUMMARY.md),
-which is also included in the release package.
-
-The CLI runner flushes the full serial transcript to disk as bytes arrive
-(`--transcript-out`, or a unique file under `.pio/hil-runs/`). A terminal prompt
-is required for every command. The run stops on its first failure; missing
-framing or a reboot forbids further commands, including health reads. With
-intact framing, `drv` snapshots bracket stress and capture health after a
-failure. `--idle-timeout-s` is retained for command-line compatibility; only
-the hard command deadline can end a response without its prompt.
-Start each run from a freshly reset CLI with its startup prompt available;
-the runner does not resynchronize after a prior host consumes that prompt.
-Normal health checks require READY and zero consecutive, total, and EEPROM
-write failures. A snapshot after an already-failed command is observational;
-it retains the fault without replacing the original failure result.
-Complete memory payloads and stress counters are checked even when the final
-prompt arrives. Known RAM test patterns must match their readback, and short
-serial command writes stop before any further receive or command. Transcripts
-and result excerpts can contain original RAM or EEPROM values; keep them private
-and publish only reviewed summaries without those bytes.
-The exhaustive hardware harness preserves the active and durable C1 bytes
-independently, including their interrupt bits. Its offset test performs two
-configuration EEPROM writes: one changed value and one restoration; preparation,
-equal-value verification, and final active restoration add no EEPROM writes.
-
-After such fresh authorization, `--destructive-setup` additionally requires
-explicit `--authorization-port`, `--authorization-module`,
-`--authorization-primary-cell-chemistry`, `--authorization-power-conditions`,
-`--authorization-c0-write CONFIRM-POSSIBLE-C0-WRITE`, and
-`--authorization-vdd-off-backfeed-scope` values. The runner rejects missing or
-mismatched scope before opening the serial port and records it in HIL results.
+The same guide explains the interactive CLI runner, autonomous HIL firmware,
+EEPROM write counts, power-cycle restoration, and evidence limits. Physical
+execution requires authorization for the fixture and mutations involved.
+Build success and a runner exit code alone do not establish complete hardware
+coverage; inspect individual results and untested conditions.
 
 ## Versioning
 
@@ -693,8 +644,9 @@ or application-version metadata belongs to the consuming project.
 Run `doxygen Doxyfile` with Doxygen 1.9.7 or newer from the repository root and open
 `docs/doxygen/html/index.html`. The generated reference uses this README as its
 entry page and includes the changelog, contributor guide, architecture, device
-reference, and ESP-IDF notes. The driver reference groups methods by feature;
-each operation documents admission, polling, result, and device side effects.
+reference, ESP-IDF notes, and verification guide. The driver reference groups
+methods by feature; each operation documents admission, polling, result, and
+device side effects.
 `Config.h` defines transport and timing contracts, `Status.h` defines result
 semantics, and `CommandTable.h` records silicon addresses without granting raw
 access to restricted ranges. Documentation warnings fail the CI build.

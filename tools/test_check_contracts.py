@@ -1,8 +1,14 @@
 """Mutation probes for the maintained source/ABI contract checks."""
+from contextlib import redirect_stdout
+import io
+from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import check_abi as abi
+import check_package as package
 import check_portability as portability
 
 
@@ -168,6 +174,48 @@ class AbiChecks(unittest.TestCase):
             header.replace("Hz32768 = 0", "Hz32768 = 7")))
         self.assertTrue(abi.public_contract_errors(
             header.replace("  READY,", "  READY = 4,")))
+
+
+class PackageChecks(unittest.TestCase):
+    def test_completed_reports_cannot_return_to_source_or_package(self):
+        artifacts = (
+            "docs/CODE_AUDIT.md", "docs/CODE_AUDIT_RESOLUTION.md",
+            "docs/CODE_AUDIT_FOLLOWUP.md", "docs/prompts/review.md",
+            "docs/extracted-md/manual/chapter.md", "docs/reports/HIL_SUMMARY.md",
+            "docs/reports/nested/session.csv",
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for rel in package.REQUIRED_SOURCE_FILES:
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("required source fixture\n", encoding="utf-8")
+            for rel in ("Doxyfile", "library.json", "tools/hil_cli_runner.py",
+                        "include/RV3032/RV3032.h"):
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((package.ROOT / rel).read_bytes())
+            with patch.object(package, "ROOT", root):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, package.source_check())
+                for rel in artifacts:
+                    with self.subTest(artifact=rel):
+                        target = root / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text("completed run\n", encoding="utf-8")
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            self.assertEqual(1, package.source_check())
+                        self.assertIn(f"completed workflow artifact remains: {rel}", output.getvalue())
+                        self.assertTrue(package.forbidden_package_path(rel))
+                        target.unlink()
+        self.assertIn("docs/VERIFICATION.md", package.REQUIRED_SOURCE_FILES)
+        self.assertIn("docs/VERIFICATION.md", package.REQUIRED_PACKAGE_FILES)
+        self.assertFalse(package.forbidden_package_path("docs/VERIFICATION.md"))
+        for rel in ("docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
+                    "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf"):
+            self.assertIn(rel, package.REQUIRED_SOURCE_FILES)
+            self.assertTrue(package.forbidden_package_path(rel))
 
 
 if __name__ == "__main__":

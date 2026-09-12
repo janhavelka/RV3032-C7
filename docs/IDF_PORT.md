@@ -32,6 +32,12 @@ read-only recovery, and all physical phases. Arrange an uncontended serialized
 owner before dispatch. Without `nowMs`, the driver conservatively charges the
 full supplied timeout.
 
+Preserve the backend's actual failure category when available. A zero or short
+read alone does not prove an address NACK; report `I2C_ERROR` with the received
+byte count when no more specific cause is available. `I2C_NACK_DATA` remains
+distinct from `I2C_NACK_ADDR`, which `probe()`/`recover()` map to
+`DEVICE_NOT_FOUND`.
+
 ```cpp
 static uint32_t idfNowMs(void*) {
   return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
@@ -143,6 +149,6 @@ delay therefore needs both upward tick rounding and one entry-phase guard tick.
 
 ## Local verification
 
-Use the single command list in the root [README](https://github.com/janhavelka/RV3032-C7#verification).
+Use the command list and evidence boundaries in the [verification guide](VERIFICATION.md).
 Those checks do not prove hardware wiring, power-loss behavior, backup-cell
 chemistry, EEPROM endurance, or long-term timing accuracy.

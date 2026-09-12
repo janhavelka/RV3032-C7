@@ -37,7 +37,7 @@ enum class BackupChargePolicy : uint8_t {
 ///       callback duration and Status::msg must have static storage. Legal
 ///       return codes are OK, I2C_ERROR, I2C_NACK_ADDR, I2C_NACK_DATA,
 ///       I2C_TIMEOUT, and I2C_BUS.
-/// @note timeoutMs is a hard, exclusive bound for the complete callback,
+/// @note timeoutMs is the maximum duration of the complete callback,
 ///       including application serialization and every physical bus phase.
 ///       The application owner must ensure its shared-bus mutex is uncontended
 ///       before dispatch.
@@ -52,7 +52,7 @@ using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
 ///       callback duration and Status::msg must have static storage. Legal
 ///       return codes are OK, I2C_ERROR, I2C_NACK_ADDR, I2C_NACK_DATA,
 ///       I2C_TIMEOUT, and I2C_BUS.
-/// @note timeoutMs is a hard, exclusive bound for the complete callback,
+/// @note timeoutMs is the maximum duration of the complete callback,
 ///       including application serialization, recovery when permitted, and
 ///       every physical bus phase. The application owner must ensure its
 ///       shared-bus mutex is uncontended before dispatch.
@@ -125,6 +125,8 @@ struct Config {
   ///       this value to the earliest exclusive deadline minus one
   ///       millisecond. The complete application callback must finish within
   ///       the supplied clipped timeout; exceeding it reports I2C_TIMEOUT.
+  ///       Equality with that duration is allowed only while the separate
+  ///       exclusive phase and whole-operation deadlines have not expired.
   ///       Valid range is 1..100 ms.
   uint32_t i2cTimeoutMs = 50;
 

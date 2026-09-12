@@ -7,26 +7,11 @@ Thank you for considering contributing to this project!
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/my-feature`
 3. Make your changes
-4. Run the same gate CI runs (on Windows use `.\scripts\pio.cmd` in place of
-   `pio`, per `AGENTS.md`):
-
-   ```
-   pio run -e esp32s3dev
-   pio run -e esp32s2dev
-   pio run -e esp32s3hil
-   pio run -e esp32s3hil_persistence
-   pio test -e native
-   python scripts/generate_version.py check
-   python tools/check_portability.py
-   python tools/check_abi.py
-   python -m unittest discover -s tools -p 'test_check_*.py'
-   python -S tools/hil_cli_runner.py --parser-self-test
-   python -S tools/hil_cli_runner.py --dry-run
-   python tools/check_package.py source
-   doxygen Doxyfile
-   pio pkg pack -o RV3032-C7.tar.gz .
-   python tools/check_package.py package RV3032-C7.tar.gz
-   ```
+4. Run the complete [verification gate](docs/VERIFICATION.md). It is the
+   maintained command list for native tests, all embedded builds, host tooling,
+   Doxygen, and package validation. On Windows use `scripts/pio.cmd` with the
+   existing current-user PlatformIO installation. Hardware execution requires
+   separate fixture authorization.
 5. Commit with a clear message: `git commit -m "feat: add X"`
 6. Push and open a Pull Request
 
@@ -49,7 +34,8 @@ Thank you for considering contributing to this project!
 
 ### Pull Requests
 - Keep PRs focused (one feature/fix per PR)
-- Update documentation if needed
+- Update public API contracts and maintained guides when behavior changes
+- Keep completed audits, prompts, run reports, and raw transcripts out of docs
 - Add changelog entry under `[Unreleased]`
 - Ensure CI passes
 

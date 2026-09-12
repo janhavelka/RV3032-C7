@@ -18,12 +18,15 @@ identity because another device could implement the same address/register.
 `recover()` is a single
 tracked register read that can restore the observational health state; it does
 not recover the bus or reapply device configuration. `end()` is unconditional,
-uses no I2C, and releases all local driver state even when work is active or
-queued. Already-issued silicon writes cannot be undone. Abandoning persistent
+uses no I2C, and releases local work and the transport binding even when work is
+active or queued. The unproven persistent-access latch survives this reset.
+Already-issued silicon writes cannot be undone. Abandoning persistent
 cleanup discards the saved C0/Control 1 restoration snapshot, so the application
-must explicitly reinitialize affected product policy after rebinding. The
-driver object is noncopyable and nonmovable because duplicating live state could
-duplicate an in-flight wear-limited mutation.
+must copy any needed diagnostics before ending the lifecycle. After rebinding,
+start and poll `startPersistentAccessStateRecoveryJob()` with the intended C0
+and inspect its restoration report before admitting further persistence. The
+driver object is noncopyable and nonmovable because duplicating live state
+could duplicate an in-flight wear-limited mutation.
 
 The four states are `UNINIT`, `READY`, `DEGRADED`, and `OFFLINE`. `OFFLINE` is a
 health label, not an admission policy: a valid caller-requested operation still
@@ -58,14 +61,18 @@ Their status domain is closed to `OK`, `I2C_ERROR`, `I2C_NACK_ADDR`,
 `TRANSPORT_CONTRACT_VIOLATION` at the raw boundary. Tracked health is updated
 exactly once only when application code was actually invoked.
 
-Every callback receives a finite timeout that is a hard, exclusive bound for
-the complete application callback, including serialization, permitted
-read-only recovery, and physical phases. The application must arrange an
+Every callback receives a finite maximum duration for the complete application
+callback, including serialization, permitted read-only recovery, and physical
+phases. The application must arrange an
 uncontended shared-bus owner before dispatch. `i2cTimeoutMs` is constrained to
 1..100 ms. `nowMs` provides wrap-safe health and operation time. `waitMs` is a
 yielding application wait used only by the explicit primary-cell ensure
 operation; it must not return before the requested monotonic duration, must
 sleep or yield, and must not spin.
+Completion at exactly the supplied callback timeout is permitted by the
+driver's elapsed-time check, provided the applicable phase and whole-operation
+deadlines have not been reached. Those deadlines are exclusive. An adapter
+may impose a stricter local deadline and return a timeout earlier.
 
 The example Wire adapter, validated with Arduino-ESP32 3.3.11, applies only the
 remaining part of one callback deadline before each potentially blocking phase
@@ -145,10 +152,10 @@ are additional. They introduce no new deadline or timeout result.
 | Temperature flag clear | 2 | 200 ms |
 | User RAM write | 2 | 200 ms |
 
-Backup uses readback-only reconciliation and a 4/4 callback cap. Public modes
-are explicitly encoded as Off=`00`, Direct=`01`, and Level=`10`; observed raw
-`11` is also disabled. The job requires BSIE=0, reserves optional C0 queue
-capacity before mutation, preserves non-BSM PMU bits, issues at most one PMU
+Backup uses readback-only reconciliation and a 4/4 callback cap. The driver
+maps public modes to BSM bits as Off=`00`, Direct=`01`, and Level=`10`;
+observed raw `11` is also disabled. The job requires BSIE=0, reserves optional
+C0 queue capacity before mutation, preserves non-BSM PMU bits, issues at most one PMU
 write, and proves requested/original/unknown state by exact implemented-bit
 readback. Disabled-to-Direct cannot complete before 2 ms after write callback
 completion; disabled-to-Level cannot complete before 10 ms. Admission requires
@@ -256,8 +263,10 @@ active-only. Ordinary job completion and generic EEPROM completion are separate
 terminal evidence boundaries.
 
 Generic writes are disabled by default. When enabled, an active configuration
-job can hand its resulting bytes to the fixed queue. If the EEPROM state
-machine is idle, another persistence-producing setter may be admitted while
+job can hand its resulting bytes to the fixed queue, which holds at most eight
+pending byte updates. `eepromQueueDepth()` excludes the item already executing.
+If the EEPROM state machine is idle, another persistence-producing setter may
+be admitted while
 entries are pending. It checks exact capacity after reading/computing the new
 active value but before writing it. Duplicate coalescing compares only with the
 newest pending value for the same address, so FIFO final-state intent is not
@@ -287,7 +296,7 @@ proven bytes.
 Typed persistent reports keep `operationStatus`, `cleanupStatus`, durable
 content proof, and partial byte counts separate. Directly established proof is
 not erased by a later C0/Control 1 cleanup failure. Generic queue batches latch
-the first forward and cleanup statuses into durable settings fields before
+the first forward and cleanup statuses into cached diagnostic fields before
 clearing each item. Cleanup failure has terminal semantic precedence and leaves
 both exact causes observable until a new batch, `begin()`, or `end()`. It
 cancels remaining entries only when C0/Control 1 access state is unproven;
@@ -326,15 +335,35 @@ dispatch WRITE_ONE. A cleanup ready-phase timeout is retained as cleanup
 failure evidence while C0/Control 1 restoration continues within the remaining
 whole-operation deadline; EEbusy only gates EEPROM commands.
 
+The formulas below use milliseconds throughout, with `T = i2cTimeoutMs` and
+`E = eepromTimeoutMs`:
+
+| Budget | Formula |
+| --- | --- |
+| Final access cleanup | `260 + 6*T` |
+| Post-WRITE_ONE proof and cleanup | `320 + E + 18*T` |
+| Minimum direct read, clock hook present | `260 + 6*T + T + 3` |
+| Minimum direct read, no clock hook | `260 + 6*T + 21*T + 3` |
+| Minimum direct write, clock hook present | `320 + E + 18*T + T + 3` |
+| Minimum direct write, no clock hook | `320 + E + 18*T + 27*T + 3` |
+| Generic single-item deadline | `max(4000, 573 + E + 45*T)` |
+
+The `3` in direct admission covers two 1 ms comparison settles and one
+deadline-margin millisecond. These minima admit first-byte progress under
+the clock assumptions above; they are not a guarantee for a complete
+16-byte request or arbitrary owner scheduling delays.
+
 Generic persistence owns a `PersistentOp` separate from the ordinary job's
 `PersistentOp`; a queue poll cannot reset a completed ordinary result. Any
 abandoned cleanup sets `persistentAccessStateUnproven`, cancels queued work,
 and blocks new persistence plus the synchronous primary ensure operation. A
 primary ensure cleanup that lacks C0/Control 1 proof sets the same latch. A
-passive `end()`/`begin()` retains both terminal cleanup-failure evidence and
-any cleanup obligation abandoned while active, including callback rebinding. A
-fully proven cleanup remains proven even if a later electrical activation
-settle times out. The explicit cooperative
+passive `end()`/`begin()` retains the boolean unproven-access latch for both
+terminal failures and cleanup abandoned while active, including callback
+rebinding. Detailed operation/cleanup statuses, reports, counters, and saved
+restoration bytes are reset; copy any needed diagnostics before ending the
+lifecycle. A fully proven cleanup remains proven even if a later electrical
+activation settle times out. The explicit cooperative
 `startPersistentAccessStateRecoveryJob()` waits for EEbusy, writes and verifies
 the caller-selected implemented C0, and clears and verifies EERD. That exact
 access-state proof clears the latch; the job then honors BSM activation settle
@@ -356,6 +385,11 @@ An unproven persistent-access latch is a zero-I/O rejection until the explicit
 recovery job succeeds.
 The same successful begin/end lifecycle permits only one admitted attempt.
 Rejected preconditions do not consume the latch.
+
+Ensure uses `primaryCellI2cTimeoutMs` (1..5 ms, default 5 ms) for each callback,
+independently of the ordinary `i2cTimeoutMs` setting. Its whole-operation
+deadline is 1000 ms. No WRITE_ONE starts at or after the 500 ms write-start
+cutoff, and forward callbacks preserve a 300 ms cleanup reserve.
 
 The operation directly reads persistent C0 before deciding and computes:
 

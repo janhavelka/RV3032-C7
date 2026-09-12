@@ -7,162 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Latest published release: **v3.0.1**. All subsequent changes below are
-unreleased; the next intended release is **3.1.0**. Development build metadata
-is not publication evidence.
+Latest published release: **v3.0.1**. All changes below are unreleased;
+the next intended release is **3.1.0**. Development build metadata is not
+publication evidence.
 
 ### Migration from 3.0.1
 
-The new `SettingsSnapshot::primaryCellI2cTimeoutMs` and
-`persistentAccessStateUnproven` trailing fields preserve source aggregate
-initialization compatibility but change binary layout. Rebuild consumers.
-
-### Changed
-
-- README now collects supported platforms, intentional feature boundaries,
-  audit landing evidence, release status, and API documentation navigation.
-- Doxygen groups driver methods by feature and clarifies passive lifecycle,
-  explicit persistent-access recovery, polling budgets, callback ownership,
-  and the distinction between admission and terminal success.
-
-- The coherent-temperature default is 200 ms and the backup-switch default is
-  500 ms, admitting the supported 100 ms callback timeout without a clock hook.
-- `begin()` always validates the 10..250 ms EEPROM window so explicit access
-  recovery remains available with generic writes disabled.
-- Unproven persistent-access cleanup survives `end()`/`begin()` on the same
-  object, including abandonment of active cleanup and callback rebinding.
-- The CLI emits one diagnostic after 15 seconds of pending work and continues
-  polling. Serial input received while pending is discarded through complete
-  lines, including partial command tails.
-
-- `setTime()`, `setUnix()`, `writeRegister()`, `writeRegisters()`, and
-  `writeUserRam()` return `BUSY` while generic persistence is queued, even
-  before its first poll. Single-transfer reads remain available under the
-  application's transport serialization.
-- Generic EEPROM queue work now owns fixed persistence state independent of the
-  ordinary job record, preserving completed job status and typed results.
-- Default snapshot and verified calendar-set deadlines are now 200 ms and
-  700 ms so they are executable across the accepted callback-timeout range.
-- EEPROM write mutation cutoffs reserve the full non-replayable post-WRITE_ONE
-  busy, two-read durability proof, access cleanup, and settle chain.
-- `isJobBusy()` retains combined active-work behavior; the public
-  `isOrdinaryJobBusy()` selects `pollJob()` while generic persistence uses its
-  independent fixed state and polling surface.
-- Repository checks are focused semantic portability, ABI/version, and package
-  validators instead of source-order and exact-prose archaeology.
-- The reference transport is explicitly ESP32-S2/S3 scoped, uses the selected
-  core's published Wire buffer capacity with a conservative fallback, and
-  discards partial staging before address-only cleanup.
-
-### Fixed
-
-- Keep zero-byte Wire reads as generic `I2C_ERROR` with the received-byte
-  count. Arduino discards the backend cause, so zero bytes cannot prove an
-  address NACK or `DEVICE_NOT_FOUND`. Explicit Wire NACK results still retain
-  their existing classification; partial reads preserve the caller's buffer.
-- Remove redundant console drains from I2C scan output; probe order and bus
-  timing are unchanged, without explicit USB transmit-buffer clearing.
-- The exhaustive HIL harness now preserves active and durable C1 independently,
-  including PORIE/VLIE, when they initially differ. Equal/changed/restored
-  EEPROM write counts are verified against direct persistent readback.
-- The HIL runner requires completed serial framing, retains live raw output,
-  captures health around stress/failures, and stops at the first failure.
-  Expected fixture errors no longer mask unrelated errors or failure counts.
-  Complete memory payloads and stress health counters are required even when
-  the prompt arrives; short command writes cannot consume a queued response.
-  Every driver health row is checked, so missing middle lines cannot pass as
-  a healthy snapshot merely because a terminal prompt arrived.
-- Keep the Arduino example's startup bus-clear pins open-drain, honor bounded
-  SCL stretching, and reject initialization if SDA or SCL remains LOW. Failed
-  recovery releases both pins instead of driving against a target.
-- Generated API pages link correctly to the retained HIL summary and the
-  ESP-IDF notes' verification instructions.
-
-- Direct EEPROM read/write admission includes both READ_ONE waits before the
-  cleanup cutoff and charges the complete first-byte callback sequence when
-  there is no clock hook. At a 5 ms I2C / 100 ms EEPROM timeout the minimum
-  read/write budgets are 298/518 ms with a clock hook, or 398/648 ms without
-  one. Slower callbacks, longer requests, and scheduling gaps need extra time.
-- READ_ONE ready polling preserves time for the following data read, including
-  when a clockless transport consumes its full clipped callback timeout.
-- Direct EEPROM read/write defaults are 4000/6000 ms. Generic item deadlines
-  retain a 4000 ms floor and grow to a calculated maximum of 5323 ms for the
-  slowest supported transport settings, including initial-ready and cleanup
-  allowances. Accepted clockless configurations can complete their writes.
-- Expiration of the cleanup ready phase retains the failure and continues
-  direct C0/EERD restoration within the whole-operation deadline.
-- Busy CLI input exceeding the 256-byte per-poll drain remains marked for
-  discard after the job finishes; complete queued commands and partial tails
-  cannot become fresh commands. Input arriving during the terminal transport
-  callback is captured before completion is reported.
-- Cooperative contract checks follow inline members and members defined in
-  other core files. Qualified health updates are checked against the same
-  exact owner allowlist as unqualified calls. Trailing-return/reference-qualified
-  members and final classes are recognized, and ABI guards ignore commented
-  enum examples and cover public operation-timeout default arguments.
-- Changelog comparisons start at the latest published release; unpublished
-  development work is collected here without separate release headings.
-
-- The post-WRITE_ONE reserve now permits durable readback after the mutation
-  cutoff, retaining the original callback error without replaying the write.
-- Persistent-access recovery continues direct C0/EERD restoration after a
-  busy-read failure or timeout and preserves that original operation error.
-- Re-requesting the current backup mode succeeds without an active PMU write
-  even when TCM is nonzero; changes that enable charging remain guarded.
-- Invalid password spans fail closed. The ESP32 example adapter has an
-  explicit platform guard and a 64-byte fallback capacity; the largest legal
-  public register burst remains 46 bytes (`0x00..0x2D`).
-- Portability checks cover core stdio/parsers, transitive member calls, and an
-  exact health-owner allowlist. ABI checks cover all public enums and timeout/
-  size constants. Verification commands and retained-audit documentation agree.
-- Fresh audit verification preserved the exact legacy member-function types
-  for backup-switch and trickle-charge setters while exposing explicit charge
-  policy through distinctly named methods.
-- Ordinary-job polling now has an explicit public predicate, so owner loops do
-  not select `pollJob()` while generic EEPROM work owns its separate surface.
-- Pre-existing EERD is a cleanup obligation as soon as it is observed; exact
-  C0/Control 1 proof is no longer discarded by auxiliary cleanup failures or
-  by a later recovery activation-settle timeout.
-- The ESP32 Wire adapter now accepts the selected core's published buffer
-  capacity, and package validation directly enforces every declared export
-  exclusion.
-- CLI, transport, package, and cooperative-edge regression coverage plus the
-  contributor verification gate now match the maintained contracts.
-
-- Blocking mutators can no longer interleave with cooperative jobs; verified
-  calendar readback now validates weekday rollover; persistent ranges exclude
-  password bytes; alarm reset-date fallback and generic EEPROM poll caps match
-  the documented silicon/configuration behavior.
-- Fixed-layout build-time parsing removes `sscanf`, all public error ordinals
-  are explicit, version-code component limits are enforced, and the native fake
-  refuses password-register indirect commands.
-- Persistent access-state latching now covers pre-existing EERD and primary
-  ensure cleanup failures without falsely requiring recovery after readback-
-  proven cleanup or a later activation-settle timeout.
-- CLI parsing, whitespace handling, diagnostics, command-report naming, scanner
-  branch coverage, and packaging/documentation inconsistencies identified by
-  the 2026 code audit are corrected.
+Rebuild the library and all consumers together. `Config` appends
+`primaryCellI2cTimeoutMs`, and `SettingsSnapshot` appends that timeout plus
+`persistentAccessStateUnproven`. Existing aggregate initializers retain their
+meaning, but binary layouts change, including the driver's private job storage.
+Existing backup-switch and trickle-charge method signatures remain available;
+explicit charging intent uses separately named policy methods.
 
 ### Added
 
-- `isEepromPollable()` selects the generic polling surface when queued work
-  is waiting behind an ordinary job. Together with `isOrdinaryJobBusy()`, it
-  permits an owner loop to drain both surfaces without repeatedly polling a
-  surface that returns `BUSY`.
-- A per-job callback-bound table checked by native fault matrices, plus
-  maximum-timeout coverage for the four staged no-wait setters. Their existing
-  operation behavior is unchanged.
-- Native impossible-state coverage and regression probes for the CI contract
-  checkers, including transitive cooperative I/O and public enum/default guards.
+- `BackupChargePolicy` and explicit-policy setters for changes that can enable
+  charging. The default rejects enabled BSM with nonzero TCM; requesting an
+  unchanged backup mode remains a no-write success.
+- `startPersistentAccessStateRecoveryJob()` and its typed report restore and
+  prove caller-selected active C0 and cleared EERD without an EEPROM command.
+  `SettingsSnapshot::persistentAccessStateUnproven` exposes the recovery need.
+- `Config::primaryCellI2cTimeoutMs` independently bounds primary-cell ensure
+  callbacks to 1..5 ms instead of silently clipping the ordinary timeout.
+- `isOrdinaryJobBusy()` and `isEepromPollable()` select the correct polling
+  surface. Completed ordinary-job status and typed results survive generic
+  persistence, which now owns independent fixed storage.
+- Native coverage for impossible states, callback caps, timeout extrema,
+  clockless operation, clock wrap, cleanup failures, protected ranges, and
+  terminal-callback CLI input. Host regression tests cover semantic checkers
+  and complete HIL framing, payloads, and health snapshots.
+- A per-job callback-cap table checked by native fault matrices. No-wait jobs
+  retain their fixed transfer-count bounds without a new scheduling deadline.
 
-- An explicit `BackupChargePolicy` makes rechargeable-backup intent mandatory
-  before either a BSM or TCM setter may produce an enabled charging pair.
-- A cached `persistentAccessStateUnproven` setting and bounded cooperative
-  persistent-access recovery job that proves caller-selected C0 and cleared
-  EERD state without issuing an EEPROM command.
-- A separate 1..5 ms `primaryCellI2cTimeoutMs` configuration field, plus native
-  coverage for audit regressions, no-clock default admission, cleanup recovery,
-  fake-password tripwires, and Wire short-staging cleanup.
+### Changed
+
+- `begin()` always validates `eepromTimeoutMs` in 10..250 ms, even with generic
+  writes disabled, so explicit persistent-access recovery remains available.
+- Unproven access state survives `end()`/`begin()` and callback rebinding on the
+  same object. Detailed statuses and restoration snapshots reset; applications
+  must retain needed diagnostics and explicitly prove recovery before new
+  persistence or primary-cell ensure.
+- Default deadlines are 200 ms for calendar snapshots and coherent temperature,
+  700 ms for verified calendar set, 500 ms for backup switching, 4000 ms for
+  direct EEPROM reads, and 6000 ms for direct EEPROM writes. Generic item
+  budgets retain a 4000 ms floor and grow to 5323 ms at maximum supported
+  callback/EEPROM timeouts. Owner scheduling gaps consume timed budgets.
+- `setTime()`, `setUnix()`, `writeRegister()`, `writeRegisters()`, and
+  `writeUserRam()` return `BUSY` while ordinary work or queued/active generic
+  persistence is pending. Serialized single-transfer reads remain available.
+- The CLI keeps pending ownership after one 15-second diagnostic. Busy input
+  is discarded in at most 256-byte batches, including queued commands, partial
+  tails, and bytes arriving during the terminal callback.
+- Verification uses maintained portability, ABI/version, and package checks.
+  Guards cover public enums/constants/defaults, allowed health-update owners,
+  and cooperative calls across inline, qualified, and cross-file helpers.
+- Documentation now consolidates software/HIL verification, preserves vendor
+  PDFs and protocol rationale, and distinguishes callback duration bounds from
+  exclusive operation deadlines. Doxygen groups APIs by feature; maintained
+  guides explain result lifetimes, enum-to-register mappings, and restoration.
+
+### Fixed
+
+- EEPROM admission accounts for both READ_ONE waits and the complete first-byte
+  callback sequence without a clock hook. At 5 ms I2C and 100 ms EEPROM
+  timeouts, read/write minima are 298/518 ms with a clock or 398/648 ms without
+  one. READ_ONE polling leaves time for the data read within its phase.
+- A dispatched WRITE_ONE reserves bounded busy polling, direct durability
+  proof, and cleanup after the mutation cutoff. Ambiguous writes are never
+  replayed, and successful readback preserves the original callback failure.
+- Recovery and cleanup continue direct C0/EERD restoration after ready-read
+  failures or phase expiry while the whole-operation budget remains. Observed
+  pre-existing EERD and abandoned cleanup set the latch; exact restoration
+  clears it even if an auxiliary check or later activation settle fails.
+- Single-transfer mutators cannot interleave with cooperative jobs; verified
+  calendar readback checks weekday rollover. Alarm reset-date handling and
+  generic EEPROM poll caps follow the documented silicon/timeout bounds.
+- Invalid password spans fail closed, and the native fake rejects indirect
+  password commands. The legal public direct-read burst remains 46 bytes.
+- The ESP32 example adapter uses the selected Wire capacity (64-byte fallback),
+  discards partial staging, and emits bounded address-only cleanup. Zero/short
+  reads report `I2C_ERROR` with the received count because Wire does not expose
+  the backend cause; they cannot imply an address NACK. Short reads preserve
+  the caller's output buffer.
+- Startup bus clearing uses open-drain pins, bounds SCL stretching, and rejects
+  lines that remain LOW. Failure releases both pins. Scanning no longer clears
+  USB transmit buffers redundantly; probe order and bus timing are unchanged.
+- The exhaustive HIL harness preserves active and durable C1 independently,
+  including PORIE/VLIE, and proves equal/changed/restored write counts through
+  direct persistent readback.
+- The host runner requires full command writes, response framing, payloads,
+  stress counters, and every health row. It flushes live transcripts, stops
+  on first failure, and takes observational health snapshots only with intact
+  framing. Expected fixture errors cannot conceal unrelated failures; zero
+  exit status may still include UNKNOWN checks.
+- Fixed-layout build-time parsing removes `sscanf`; existing error ordinals
+  are explicit, and version-code component limits prevent numeric collisions.
+- CLI argument/whitespace handling, diagnostic command naming, and scanner
+  coverage agree with maintained contracts. Generated documentation links and
+  release comparisons resolve to maintained pages or actual published tags.
+
+### Removed
+
+- Completed audit/resolution files and the historical HIL campaign report.
+  Reusable procedures, protocol decisions, and evidence limits are retained in
+  maintained guides; prior reports remain in Git history. Source/package checks
+  reject completed audits, prompts, extracted notes, and reports.
+- Duplicated verification command lists and superseded source-order/prose
+  checkers; the verification guide is the shared CI command reference.
 
 ## [3.0.1] - 2026-08-05
 

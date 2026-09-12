@@ -27,7 +27,9 @@ Seconds, minutes, hours, date, month, and year in calendar registers
 binary value from 0..6 and is not required to agree with the Gregorian date.
 It is not BCD.
 Reserved upper bits must be zero. Setters preserve a valid supplied weekday.
-Supported years are 2000..2099.
+Supported years are 2000..2099. The chip stores only a two-digit year and has
+no century bit. After 2099 it wraps to `00`, which the library interprets as
+2000; the application must enforce any longer-lived century policy.
 Register `0x00` is packed-BCD hundredths. It is read independently by the typed
 API. Writing Seconds or setting STOP resets hundredths and the 4096 Hz through
 1 Hz prescalers.
@@ -56,6 +58,13 @@ different layouts; the typed source selects the exact burst and decoder.
 Timestamp reset is a cooperative control-register mutation. TLow/THigh reset
 also clears TLF/THF. EVR may read back set, so a repeated EVI reset emits a
 preserved 0-to-1 EVR sequence; it does not clear EVF.
+
+EVR is a reset command, not ordinary stored configuration. Application Manual
+Rev. 1.3 sections 3.10 and 4.17 disagree about whether rewriting an already-set
+EVR resets the timestamp bank again. Unrelated Time Stamp Control updates
+therefore write EVR=0, including overwrite changes, TLow/THigh resets, and
+temperature-event configuration. This avoids an unintended EVI timestamp
+reset under either interpretation; only an intentional EVI reset writes EVR=1.
 
 Live reconfiguration follows the vendor interrupt-quiescence sequence:
 `disable interrupt -> consume/clear flag if appropriate -> configure ->
@@ -95,6 +104,11 @@ Each typed clear reads only target/busy evidence and then writes a fixed payload
 that preserves the temperature fraction and any neighboring flag that asserts
 between cooperative polls.
 
+BSF reads zero while backup switchover is disabled (`BSM=00/11`) and is cleared
+by a chip power-on reset. It cannot establish that a switchover occurred before
+that reset. Enabling BSIE while BSF is already set can assert INT immediately;
+the application must explicitly consume or clear stale evidence as appropriate.
+
 ## Control bit facts
 
 - Control 1 contains EERD, USEL, GP0, timer enable, and timer source.
@@ -106,6 +120,10 @@ between cooperative polls.
 - EVI Control has no generic enable bit 3.
 - PMU C0 fields are NCLKE, BSM, TCR, and TCM. TCR and TCM are independent.
 - TCM `00` disables the trickle charger. BSM `10` selects level switching.
+  Charging also requires enabled switchover (`BSM=01/10`) and VDD power state.
+  A nonzero TCM can therefore become active when only BSM is changed. The
+  primary-cell policy clears TCM, and the typed setters require explicit
+  charging permission before producing an enabled BSM/nonzero TCM pair.
 
 Maintained code uses the canonical command-table names `PMU_NCLKE_MASK` for
 the active-low CLKOUT gate and `TS_EVI_OVERWRITE_BIT` for EVI timestamp
@@ -116,8 +134,15 @@ both new UF generation and the corresponding INT event; there is no
 UF-polling-only mode. Changing periodic configuration does not clear a UF that
 was already latched.
 
-The public backup enum is encoded explicitly: Off=`00`, Direct=`01`, and
-Level=`10`; raw `11` is also interpreted as disabled. A cooperative backup
+Public enum ordinals are distinct from the chip's two-bit BSM encoding:
+
+| Public mode | Enum ordinal | BSM bits |
+| --- | ---: | --- |
+| `BackupSwitchMode::Off` | 0 | `00` |
+| `BackupSwitchMode::Level` | 1 | `10` |
+| `BackupSwitchMode::Direct` | 2 | `01` |
+
+Raw BSM `11` is also interpreted as disabled. A cooperative backup
 change preserves non-BSM implemented PMU bits, performs at most one write, and
 uses readback-only reconciliation within four callbacks. A disabled-to-Direct
 transition has a 2 ms activation not-before boundary; disabled-to-Level has a
@@ -241,13 +266,25 @@ Commands used by the implementation:
 | WRITE_ONE | `0x21` | One staged persistent byte; at most once per byte/invocation |
 | READ_ONE | `0x22` | Direct persistent-byte inspection and verification |
 
-EERD must be controlled through Control 1. EEBUSY and EEF are checked before
-mutation and after vendor waits. A READ_ONE requires at least 1 ms settling; a
-WRITE_ONE requires at least 10 ms before completion polling. Both waits are
+Before either reading or writing EEPROM, automatic refresh must be disabled
+with EERD=1 and backup switchover must be disabled with BSM=`00/11`; a command
+may start only when EEbusy is clear. The driver additionally clears TCM in its
+temporary safe C0 and verifies the access state before dispatch. EEBUSY and
+EEF are checked before mutation and after vendor waits. A READ_ONE requires
+at least 1 ms settling; a WRITE_ONE requires at least 10 ms before completion
+polling. Both waits are
 measured from completion of the command transport callback. The configured
 generic EEPROM timeout is an additional bounded busy-poll window after the
 write settle. Safe C0 access and cleanup include the documented 10 ms
 backup-switch settle interval.
+
+The RV3032 command sequences in Application Manual Rev. 1.3 sections 4.6.5
+and 4.6.6 dispatch `0x21` or `0x22` after staging; they do not require a preceding
+`0x00` command. EECMD reads zero, so reading that register cannot prove a
+command was accepted. The driver's two-READ_ONE content proof first reads a
+byte with a known staged sentinel, then stages the complement of that observed
+byte before a second read. Equal results distinguish persistent content from
+unchanged staging data, including when the real byte equals the first sentinel.
 
 Persistent content proof and access-state cleanup proof are independent.
 Typed reports retain the first forward status, first cleanup status, durable

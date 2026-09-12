@@ -20,7 +20,7 @@ REQUIRED_SOURCE_FILES = (
     "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md",
     "docs/IDF_PORT.md",
-    "docs/reports/HIL_SUMMARY.md",
+    "docs/VERIFICATION.md",
     "docs/reference-pdfs/RV-3032-C7_datasheet.pdf",
     "docs/reference-pdfs/RV-3032-C7_App-Manual.pdf",
 )
@@ -35,13 +35,12 @@ REQUIRED_PACKAGE_FILES = (
     "examples/common/CliStyle.h", "examples/common/I2cScanner.h",
     "examples/common/Log.h", "docs/README.md", "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md", "docs/IDF_PORT.md",
-    "docs/reports/HIL_SUMMARY.md",
+    "docs/VERIFICATION.md",
 )
 REQUIRED_EXPORT_EXCLUDES = (
     ".github/**", ".pio/**", ".venv/**", ".vscode/**", "dist/**", "AGENTS.md",
     "docs/CODE_AUDIT*.md", "docs/doxygen/**", "docs/extracted-md/**",
-    "docs/prompts/**", "docs/reports/*.json", "docs/reports/*.pid",
-    "docs/reports/*.txt", "docs/reports/*-runner.md", "docs/reference-pdfs/**",
+    "docs/prompts/**", "docs/reports/**", "docs/reference-pdfs/**",
     "docs/**/*.pdf", "idf_component.yml", "idf_component.yml.orig", "test/**",
     "tmp/**", "*.tar.gz", "*.tgz", "*.zip",
 )
@@ -69,9 +68,10 @@ def source_check() -> int:
             errors.append(f"missing or empty required source file: {rel}")
 
     artifacts = [
+        *ROOT.glob("docs/CODE_AUDIT*.md"),
         *ROOT.glob("docs/prompts/**/*"),
         *ROOT.glob("docs/extracted-md/**/*"),
-        *ROOT.glob("docs/reports/20??-*.md"),
+        *ROOT.glob("docs/reports/**/*"),
     ]
     for path in sorted({path for path in artifacts if path.is_file()}):
         errors.append(f"completed workflow artifact remains: {path.relative_to(ROOT).as_posix()}")
@@ -152,12 +152,10 @@ def forbidden_package_path(path: str) -> bool:
         return True
     if path.startswith((
         "test/", ".pio/", ".venv/", ".vscode/", ".git/", "dist/", "tmp/",
-        "docs/prompts/", "docs/extracted-md/", "docs/reference-pdfs/",
+        "docs/prompts/", "docs/extracted-md/", "docs/reports/", "docs/reference-pdfs/",
     )):
         return True
     if path == "AGENTS.md":
-        return True
-    if path.startswith("docs/reports/") and path != "docs/reports/HIL_SUMMARY.md":
         return True
     return path in ("idf_component.yml", "idf_component.yml.orig")
 

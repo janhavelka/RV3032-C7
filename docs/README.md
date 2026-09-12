@@ -1,52 +1,40 @@
 # RV3032-C7 documentation
 
-This directory contains the maintained supporting documentation for the
-RV3032-C7 library. Normative API behavior belongs in
-the public headers; release history belongs in `CHANGELOG.md`.
+This directory contains maintained integration and verification guides plus
+the vendor PDFs. Public headers define API contracts; the root changelog
+records release history.
 
-## Maintained documents
+## Guides
 
 | Document | Purpose |
 |---|---|
-| [`../README.md`](../README.md) | Public integration guide, safety contract, and verification commands. |
-| [`../CHANGELOG.md`](../CHANGELOG.md) | Release-facing change history. |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Lifecycle, ownership, health tracking, cooperative jobs, and persistence policy. |
-| [`DEVICE_REFERENCE.md`](DEVICE_REFERENCE.md) | Silicon facts used by the driver: memory, flags, timing, and EEPROM protocol. |
-| [`IDF_PORT.md`](IDF_PORT.md) | ESP-IDF transport-adapter boundary and owner-loop guidance. |
-| [`reports/HIL_SUMMARY.md`](reports/HIL_SUMMARY.md) | Concise retained hardware-validation evidence and fixture limitations. |
+| [Library README](../README.md) | Integration sketch, capabilities, support boundaries, and release status. |
+| [Changelog](../CHANGELOG.md) | Published release history and changes under Unreleased. |
+| [Architecture](ARCHITECTURE.md) | Ownership, lifecycle, health, cooperative execution, timing, and persistence. |
+| [Device reference](DEVICE_REFERENCE.md) | Register behavior, flags, memory, EEPROM protocol, and electrical prerequisites. |
+| [ESP-IDF adapter notes](IDF_PORT.md) | Callback and owner-loop guidance for application-managed ports. |
+| [Verification](VERIFICATION.md) | CI commands, HIL surfaces, restoration procedures, and evidence limits. |
 
-The public API reference is generated with Doxygen from the root README,
-changelog, contributing guide, the three maintained technical docs above, and
-headers under `include/RV3032/`. Markup errors are treated as build failures.
+Run `doxygen Doxyfile` from the repository root to generate
+`docs/doxygen/html/index.html`. The API reference includes the root README,
+changelog, contributor guide, maintained technical guides, and public headers.
+Generated output is ignored by Git and excluded from the library package.
 
 ## Vendor references
 
-The Micro Crystal datasheet and Application Manual Rev. 1.3 are retained in
-the repository's
-[vendor-reference directory](reference-pdfs/) for offline traceability. They remain the authority for electrical limits,
-layout, qualification, and application circuits. PDFs are excluded from the
-PlatformIO package.
+- [RV-3032-C7 datasheet](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reference-pdfs/RV-3032-C7_datasheet.pdf)
+- [RV-3032-C7 Application Manual](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reference-pdfs/RV-3032-C7_App-Manual.pdf)
 
-## Retained working documents
+These Micro Crystal documents are retained under `docs/reference-pdfs/` for offline traceability
+and remain authoritative for electrical limits, layout, qualification, and
+application circuits. The device reference identifies the manual revision used
+by the driver. PDFs are excluded from the PlatformIO package.
 
-| Document | Purpose |
-|---|---|
-| [`CODE_AUDIT.md`](CODE_AUDIT.md) | Original point-in-time review; retained for traceability. |
-| [`CODE_AUDIT_RESOLUTION.md`](CODE_AUDIT_RESOLUTION.md) | Findings, implementation decisions, and subsequent verification. |
+## Keeping documentation current
 
-These working documents are excluded from the PlatformIO package and generated
-API documentation. They are historical review records, not maintained API contracts.
-
-## Evidence policy
-
-- Native tests prove behavior against the bounded fake transport, not physical
-  hardware.
-- CI builds prove that the configured PlatformIO targets compile; they do not
-  prove wiring, backup-cell behavior, oscillator accuracy, EEPROM endurance,
-  or field stability.
-- Hardware validation is retained only as a concise summary. Do not commit raw
-  runner JSON, generated step tables, PID files, stdout/stderr captures, or
-  full serial transcripts.
-- Completed prompts remain in Git history. The retained implementation audits
-  listed above also remain in this checkout and are not shipped as maintained
-  documentation.
+Keep reusable contracts, procedures, and limitations in these guides. Record
+user-visible changes under Unreleased in the changelog and update public
+headers when an API contract changes. Keep completed audits, plans, prompts,
+campaign reports, generated step tables, and raw transcripts out of this tree;
+earlier tracked records remain available in Git history. Private HIL artifacts
+default to `.pio/hil-runs/`.
