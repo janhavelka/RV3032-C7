@@ -205,7 +205,7 @@ review; it does not reopen the original closed findings.
 | 4 | Valid: retain the unproven-access latch across passive lifecycle changes, including abandonment of active cleanup and callback rebinding. | Terminal-failure and active-abandonment tests preserve the latch through end/begin and clear it only after proven recovery. A sticky PORF read is not fresh access-state proof. |
 | 5 | Valid: ready-read failure, ready timeout, or exhausted check count records the cause and continues direct recovery. EEbusy gates EECMD only. | Busy and transport-failure tests restore C0/EERD while returning the first error; no EEPROM command is issued. |
 | 6 | Valid: backup default increased to 500 ms. | Direct tests at 60/100 ms callback limits, with and without a clock hook, complete disabled-to-Level activation. |
-| 7 | Valid documentation omission: all five write APIs document queued-persistence `BUSY`; 3.1.0 history records the behavior. | Existing synchronous-write admission regressions and Doxygen. |
+| 7 | Valid documentation omission: all five write APIs document queued-persistence `BUSY`; the Unreleased changelog records the behavior. | Existing synchronous-write admission regressions and Doxygen. |
 | 8 | Valid: the entire ESP32 adapter is now protected by an explicit architecture error/guard, including its Wire calls. | Native build explicitly selects ESP32 API stubs; embedded builds compile the production adapter. |
 | 9 | Valid safe subset: a 15-second, one-shot pending diagnostic retains ownership. Serial input is drained with a fixed per-poll byte cap and incomplete lines are discarded through their terminator. | CLI tests cover unsigned clock wrap, one callback per poll, one warning, continued ownership, and discarded command tails. |
 | 10 | Valid defensive correction: invalid spans count as unsupported in the password-range helper. | Direct invalid-span regression and the existing public zero-I/O allowlist tests. |
@@ -220,7 +220,7 @@ review; it does not reopen the original closed findings.
 | 19 | Recommendation announced before implementation: materialize the existing no-wait bounds without introducing new setter deadlines. `NO_WAIT_JOB_CALLBACK_CAPS` is indexed by JobKind and checked by native success/fault matrices. Temperature requires at most 10 callbacks, not 11; guarded timestamp reset explains the four-callback REGISTER_UPDATE bound. | Maximum-timeout tests exercise all four staged setters, successful completion and final-read failure/cleanup, with and without a clock hook. Architecture documentation distinguishes callback time from caller scheduling gaps. |
 | 20 | Valid documentation contradiction: list the two retained audit documents separately from maintained API documentation. | Documentation index and package exclusion checks. |
 | 21 | Valid: README now includes both HIL build environments. | README, CONTRIBUTING, and the CI matrix cover all four targets; checker regression tests are also listed. |
-| 22 | Valid release-hygiene concern. Follow-ups are collected in 3.2.0, with Version.h generated from library.json. A minor version follows the repository's rule for the new public polling predicate. 3.1.0 is identified as an untagged development baseline and its two trailing SettingsSnapshot fields are documented as source-compatible, binary-layout changes. | Version/ABI/package checks. No commit, tag, or publication is part of this review. |
+| 22 | Valid release-hygiene concern. Follow-ups are collected under Unreleased, with Version.h generated from library.json. A minor release after v3.0.1 is intended for the new public polling predicate. The two trailing SettingsSnapshot fields are documented as source-compatible, binary-layout changes. | Version/ABI/package checks. No commit, tag, or publication is part of this review. |
 
 The latest hosted CI run for the starting commit passed all six jobs:
 [CI run 33322558762](https://github.com/janhavelka/RV3032-C7/actions/runs/33322558762).
@@ -239,7 +239,7 @@ for these uncommitted changes has not been created.
 - Device-free HIL parser self-test and the expected 26-step dry run: passed.
 - Doxygen with warnings treated as errors: passed.
 - PlatformIO package and archive validation: passed for
-  `dist/RV3032-C7.tar.gz` (version 3.2.0).
+  `dist/RV3032-C7.tar.gz` (unpublished development build at `16b700b`).
 - Separate compiler probes verified the 64-byte unpublished-capacity fallback
   and the intentional non-ESP32 compile error.
 - `git diff --check`: passed. Changes remain uncommitted and untagged.
@@ -276,7 +276,7 @@ validation. The unchanged baseline also passed all 131 native tests locally.
 The changes had landed, but the prior claim of full closure was too broad:
 items **1, 9, 11, and 22** still had gaps. The other 18 items were confirmed
 against implementation, public contracts, and their registered regressions.
-The corrections below are local follow-up work, prepared as **3.2.1**; they
+The corrections below were prepared as **Unreleased** follow-up work; they
 have not been committed, pushed, tagged, or published by this re-audit.
 
 ### Remaining gaps reproduced and corrected
@@ -308,12 +308,12 @@ have not been committed, pushed, tagged, or published by this re-audit.
    files, and health-call checks distinguish declarations from qualified calls.
    Mutation probes cover inline I/O, a separate implementation file, qualified
    health calls, and allowed timed calls.
-4. **Changelog references (item 22).** The old Unreleased and 3.1.0 links still
-   referenced nonexistent `v3.1.0`; 3.2.0 had no comparison reference.
-   Development comparisons now use the existing `f3db733` and `16b700b` commits.
-   Git tags and GitHub releases confirm `v3.0.1` is the latest published release.
-   The 3.2.1 follow-up is explicitly marked prepared and unpublished, and its
-   version header was generated from `library.json`.
+4. **Changelog references (item 22).** Earlier development entries linked to
+   nonexistent release tags or lacked comparison references. The review used
+   existing `f3db733` and `16b700b` commits instead. The release-history cleanup
+   now collects this work under Unreleased, compared against the actual latest
+   published release, `v3.0.1`. The generated version header remains build
+   metadata; it does not prove publication.
 
 ### Item-by-item disposition
 
@@ -340,7 +340,7 @@ have not been committed, pushed, tagged, or published by this re-audit.
 | 19 | Complete | The chosen table exists for every JobKind and is checked by success/fault matrices. Four staged-setter maximum-timeout tests prove the derived callback bounds. This does not impose deadlines on caller scheduling gaps. Temperature's actual maximum is ten callbacks. |
 | 20 | Complete | Both historical audit files are listed as retained working documents and excluded from package/API documentation. |
 | 21 | Complete | README, CONTRIBUTING, and CI list all four embedded environments. |
-| 22 | Partial | Version 3.2.0 and SettingsSnapshot binary-layout notes landed. Invalid comparison links remained; corrected locally alongside the explicitly unpublished 3.2.1 patch entry. |
+| 22 | Partial | Development metadata and SettingsSnapshot binary-layout notes landed. Invalid comparison links remained; corrected alongside the Unreleased follow-up notes. |
 
 ### Re-audit verification
 
@@ -365,7 +365,7 @@ remains v3.0.1; preparing version metadata does not publish a release.
 ## 2026-09-10 complete correction review
 
 The user requested a further independent re-audit and full correction of the
-remaining work. The starting worktree contained the preceding 3.2.1 edits;
+remaining work. The starting worktree contained the preceding follow-up edits;
 they were preserved. Fetch and fast-forward checks confirmed that local and
 upstream `main` still point to `16b700b`, with no divergence or conflicts.
 The previous fixes therefore remain local, while the hosted six-job CI run
@@ -414,7 +414,7 @@ needed, and typed results continue to retain verified partial progress.
 - Version, portability, ABI, source/package checks, device-free HIL parser
   and 26-step dry run, Doxygen, fallback/non-ESP32 compiler probes, and
   `git diff --check`: passed.
-- The 3.2.1 archive was rebuilt and validated at `dist/RV3032-C7.tar.gz`.
+- The unpublished follow-up archive was rebuilt and validated at `dist/RV3032-C7.tar.gz`.
 - Independent review of the final combined implementation found no further
   concrete correctness or operation-bound defects within the audit scope.
 
@@ -433,5 +433,5 @@ package checks), and the four maintained embedded builds.
 
 The earlier references to outstanding commit/push describe their historical
 verification points. No known code correction from this audit remains unlanded.
-Version 3.2.1 is still untagged and unpublished; v3.0.1 remains the latest
-published release. No new physical HIL evidence is claimed.
+This work remains Unreleased; v3.0.1 is the latest published release and
+3.1.0 is the next intended release. No new physical HIL evidence is claimed.

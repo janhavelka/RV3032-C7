@@ -677,10 +677,11 @@ mismatched scope before opening the serial port and records it in HIL results.
 
 ## Versioning
 
-The current development version is **3.2.1**, committed and synchronized with
-`main`; it has no release tag or published release yet. The latest published
-release is **v3.0.1**. The [changelog](CHANGELOG.md) distinguishes development
-baselines from published releases and links their actual commits.
+The latest published release is **v3.0.1**. Current development is
+**Unreleased**, with **3.1.0** intended as the next release. The
+[changelog](CHANGELOG.md) collects all changes since the published release.
+Existing build metadata is a development identifier and will be aligned when
+the next release is prepared; it does not establish a published version.
 
 `library.json` is the single version source. `include/RV3032/Version.h` is
 generated and must not be edited manually. `scripts/generate_version.py`

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Latest published release: **v3.0.1**. All subsequent changes below are
+unreleased; the next intended release is **3.1.0**. Development build metadata
+is not publication evidence.
+
+### Migration from 3.0.1
+
+The new `SettingsSnapshot::primaryCellI2cTimeoutMs` and
+`persistentAccessStateUnproven` trailing fields preserve source aggregate
+initialization compatibility but change binary layout. Rebuild consumers.
+
 ### Changed
 
 - README now collects supported platforms, intentional feature boundaries,
@@ -14,6 +24,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Doxygen groups driver methods by feature and clarifies passive lifecycle,
   explicit persistent-access recovery, polling budgets, callback ownership,
   and the distinction between admission and terminal success.
+
+- The coherent-temperature default is 200 ms and the backup-switch default is
+  500 ms, admitting the supported 100 ms callback timeout without a clock hook.
+- `begin()` always validates the 10..250 ms EEPROM window so explicit access
+  recovery remains available with generic writes disabled.
+- Unproven persistent-access cleanup survives `end()`/`begin()` on the same
+  object, including abandonment of active cleanup and callback rebinding.
+- The CLI emits one diagnostic after 15 seconds of pending work and continues
+  polling. Serial input received while pending is discarded through complete
+  lines, including partial command tails.
+
+- `setTime()`, `setUnix()`, `writeRegister()`, `writeRegisters()`, and
+  `writeUserRam()` return `BUSY` while generic persistence is queued, even
+  before its first poll. Single-transfer reads remain available under the
+  application's transport serialization.
+- Generic EEPROM queue work now owns fixed persistence state independent of the
+  ordinary job record, preserving completed job status and typed results.
+- Default snapshot and verified calendar-set deadlines are now 200 ms and
+  700 ms so they are executable across the accepted callback-timeout range.
+- EEPROM write mutation cutoffs reserve the full non-replayable post-WRITE_ONE
+  busy, two-read durability proof, access cleanup, and settle chain.
+- `isJobBusy()` retains combined active-work behavior; the public
+  `isOrdinaryJobBusy()` selects `pollJob()` while generic persistence uses its
+  independent fixed state and polling surface.
+- Repository checks are focused semantic portability, ABI/version, and package
+  validators instead of source-order and exact-prose archaeology.
+- The reference transport is explicitly ESP32-S2/S3 scoped, uses the selected
+  core's published Wire buffer capacity with a conservative fallback, and
+  discards partial staging before address-only cleanup.
 
 ### Fixed
 
@@ -39,15 +78,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generated API pages link correctly to the retained HIL summary and the
   ESP-IDF notes' verification instructions.
 
-## [3.2.1] - 2026-09-10
-
-Development version committed as `a76e613` and pushed to `main`; all six jobs in
-[its CI run](https://github.com/janhavelka/RV3032-C7/actions/runs/34596228063)
-passed. This version is not tagged or published. The latest published release
-remains `v3.0.1`.
-
-### Fixed
-
 - Direct EEPROM read/write admission includes both READ_ONE waits before the
   cleanup cutoff and charges the complete first-byte callback sequence when
   there is no clock hook. At a 5 ms I2C / 100 ms EEPROM timeout the minimum
@@ -70,38 +100,8 @@ remains `v3.0.1`.
   exact owner allowlist as unqualified calls. Trailing-return/reference-qualified
   members and final classes are recognized, and ABI guards ignore commented
   enum examples and cover public operation-timeout default arguments.
-- Development changelog links use existing commits instead of the nonexistent
-  `v3.1.0` tag. The latest published release remains `v3.0.1`.
-
-## [3.2.0] - 2026-09-09
-
-Development baseline committed as `16b700b`; no `v3.2.0` release tag was published.
-
-### Added
-
-- `isEepromPollable()` selects the generic polling surface when queued work
-  is waiting behind an ordinary job. Together with `isOrdinaryJobBusy()`, it
-  permits an owner loop to drain both surfaces without repeatedly polling a
-  surface that returns `BUSY`.
-- A per-job callback-bound table checked by native fault matrices, plus
-  maximum-timeout coverage for the four staged no-wait setters. Their existing
-  operation behavior is unchanged.
-- Native impossible-state coverage and regression probes for the CI contract
-  checkers, including transitive cooperative I/O and public enum/default guards.
-
-### Changed
-
-- The coherent-temperature default is 200 ms and the backup-switch default is
-  500 ms, admitting the supported 100 ms callback timeout without a clock hook.
-- `begin()` always validates the 10..250 ms EEPROM window so explicit access
-  recovery remains available with generic writes disabled.
-- Unproven persistent-access cleanup survives `end()`/`begin()` on the same
-  object, including abandonment of active cleanup and callback rebinding.
-- The CLI emits one diagnostic after 15 seconds of pending work and continues
-  polling. Serial input received while pending is discarded through complete
-  lines, including partial command tails.
-
-### Fixed
+- Changelog comparisons start at the latest published release; unpublished
+  development work is collected here without separate release headings.
 
 - The post-WRITE_ONE reserve now permits durable readback after the mutation
   cutoff, retaining the original callback error without replaying the write.
@@ -129,47 +129,6 @@ Development baseline committed as `16b700b`; no `v3.2.0` release tag was publish
 - CLI, transport, package, and cooperative-edge regression coverage plus the
   contributor verification gate now match the maintained contracts.
 
-## [3.1.0] - 2026-08-30
-
-Development baseline without a published `v3.1.0` tag; subsequent changes are
-collected in 3.2.0. Its new `SettingsSnapshot::primaryCellI2cTimeoutMs` and
-`persistentAccessStateUnproven` trailing fields preserve source aggregate
-initialization compatibility but change binary layout. Rebuild consumers.
-
-### Added
-
-- An explicit `BackupChargePolicy` makes rechargeable-backup intent mandatory
-  before either a BSM or TCM setter may produce an enabled charging pair.
-- A cached `persistentAccessStateUnproven` setting and bounded cooperative
-  persistent-access recovery job that proves caller-selected C0 and cleared
-  EERD state without issuing an EEPROM command.
-- A separate 1..5 ms `primaryCellI2cTimeoutMs` configuration field, plus native
-  coverage for audit regressions, no-clock default admission, cleanup recovery,
-  fake-password tripwires, and Wire short-staging cleanup.
-
-### Changed
-
-- `setTime()`, `setUnix()`, `writeRegister()`, `writeRegisters()`, and
-  `writeUserRam()` return `BUSY` while generic persistence is queued, even
-  before its first poll. Single-transfer reads remain available under the
-  application's transport serialization.
-- Generic EEPROM queue work now owns fixed persistence state independent of the
-  ordinary job record, preserving completed job status and typed results.
-- Default snapshot and verified calendar-set deadlines are now 200 ms and
-  700 ms so they are executable across the accepted callback-timeout range.
-- EEPROM write mutation cutoffs reserve the full non-replayable post-WRITE_ONE
-  busy, two-read durability proof, access cleanup, and settle chain.
-- `isJobBusy()` retains combined active-work behavior; the public
-  `isOrdinaryJobBusy()` selects `pollJob()` while generic persistence uses its
-  independent fixed state and polling surface.
-- Repository checks are focused semantic portability, ABI/version, and package
-  validators instead of source-order and exact-prose archaeology.
-- The reference transport is explicitly ESP32-S2/S3 scoped, uses the selected
-  core's published Wire buffer capacity with a conservative fallback, and
-  discards partial staging before address-only cleanup.
-
-### Fixed
-
 - Blocking mutators can no longer interleave with cooperative jobs; verified
   calendar readback now validates weekday rollover; persistent ranges exclude
   password bytes; alarm reset-date fallback and generic EEPROM poll caps match
@@ -183,6 +142,27 @@ initialization compatibility but change binary layout. Rebuild consumers.
 - CLI parsing, whitespace handling, diagnostics, command-report naming, scanner
   branch coverage, and packaging/documentation inconsistencies identified by
   the 2026 code audit are corrected.
+
+### Added
+
+- `isEepromPollable()` selects the generic polling surface when queued work
+  is waiting behind an ordinary job. Together with `isOrdinaryJobBusy()`, it
+  permits an owner loop to drain both surfaces without repeatedly polling a
+  surface that returns `BUSY`.
+- A per-job callback-bound table checked by native fault matrices, plus
+  maximum-timeout coverage for the four staged no-wait setters. Their existing
+  operation behavior is unchanged.
+- Native impossible-state coverage and regression probes for the CI contract
+  checkers, including transitive cooperative I/O and public enum/default guards.
+
+- An explicit `BackupChargePolicy` makes rechargeable-backup intent mandatory
+  before either a BSM or TCM setter may produce an enabled charging pair.
+- A cached `persistentAccessStateUnproven` setting and bounded cooperative
+  persistent-access recovery job that proves caller-selected C0 and cleared
+  EERD state without issuing an EEPROM command.
+- A separate 1..5 ms `primaryCellI2cTimeoutMs` configuration field, plus native
+  coverage for audit regressions, no-clock default admission, cleanup recovery,
+  fake-password tripwires, and Wire short-staging cleanup.
 
 ## [3.0.1] - 2026-08-05
 
@@ -551,23 +531,23 @@ initialization compatibility but change binary layout. Rebuild consumers.
 
 ## [1.4.0] - 2026-04-03
 
+Includes earlier development work that was not separately published.
+
 ### Added
+
 - Granular I2C transport status codes: `I2C_NACK_ADDR`, `I2C_NACK_DATA`, `I2C_TIMEOUT`, and `I2C_BUS`.
 
-### Changed
-- Removed the unnecessary `Wire` library dependency from metadata.
-- `RV3032/RV3032.h` now exposes `Version.h`, keeping version constants available from the canonical public include path.
-- Updated the example transport adapter to treat `timeoutMs` as advisory and leave bus-timeout ownership with the application.
-- Aligned README configuration and documentation references with the current RV3032-C7 API and shipped docs.
-
-## [1.3.1] - 2026-04-03
-
-### Added
 - `inProgress()` convenience method on `Status` struct.
 - `CommandHandler.h` example helper for serial command parsing (`cmd::readLine`, `cmd::match`, `cmd::parseInt`).
 - `HealthDiag.h` example helper with verbose health diagnostics, color-coded output, snapshots, diffs, and `HealthMonitor` class for continuous monitoring.
 
 ### Changed
+
+- Removed the unnecessary `Wire` library dependency from metadata.
+- `RV3032/RV3032.h` now exposes `Version.h`, keeping version constants available from the canonical public include path.
+- Updated the example transport adapter to treat `timeoutMs` as advisory and leave bus-timeout ownership with the application.
+- Aligned README configuration and documentation references with the current RV3032-C7 API and shipped docs.
+
 - `I2cScanner.h`: standardized to `LOG_SERIAL` macro, added common address hints for all supported devices.
 - `Log.h`: added `LOGV` runtime-verbose macro, ESP32-S3 USB CDC delay in `log_begin()`.
 
@@ -608,7 +588,11 @@ initialization compatibility but change binary layout. Rebuild consumers.
 
 ## [1.2.0] - 2026-01-20
 
+Includes the initial implementation and earlier development work that were
+not separately published.
+
 ### Added
+
 - EEPROM write statistics: `eepromWriteCount()`, `eepromWriteFailures()`, `eepromQueueDepth()`
 - Driver health tracking with `DriverState` (READY, DEGRADED, OFFLINE)
 - Health diagnostics: `state()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
@@ -616,38 +600,11 @@ initialization compatibility but change binary layout. Rebuild consumers.
 - Probe function for diagnostic checks without affecting driver health
 - `_beginInProgress` flag for proper initialization state management
 
-### Changed
-- Improved health tracking architecture with tracked vs raw transport wrappers
-- Enhanced `begin()` and `recover()` to properly track I2C failures
-- Reduced EEPROM write timeout for improved performance
-- Disabled verbose mode by default in examples
-
-### Fixed
-- Initialization state management during `begin()` execution
-- Health tracking now correctly excludes validation errors
-
-## [1.1.0] - 2026-01-12
-
-### Added
 - Non-blocking EEPROM commit state machine (tick-driven) with `isEepromBusy()` and `getEepromLastStatus()`
 - Status/validity helpers: `readStatusFlags()`, `readValidity()`, `clearBackupSwitchFlag()`
 - Conversion helpers: `bcdToBinary()`, `binaryToBcd()`, `unixToDateTime()`, `dateTimeToUnix()`
 - Host-side unit tests with a native test environment and CI job
 
-### Changed
-- Added `eepromNonBlocking` config option (default true)
-- EEPROM writes can return `BUSY` when a commit is already in progress
-- CLI example includes validity and backup switchover helpers
-
-### Fixed
-- N/A
-
-### Removed
-- N/A
-
-## [1.0.0] - 2026-01-10
-
-### Added
 - Complete RV-3032-C7 RTC driver implementation
 - `begin(Config) -> Status`, `tick(now_ms)`, `end()` lifecycle API
 - Time/date operations: `readTime()`, `setTime()`, `readUnix()`, `setUnix()`
@@ -668,26 +625,30 @@ initialization compatibility but change binary layout. Rebuild consumers.
 - GitHub Actions CI for ESP32-S2 and ESP32-S3
 
 ### Changed
-- N/A (initial RV3032 release)
 
-### Removed
-- N/A (initial RV3032 release)
+- Improved health tracking architecture with tracked vs raw transport wrappers
+- Enhanced `begin()` and `recover()` to properly track I2C failures
+- Reduced EEPROM write timeout for improved performance
+- Disabled verbose mode by default in examples
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/a76e613...HEAD
-[3.2.1]: https://github.com/janhavelka/RV3032-C7/compare/16b700b...a76e613
-[3.2.0]: https://github.com/janhavelka/RV3032-C7/compare/f3db733...16b700b
-[3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...f3db733
+- Added `eepromNonBlocking` config option (default true)
+- EEPROM writes can return `BUSY` when a commit is already in progress
+- CLI example includes validity and backup switchover helpers
+
+### Fixed
+
+- Initialization state management during `begin()` execution
+- Health tracking now correctly excludes validation errors
+
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
 [3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0
 [1.6.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.1...v1.4.0
-[1.3.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.0...v1.3.1
+[1.4.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/janhavelka/RV3032-C7/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.1.0...v1.2.0
-[1.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.0.0
+[1.2.0]: https://github.com/janhavelka/RV3032-C7/releases/tag/v1.2.0
