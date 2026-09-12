@@ -103,6 +103,8 @@ jobs:
       - name: Check device-free HIL tooling
         run: |
           python -S tools/hil_cli_runner.py --parser-self-test
+          python -S tools/test_hil_cli_runner.py
+          python -S tools/test_hil_health_snapshot.py
           python -S tools/hil_cli_runner.py --dry-run
 
       - name: Check source and package metadata

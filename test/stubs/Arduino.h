@@ -31,11 +31,42 @@ inline void delayMicroseconds(uint32_t delayUs) {
 
 static constexpr int INPUT_PULLUP = 0x02;
 static constexpr int OUTPUT = 0x03;
+static constexpr int OUTPUT_OPEN_DRAIN = 0x13;
 static constexpr int LOW = 0;
 static constexpr int HIGH = 1;
 
-inline void pinMode(int, int) {}
-inline void digitalWrite(int, int) {}
+struct ArduinoStubPin {
+  int mode = INPUT_PULLUP;
+  int level = HIGH;
+  bool heldLow = false;
+  uint32_t lowReadsRemaining = 0;
+  uint32_t readCalls = 0;
+  uint32_t lowWrites = 0;
+};
+inline ArduinoStubPin arduinoStubPins[64];
+inline uint32_t arduinoStubActiveHighWrites = 0;
+
+inline void resetArduinoStubPins() {
+  for (auto& pin : arduinoStubPins) pin = ArduinoStubPin{};
+  arduinoStubActiveHighWrites = 0;
+}
+inline void pinMode(int pin, int mode) { arduinoStubPins[pin].mode = mode; }
+inline void digitalWrite(int pin, int value) {
+  auto& state = arduinoStubPins[pin];
+  state.level = value;
+  if (value == LOW) ++state.lowWrites;
+  if (value == HIGH && state.mode == OUTPUT) ++arduinoStubActiveHighWrites;
+}
+inline int digitalRead(int pin) {
+  auto& state = arduinoStubPins[pin];
+  ++state.readCalls;
+  if (state.heldLow) return LOW;
+  if (state.lowReadsRemaining > 0) {
+    --state.lowReadsRemaining;
+    return LOW;
+  }
+  return state.level;
+}
 
 inline void yield() {}
 

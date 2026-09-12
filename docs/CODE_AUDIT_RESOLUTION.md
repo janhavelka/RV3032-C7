@@ -106,10 +106,14 @@ All confirmed gaps above are now closed.
 | E7.6 | Valid. Scanner timeout/error rendering branches have queued-result coverage. |
 | E8 | Valid. The established version encoding remains; generation rejects minor/patch components above 99 and values outside generated storage. |
 
-F1-F9 and F11 were rechecked against the implementation and remain valid.
-Direct regressions now cover F9's zero-byte `requestFrom()` mapping through
-both the adapter and `probe()`, plus every unsigned parser's leading-plus
-rejection. F10 is the exception described above: its claimed report-name fix
+F1-F8 and F11 were rechecked against the implementation and remain valid.
+F9 was subsequently corrected during the 2026-09-12 HIL campaign: Arduino
+discards the backend error behind `requestFrom()`'s byte count, so zero bytes
+cannot prove an address NACK. The adapter and `probe()` now retain a generic
+`I2C_ERROR`, with regressions for zero/partial reads and unchanged caller data.
+Explicit address-NACK statuses still map to `DEVICE_NOT_FOUND` in the core.
+Every unsigned parser's leading-plus rejection remains covered.
+F10 is the other exception described above: its claimed report-name fix
 was invalid for the single-register job and was replaced with truthful
 terminal-only reporting.
 

@@ -812,7 +812,114 @@ void runPersistentReadAndHealthTests() {
          status.ok() && gRtc.state() == RV3032::DriverState::READY, &status);
 }
 
+bool persistenceLifecycleIdle() {
+  const auto snapshot = gRtc.getSettings();
+  return !gRtc.isJobBusy() && !gRtc.isEepromBusy() &&
+         !snapshot.persistentAccessStateUnproven && gRtc.getEepromStatus().ok();
+}
+
+bool rebindPersistence(bool enabled) {
+  if (!persistenceLifecycleIdle()) {
+    report("retain busy or unproven persistence evidence without rebind", false);
+    return false;
+  }
+  gRtc.end();
+  const auto status = gRtc.begin(makeConfig(enabled));
+  reportStatus("bind explicit persistence policy", status);
+  return status.ok();
+}
+
+RV3032::Status readPersistentC1(uint8_t& out) {
+  auto status = completeJob(gRtc.startReadConfigurationEepromJob(
+      RV3032::ConfigurationEepromRegister::OFFSET, millis(), 4000U));
+  if (!status.ok()) return status;
+  RV3032::PersistentReadResult result{};
+  status = gRtc.getPersistentReadJobResult(result);
+  if (!status.ok()) return status;
+  if (!result.persistentVerified || !result.cleanupVerified ||
+      result.eepromAddress != 0xC1U || result.length != 1U) {
+    return RV3032::Status::Error(RV3032::Err::INCOHERENT_DATA,
+                                 "persistent C1 proof incomplete");
+  }
+  out = result.data[0];
+  return RV3032::Status::Ok();
+}
+
+float offsetFromC1(uint8_t raw) {
+  const int8_t offset = (raw & 0x20U) != 0
+                           ? static_cast<int8_t>(raw | 0xC0U)
+                           : static_cast<int8_t>(raw & 0x3FU);
+  return static_cast<float>(offset) * 0.238418579F;
+}
+
+RV3032::Status restoreActiveC1(uint8_t raw) {
+  if (gRtc.getSettings().enableEepromWrites) {
+    return RV3032::Status::Error(RV3032::Err::INVALID_PARAM,
+                                 "active restoration requires persistence off");
+  }
+  auto status = completeJob(gRtc.setPowerOnResetInterruptEnabled((raw & 0x80U) != 0));
+  if (!status.ok()) return status;
+  status = completeJob(gRtc.setVoltageLowInterruptEnabled((raw & 0x40U) != 0));
+  if (!status.ok()) return status;
+  status = completeJob(gRtc.setOffsetPpm(offsetFromC1(raw)));
+  if (!status.ok()) return status;
+  uint8_t observed = 0;
+  status = gRtc.readRegister(RV3032::cmd::REG_ACTIVE_OFFSET, observed);
+  if (status.ok() && observed != raw) {
+    return RV3032::Status::Error(RV3032::Err::INCOHERENT_DATA,
+                                 "active C1 restoration mismatch");
+  }
+  return status;
+}
+
+void runConfigurationPersistenceTests() {
+  uint8_t originalActive = 0;
+  auto status = gRtc.readRegister(RV3032::cmd::REG_ACTIVE_OFFSET, originalActive);
+  reportStatus("save exact active C1", status);
+  if (!status.ok()) return;
+  uint8_t originalPersistent = 0;
+  status = readPersistentC1(originalPersistent);
+  reportStatus("save exact durable C1", status);
+  if (!status.ok()) return;
+  const uint32_t beforePreparation = gOwner.writeOneCommands;
+  if (!rebindPersistence(false)) return;
+  status = restoreActiveC1(originalPersistent);
+  const bool prepared = status.ok() && gOwner.writeOneCommands == beforePreparation;
+  report("prepare full durable C1 without EEPROM writes", prepared, &status);
+  if (!prepared || !rebindPersistence(true)) return;
+
+  const uint8_t values[] = {originalPersistent,
+                           static_cast<uint8_t>(originalPersistent ^ 0x01U),
+                           originalPersistent};
+  const char* names[] = {"equal configuration EEPROM value performs zero WRITE_ONE",
+                         "configuration EEPROM changed once",
+                         "exact configuration EEPROM C1 restored"};
+  for (uint8_t index = 0; index < 3U; ++index) {
+    const uint32_t beforeWrite = gOwner.writeOneCommands;
+    status = completeJob(gRtc.setOffsetPpm(offsetFromC1(values[index])));
+    if (status.ok()) status = drainEeprom();
+    uint8_t persistent = 0;
+    if (status.ok()) status = readPersistentC1(persistent);
+    const bool passed = status.ok() && persistent == values[index] &&
+        gOwner.writeOneCommands == beforeWrite + (index == 0U ? 0U : 1U);
+    report(names[index], passed, &status);
+    if (!passed) return;  // Preserve failed operation/cleanup evidence.
+  }
+  const uint32_t beforeActiveRestore = gOwner.writeOneCommands;
+  if (!rebindPersistence(false)) return;
+  status = restoreActiveC1(originalActive);
+  uint8_t persistentAfter = 0;
+  if (status.ok()) status = readPersistentC1(persistentAfter);
+  report("original active and durable C1 restored independently without EEPROM write",
+         status.ok() && persistentAfter == originalPersistent &&
+             gOwner.writeOneCommands == beforeActiveRestore, &status);
+}
+
 void runWearLimitedPersistenceTests() {
+  if (!persistenceLifecycleIdle()) {
+    report("wear test requires idle proven persistence state", false);
+    return;
+  }
   const uint32_t callbacksBeforeEnd = gOwner.reads + gOwner.writes;
   gRtc.end();
   report("end is zero-I/O and enters UNINIT",
@@ -826,11 +933,15 @@ void runWearLimitedPersistenceTests() {
   RV3032::Config config = makeConfig(true);
   status = gRtc.begin(config);
   reportStatus("begin wear-limited persistence lifecycle", status);
-  reportStatus("probe persistence lifecycle", gRtc.probe());
+  if (!status.ok()) return;
+  status = gRtc.probe();
+  reportStatus("probe persistence lifecycle", status);
+  if (!status.ok()) return;
 
   uint8_t original = 0;
   status = readPersistent(31U, 1U, &original);
   reportStatus("read original user EEPROM byte 31", status);
+  if (!status.ok()) return;
   if (status.ok()) {
     const uint8_t testValue = static_cast<uint8_t>(original ^ 0xA5U);
     const uint32_t commandsBefore = gOwner.writeOneCommands;
@@ -838,63 +949,35 @@ void runWearLimitedPersistenceTests() {
                                           5000U);
     status = completeJob(status, 6000U);
     uint8_t observed = 0;
-    const RV3032::Status verifyStatus = readPersistent(31U, 1U, &observed);
-    report("user EEPROM changed once and durably verified",
-           status.ok() && verifyStatus.ok() && observed == testValue &&
-               gOwner.writeOneCommands == commandsBefore + 1U,
-           &status);
+    const RV3032::Status verifyStatus = status.ok()
+        ? readPersistent(31U, 1U, &observed) : status;
+    const bool changed = status.ok() && verifyStatus.ok() && observed == testValue &&
+        gOwner.writeOneCommands == commandsBefore + 1U;
+    report("user EEPROM changed once and durably verified", changed, &status);
+    if (!changed) return;
 
     const uint32_t equalCommands = gOwner.writeOneCommands;
     status = gRtc.startWriteUserEepromJob(31U, &testValue, 1U, millis(),
                                           5000U);
     status = completeJob(status, 6000U);
-    report("equal user EEPROM value performs zero WRITE_ONE",
-           status.ok() && gOwner.writeOneCommands == equalCommands, &status);
+    const bool equal = status.ok() && gOwner.writeOneCommands == equalCommands;
+    report("equal user EEPROM value performs zero WRITE_ONE", equal, &status);
+    if (!equal) return;
 
     const uint32_t restoreCommands = gOwner.writeOneCommands;
     status = gRtc.startWriteUserEepromJob(31U, &original, 1U, millis(),
                                           5000U);
     status = completeJob(status, 6000U);
     observed = 0;
-    const RV3032::Status restoreVerify = readPersistent(31U, 1U, &observed);
-    report("user EEPROM restored with one WRITE_ONE",
-           status.ok() && restoreVerify.ok() && observed == original &&
-               gOwner.writeOneCommands == restoreCommands + 1U,
-           &status);
+    const RV3032::Status restoreVerify = status.ok()
+        ? readPersistent(31U, 1U, &observed) : status;
+    const bool restored = status.ok() && restoreVerify.ok() && observed == original &&
+        gOwner.writeOneCommands == restoreCommands + 1U;
+    report("user EEPROM restored with one WRITE_ONE", restored, &status);
+    if (!restored) return;
   }
 
-  float originalOffset = 0.0F;
-  status = gRtc.getOffsetPpm(originalOffset);
-  reportStatus("save persistent offset", status);
-  if (status.ok()) {
-    const uint32_t equalCommands = gOwner.writeOneCommands;
-    status = completeJob(gRtc.setOffsetPpm(originalOffset));
-    const RV3032::Status equalDrain = drainEeprom();
-    report("equal configuration EEPROM value performs zero WRITE_ONE",
-           status.ok() && equalDrain.ok() &&
-               gOwner.writeOneCommands == equalCommands,
-           &equalDrain);
-
-    const float changedOffset = originalOffset > 0.0F ? 0.0F : 0.238418579F;
-    const uint32_t changedCommands = gOwner.writeOneCommands;
-    status = completeJob(gRtc.setOffsetPpm(changedOffset));
-    const RV3032::Status changedDrain = drainEeprom();
-    report("configuration EEPROM changed once",
-           status.ok() && changedDrain.ok() &&
-               gOwner.writeOneCommands == changedCommands + 1U,
-           &changedDrain);
-
-    const uint32_t restoreCommands = gOwner.writeOneCommands;
-    status = completeJob(gRtc.setOffsetPpm(originalOffset));
-    const RV3032::Status restoreDrain = drainEeprom();
-    float observedOffset = 0.0F;
-    const RV3032::Status readStatus = gRtc.getOffsetPpm(observedOffset);
-    report("configuration EEPROM offset restored",
-           status.ok() && restoreDrain.ok() && readStatus.ok() &&
-               fabsf(observedOffset - originalOffset) < 0.13F &&
-               gOwner.writeOneCommands == restoreCommands + 1U,
-           &restoreDrain);
-  }
+  if (persistenceLifecycleIdle()) runConfigurationPersistenceTests();
 
   skip("primary-cell ensure",
        "primary-cell chemistry and board backfeed conditions cannot be proven in software");
@@ -939,8 +1022,13 @@ void runHilSetup() {
     runClockCalibrationTemperatureTests();
     runEviControlAndStatusTests();
     runPersistentReadAndHealthTests();
+    const uint32_t failuresBeforeWear = gStats.fail;
     runWearLimitedPersistenceTests();
-    restoreFinalCalendar();
+    if (gStats.fail == failuresBeforeWear && persistenceLifecycleIdle()) {
+      restoreFinalCalendar();
+    } else {
+      skip("final calendar mutation", "retain failed persistence evidence for explicit restoration");
+    }
   }
 
   RV3032::SettingsSnapshot settings{};

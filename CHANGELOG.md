@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep zero-byte Wire reads as generic `I2C_ERROR` with the received-byte
+  count. Arduino discards the backend cause, so zero bytes cannot prove an
+  address NACK or `DEVICE_NOT_FOUND`. Explicit Wire NACK results still retain
+  their existing classification; partial reads preserve the caller's buffer.
+- Remove redundant console drains from I2C scan output; probe order and bus
+  timing are unchanged, without explicit USB transmit-buffer clearing.
+- The exhaustive HIL harness now preserves active and durable C1 independently,
+  including PORIE/VLIE, when they initially differ. Equal/changed/restored
+  EEPROM write counts are verified against direct persistent readback.
+- The HIL runner requires completed serial framing, retains live raw output,
+  captures health around stress/failures, and stops at the first failure.
+  Expected fixture errors no longer mask unrelated errors or failure counts.
+  Complete memory payloads and stress health counters are required even when
+  the prompt arrives; short command writes cannot consume a queued response.
+  Every driver health row is checked, so missing middle lines cannot pass as
+  a healthy snapshot merely because a terminal prompt arrived.
+- Keep the Arduino example's startup bus-clear pins open-drain, honor bounded
+  SCL stretching, and reject initialization if SDA or SCL remains LOW. Failed
+  recovery releases both pins instead of driving against a target.
 - Generated API pages link correctly to the retained HIL summary and the
   ESP-IDF notes' verification instructions.
 

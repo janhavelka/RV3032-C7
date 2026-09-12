@@ -560,6 +560,14 @@ not retried: the adapter emits one bounded final STOP before returning an
 I2C-domain error. The application must serialize the shared bus and keep the
 Wire mutex uncontended during the synchronous callback; the adapter does not
 add a second lock or scheduler.
+Zero/partial reads return `I2C_ERROR` with the received-byte count because
+Wire discards the backend error. They do not prove an address NACK; an
+explicit NACK result still maps to `DEVICE_NOT_FOUND` in the core.
+
+The example's `initWire()` is startup-only, before Wire owns the pins. It uses
+open-drain bus-clear pulses and one bounded SCL-wait budget, and fails if either
+line remains LOW. Runtime recovery must first detach the existing bus owner;
+the supplied CLI never calls this startup helper from a runtime command.
 
 ## CLI ownership
 
@@ -627,6 +635,8 @@ python -m unittest discover -s tools -p 'test_check_*.py'
 python tools/check_package.py source
 doxygen Doxyfile
 python -S tools/hil_cli_runner.py --parser-self-test
+python -S tools/test_hil_cli_runner.py
+python -S tools/test_hil_health_snapshot.py
 python -S tools/hil_cli_runner.py --dry-run
 ```
 
@@ -635,6 +645,28 @@ execution, voltage/backfeed, power-cycle, and retention work require separate
 authorization. The latest retained physical evidence is summarized in the
 [HIL summary](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reports/HIL_SUMMARY.md),
 which is also included in the release package.
+
+The CLI runner flushes the full serial transcript to disk as bytes arrive
+(`--transcript-out`, or a unique file under `.pio/hil-runs/`). A terminal prompt
+is required for every command. The run stops on its first failure; missing
+framing or a reboot forbids further commands, including health reads. With
+intact framing, `drv` snapshots bracket stress and capture health after a
+failure. `--idle-timeout-s` is retained for command-line compatibility; only
+the hard command deadline can end a response without its prompt.
+Start each run from a freshly reset CLI with its startup prompt available;
+the runner does not resynchronize after a prior host consumes that prompt.
+Normal health checks require READY and zero consecutive, total, and EEPROM
+write failures. A snapshot after an already-failed command is observational;
+it retains the fault without replacing the original failure result.
+Complete memory payloads and stress counters are checked even when the final
+prompt arrives. Known RAM test patterns must match their readback, and short
+serial command writes stop before any further receive or command. Transcripts
+and result excerpts can contain original RAM or EEPROM values; keep them private
+and publish only reviewed summaries without those bytes.
+The exhaustive hardware harness preserves the active and durable C1 bytes
+independently, including their interrupt bits. Its offset test performs two
+configuration EEPROM writes: one changed value and one restoration; preparation,
+equal-value verification, and final active restoration add no EEPROM writes.
 
 After such fresh authorization, `--destructive-setup` additionally requires
 explicit `--authorization-port`, `--authorization-module`,

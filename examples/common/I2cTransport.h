@@ -262,15 +262,11 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
     return callbackTimeoutStatus();
   }
   if (read != rxLen) {
-    // On Arduino-ESP32, endTransmission(false) only stages the repeated start;
-    // the address phase actually happens inside requestFrom(). An absent or
-    // unresponsive device therefore surfaces here as read == 0 rather than as
-    // a NACK return above, so it must be mapped to I2C_NACK_ADDR for the
-    // driver to report DEVICE_NOT_FOUND.
-    const bool addressNack = (read == 0U);
+    // Wire returns only the received byte count here, discarding the backend
+    // error. Zero bytes can mean NACK, timeout or another controller failure;
+    // do not infer an ACK phase that this API does not expose.
     return RV3032::Status::Error(
-        addressNack ? RV3032::Err::I2C_NACK_ADDR : RV3032::Err::I2C_ERROR,
-        addressNack ? "I2C address NACK" : "I2C read length mismatch",
+        RV3032::Err::I2C_ERROR, "I2C read length mismatch",
         static_cast<int32_t>(read));
   }
 
@@ -293,22 +289,44 @@ inline RV3032::Status wireWriteRead(uint8_t addr, const uint8_t* tx,
 
 inline bool initWire(int sda, int scl, uint32_t freq = 400000,
                      uint16_t timeoutMs = 50) {
-  // Optional application-owned recovery before the bus is initialized.
-  pinMode(scl, OUTPUT);
-  pinMode(sda, INPUT_PULLUP);
+  // Application-owned bus clear (UM10204 3.1.16). Release, never drive HIGH
+  // against a target holding SDA or stretching SCL. One deadline bounds all
+  // clock waits; an uncleared bus must not be reported as initialized.
+  const uint32_t startedUs = micros();
+  const uint32_t timeoutUs = static_cast<uint32_t>(timeoutMs) * 1000U;
+  pinMode(scl, OUTPUT_OPEN_DRAIN);
+  pinMode(sda, OUTPUT_OPEN_DRAIN);
+  digitalWrite(sda, HIGH);
+  const auto releaseClock = [&]() {
+    digitalWrite(scl, HIGH);
+    while (digitalRead(scl) == LOW) {
+      if (static_cast<uint32_t>(micros() - startedUs) >= timeoutUs) {
+        digitalWrite(sda, HIGH);
+        return false;
+      }
+      delay(1);
+    }
+    if (static_cast<uint32_t>(micros() - startedUs) >= timeoutUs) {
+      digitalWrite(sda, HIGH);
+      return false;
+    }
+    return true;
+  };
+  if (!releaseClock()) return false;
   for (int i = 0; i < 9; i++) {
     digitalWrite(scl, LOW);
     delayMicroseconds(5);
-    digitalWrite(scl, HIGH);
+    if (!releaseClock()) return false;
     delayMicroseconds(5);
   }
-  pinMode(sda, OUTPUT);
+  digitalWrite(scl, LOW);
   digitalWrite(sda, LOW);
   delayMicroseconds(5);
-  digitalWrite(scl, HIGH);
+  if (!releaseClock()) return false;
   delayMicroseconds(5);
   digitalWrite(sda, HIGH);
   delayMicroseconds(5);
+  if (digitalRead(sda) == LOW || digitalRead(scl) == LOW) return false;
 
   if (!Wire.begin(sda, scl, freq)) {
     return false;

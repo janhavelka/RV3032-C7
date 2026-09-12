@@ -24,6 +24,8 @@ class TwoWire {
   static constexpr size_t MAX_LOG = 32U;
 
   void reset() {
+    physicalWriteHook = nullptr;
+    physicalWriteReadHook = nullptr;
     beginResult = true;
     setClockResult = true;
     beginCalls = 0;
@@ -73,7 +75,8 @@ class TwoWire {
   }
   uint16_t getTimeOut() const { return configuredTimeoutMs; }
 
-  void beginTransmission(uint8_t) {
+  void beginTransmission(uint8_t address) {
+    transmissionAddress = address;
     ++beginTransmissionCalls;
     transactionActive = true;
     stagedLength = 0;
@@ -102,13 +105,16 @@ class TwoWire {
     if (stop) {
       recordPhysicalAttempt();
       transactionActive = false;
+      if (physicalWriteHook != nullptr) {
+        return physicalWriteHook(transmissionAddress, lastPhysicalTxData, lastPhysicalTxLength, configuredTimeoutMs);
+      }
     }
     if (endResultIndex < endResultCount) {
       return endResults[endResultIndex++];
     }
     return 0;
   }
-  size_t requestFrom(uint8_t, size_t len, bool stop = true) {
+  size_t requestFrom(uint8_t address, size_t len, bool stop = true) {
     ++requestCalls;
     recordPhysicalAttempt();
     if (stop) {
@@ -116,7 +122,9 @@ class TwoWire {
       transactionActive = false;
     }
     arduinoStubMillis += requestDurationMs;
-    const size_t returned = requestLength == SIZE_MAX ? len : requestLength;
+    const size_t returned = physicalWriteReadHook != nullptr
+                                ? physicalWriteReadHook(address, lastPhysicalTxData, lastPhysicalTxLength, rxData, len, configuredTimeoutMs)
+                                : (requestLength == SIZE_MAX ? len : requestLength);
     const size_t available = availableLength == SIZE_MAX
                                  ? returned
                                  : availableLength;
@@ -150,6 +158,11 @@ class TwoWire {
   }
 
   bool beginResult = true;
+  // Optional physical backend lets native tests execute the maintained HIL
+  // harness against the existing chip model, without duplicating its logic.
+  uint8_t (*physicalWriteHook)(uint8_t, const uint8_t*, size_t, uint16_t) = nullptr;
+  size_t (*physicalWriteReadHook)(uint8_t, const uint8_t*, size_t, uint8_t*, size_t, uint16_t) = nullptr;
+  uint8_t transmissionAddress = 0;
   bool setClockResult = true;
   uint32_t beginCalls = 0;
   uint32_t beginFrequency = 0;

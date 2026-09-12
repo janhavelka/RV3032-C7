@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <cstring>
+#include <cmath>
 #include <type_traits>
 
 #include <unity.h>
@@ -10,8 +11,108 @@
 #include "FakeRv3032.h"
 #include "RV3032/RV3032.h"
 #include "examples/01_basic_bringup_cli/main.cpp"
+#define setup hilHarnessSetup
+#define loop hilHarnessLoop
+#include "test/test_hil/main.cpp"
+#undef loop
+#undef setup
 
 using test_rv3032::FakeRv3032;
+
+static FakeRv3032* hilPhysicalChip = nullptr;
+static uint32_t hilFailWriteOneAt = 0;
+static uint32_t hilWriteOneSeen = 0;
+
+static void bindHilPhysicalChip(FakeRv3032& chip, uint32_t failWriteOneAt = 0) {
+  hilPhysicalChip = &chip;
+  hilFailWriteOneAt = failWriteOneAt;
+  hilWriteOneSeen = 0;
+  Wire.reset();
+  arduinoStubMillis = 0;
+  Wire.physicalWriteHook = [](uint8_t address, const uint8_t* data, size_t length, uint16_t timeout) -> uint8_t {
+    hilPhysicalChip->nowMs = millis();
+    if (length == 2U && data[0] == RV3032::cmd::REG_EE_COMMAND &&
+        data[1] == RV3032::cmd::EEPROM_CMD_WRITE_ONE &&
+        ++hilWriteOneSeen == hilFailWriteOneAt) {
+      hilPhysicalChip->failOrdinal = hilPhysicalChip->callbackCount + 1U;
+      hilPhysicalChip->failCommandAfterCommit = true;
+    }
+    const auto config = hilPhysicalChip->config();
+    const auto status = config.i2cWrite(address, data, length, timeout, config.i2cUser);
+    return status.ok() ? 0U : 4U;
+  };
+  Wire.physicalWriteReadHook = [](uint8_t address, const uint8_t* tx, size_t txLength, uint8_t* rx, size_t rxLength, uint16_t timeout) -> size_t {
+    hilPhysicalChip->nowMs = millis();
+    const auto config = hilPhysicalChip->config();
+    const auto status = config.i2cWriteRead(address, tx, txLength, rx, rxLength, timeout, config.i2cUser);
+    return status.ok() ? rxLength : 0U;
+  };
+  gOwner = TransportOwner{&Wire};
+  gStats = TestStats{};
+  Serial.resetOutput();
+  TEST_ASSERT_TRUE(gRtc.begin(makeConfig(false)).ok());
+}
+
+static void releaseHilPhysicalChip() {
+  gRtc.end();
+  Wire.reset();
+  hilPhysicalChip = nullptr;
+}
+
+void test_hil_persistence_preserves_distinct_active_and_durable_c1() {
+  for (const uint8_t activeC1 : {uint8_t{0x00}, uint8_t{0xC0}, uint8_t{0xC4}, uint8_t{0x20}, uint8_t{0x1F}}) {
+    for (const uint8_t durableC1 : {uint8_t{0x00}, uint8_t{0x80}, uint8_t{0x81}, uint8_t{0x20}, uint8_t{0x1F}}) {
+      FakeRv3032 chip;
+      chip.persistent[1] = durableC1;
+      chip.resetFromPersistent();
+      chip.activeConfig[1] = activeC1;
+      const uint8_t originalUser = chip.persistent[0xEAU - 0xC0U];
+      bindHilPhysicalChip(chip);
+      runWearLimitedPersistenceTests();
+      releaseHilPhysicalChip();
+      if (gStats.fail != 0U) printf("%s", Serial.output().c_str());
+      TEST_ASSERT_EQUAL_UINT32(0U, gStats.fail);
+      TEST_ASSERT_EQUAL_HEX8(durableC1, chip.persistent[1]);
+      TEST_ASSERT_EQUAL_HEX8(activeC1, chip.activeConfig[1]);
+      TEST_ASSERT_EQUAL_HEX8(originalUser, chip.persistent[0xEAU - 0xC0U]);
+      TEST_ASSERT_EQUAL_UINT16(4U, chip.writeOneAttempts);
+      TEST_ASSERT_FALSE(chip.protocolViolation);
+      TEST_ASSERT_FALSE(chip.passwordCommandAttempted);
+    }
+  }
+}
+
+void test_hil_persistence_failure_preserves_terminal_evidence() {
+  {
+    FakeRv3032 chip;
+    chip.failOrdinal = 2U;  // First snapshot read after successful probe.
+    bindHilPhysicalChip(chip);
+    runWearLimitedPersistenceTests();
+    RV3032::PersistentReadResult result{};
+    const auto status = gRtc.getPersistentReadJobResult(result);
+    const uint32_t failures = gRtc.totalFailures();
+    releaseHilPhysicalChip();
+    TEST_ASSERT_EQUAL_UINT32(1U, gStats.fail);
+    TEST_ASSERT_FALSE(status.ok());
+    TEST_ASSERT_FALSE(status.is(RV3032::Err::JOB_RESULT_UNAVAILABLE));
+    TEST_ASSERT_TRUE(failures > 0U);
+    TEST_ASSERT_EQUAL_UINT16(0U, chip.writeOneAttempts);
+  }
+  for (const uint32_t failedWrite : {1U, 2U}) {
+    FakeRv3032 chip;
+    bindHilPhysicalChip(chip, failedWrite);
+    runWearLimitedPersistenceTests();
+    RV3032::UserEepromWriteReport report{};
+    const auto status = gRtc.getUserEepromWriteJobResult(report);
+    const uint32_t failures = gRtc.totalFailures();
+    releaseHilPhysicalChip();
+    TEST_ASSERT_EQUAL_UINT32(1U, gStats.fail);
+    TEST_ASSERT_FALSE(status.ok());
+    TEST_ASSERT_FALSE(status.is(RV3032::Err::JOB_RESULT_UNAVAILABLE));
+    TEST_ASSERT_TRUE(failures > 0U);
+    TEST_ASSERT_EQUAL_UINT16(failedWrite, chip.writeOneAttempts);
+  }
+}
 
 namespace RV3032 {
 struct NativeTestAccess {
@@ -10300,10 +10401,13 @@ void test_phase3_wire_validation_and_closed_status_domain() {
   wire.reset();
   arduinoStubMillis = 10;
   wire.requestLength = 0;
+  rx[0] = 0xA5;
   RV3032::Status status = transport::wireWriteRead(
       0x51, tx, 1, rx, 1, 5, &wire);
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_NACK_ADDR),
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_ERROR),
                           static_cast<uint8_t>(status.code));
+  TEST_ASSERT_EQUAL_INT32(0, status.detail);
+  TEST_ASSERT_EQUAL_UINT8(0xA5, rx[0]);
   TEST_ASSERT_EQUAL_UINT32(1, wire.physicalAttemptCalls);
   TEST_ASSERT_FALSE(wire.transactionActive);
 
@@ -10314,10 +10418,22 @@ void test_phase3_wire_validation_and_closed_status_domain() {
   RV3032::RV3032 rtc;
   TEST_ASSERT_TRUE(rtc.begin(config).ok());
   TEST_ASSERT_EQUAL_UINT8(
-      static_cast<uint8_t>(RV3032::Err::DEVICE_NOT_FOUND),
+      static_cast<uint8_t>(RV3032::Err::I2C_ERROR),
       static_cast<uint8_t>(rtc.probe().code));
   TEST_ASSERT_EQUAL_UINT32(0, rtc.totalFailures());
   TEST_ASSERT_EQUAL_UINT32(0, rtc.totalSuccess());
+
+  wire.reset();
+  arduinoStubMillis = 10;
+  wire.requestLength = 1;
+  uint8_t incomplete[2] = {0xA5, 0x5A};
+  status = transport::wireWriteRead(0x51, tx, 1, incomplete, 2, 5, &wire);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_ERROR),
+                          static_cast<uint8_t>(status.code));
+  TEST_ASSERT_EQUAL_INT32(1, status.detail);
+  TEST_ASSERT_EQUAL_UINT8(0xA5, incomplete[0]);
+  TEST_ASSERT_EQUAL_UINT8(0x5A, incomplete[1]);
+  TEST_ASSERT_EQUAL_UINT16(50, wire.getTimeOut());
 
   static_assert(transport::MAX_TRANSFER_BYTES >= 46U,
                 "Wire must support the public 0x00..0x2D register burst");
@@ -10434,6 +10550,34 @@ void test_phase3_wire_complete_deadline_timeout_restoration_and_order() {
                           static_cast<uint8_t>(status.code));
   TEST_ASSERT_FALSE(wire.transactionActive);
   TEST_ASSERT_EQUAL_UINT16(50, wire.getTimeOut());
+}
+
+void test_wire_bus_clear_releases_lines_and_bounds_stuck_bus() {
+  for (const int stuckPin : {-1, 1, 2}) {
+    Wire.reset();
+    resetArduinoStubPins();
+    arduinoStubMicros = UINT32_MAX - 500U;
+    const uint32_t startedUs = arduinoStubMicros;
+    if (stuckPin >= 0) arduinoStubPins[stuckPin].heldLow = true;
+    const bool initialized = transport::initWire(1, 2, 400000, 3);
+    TEST_ASSERT_EQUAL(stuckPin < 0, initialized);
+    TEST_ASSERT_EQUAL_UINT32(stuckPin < 0 ? 1U : 0U, Wire.beginCalls);
+    TEST_ASSERT_EQUAL_UINT32(0, arduinoStubActiveHighWrites);
+    TEST_ASSERT_EQUAL_INT(OUTPUT_OPEN_DRAIN, arduinoStubPins[1].mode);
+    TEST_ASSERT_EQUAL_INT(OUTPUT_OPEN_DRAIN, arduinoStubPins[2].mode);
+    TEST_ASSERT_EQUAL_INT(HIGH, arduinoStubPins[1].level);
+    TEST_ASSERT_EQUAL_INT(HIGH, arduinoStubPins[2].level);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT32(3000U, arduinoStubMicros - startedUs);
+  }
+  Wire.reset();
+  resetArduinoStubPins();
+  arduinoStubMicros = 0;
+  arduinoStubPins[2].lowReadsRemaining = 2;
+  TEST_ASSERT_TRUE(transport::initWire(1, 2, 400000, 3));
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(2000U, arduinoStubMicros);
+  TEST_ASSERT_EQUAL_UINT32(0, arduinoStubActiveHighWrites);
+  TEST_ASSERT_EQUAL_UINT32(1, Wire.beginCalls);
+  resetArduinoStubPins();
 }
 
 void test_phase3_wire_short_stage_release_and_initialization() {
@@ -10805,11 +10949,29 @@ void test_cli_busy_backlog_is_discarded_after_terminal_poll() {
 
 }  // namespace
 
-void setUp() {}
+void setUp() { resetArduinoStubPins(); }
 void tearDown() {}
+
+void test_hil_persistence_rebind_preserves_busy_job() {
+  FakeRv3032 chip;
+  gRtc.end();
+  TEST_ASSERT_TRUE(gRtc.begin(chip.config()).ok());
+  TEST_ASSERT_TRUE(gRtc.startReadTimeSnapshotJob(chip.nowMs, 200U).inProgress());
+  const uint32_t callbacks = chip.callbackCount;
+  const uint32_t previousFailures = gStats.fail;
+  TEST_ASSERT_FALSE(rebindPersistence(true));
+  TEST_ASSERT_EQUAL_UINT32(previousFailures + 1U, gStats.fail);
+  TEST_ASSERT_TRUE(gRtc.isJobBusy());
+  TEST_ASSERT_FALSE(gRtc.getSettings().enableEepromWrites);
+  TEST_ASSERT_EQUAL_UINT32(callbacks, chip.callbackCount);
+  gRtc.end();
+}
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_hil_persistence_preserves_distinct_active_and_durable_c1);
+  RUN_TEST(test_hil_persistence_rebind_preserves_busy_job);
+  RUN_TEST(test_hil_persistence_failure_preserves_terminal_evidence);
   RUN_TEST(test_passive_lifecycle_and_explicit_probe_evidence);
   RUN_TEST(test_config_validation_is_zero_io_and_non_destructive);
   RUN_TEST(test_end_unconditionally_abandons_work_with_zero_io);
@@ -10940,6 +11102,7 @@ int main(int, char**) {
   RUN_TEST(test_phase3_wire_validation_and_closed_status_domain);
   RUN_TEST(test_phase3_wire_complete_deadline_timeout_restoration_and_order);
   RUN_TEST(test_phase3_wire_short_stage_release_and_initialization);
+  RUN_TEST(test_wire_bus_clear_releases_lines_and_bounds_stuck_bus);
   RUN_TEST(test_phase3_strict_cli_numeric_tokens_preserve_outputs);
   RUN_TEST(test_phase3_cli_line_reader_discards_overflow_through_terminator);
   RUN_TEST(test_cli_pending_warning_and_serial_discard_preserve_owner);

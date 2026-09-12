@@ -73,6 +73,9 @@ and restores the previous Wire timeout by RAII. `endTransmission(false)` only
 stages the repeated-start transfer; the combined operation executes in the
 final-stop `requestFrom(..., true)`. A short staging write is never retried and
 is closed by exactly one bounded final STOP so it cannot strand Wire ownership.
+`requestFrom()` exposes a byte count, not the backend error. Zero or partial
+reads therefore return `I2C_ERROR` with that count; only an explicit transport
+address-NACK result is mapped to `DEVICE_NOT_FOUND` by `probe()`/`recover()`.
 
 ## Execution forms
 
