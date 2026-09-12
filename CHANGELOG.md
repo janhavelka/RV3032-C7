@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Latest published release: **v3.0.1**. All changes below are unreleased;
-the next intended release is **3.1.0**. Development build metadata is not
-publication evidence.
+## [3.1.0] - 2026-09-12
+
+This release collects all development since v3.0.1. It adds explicit backup
+charging policy and persistent-access recovery, completes the cooperative
+EEPROM timing and result contracts, hardens the example transport and HIL
+validation, and consolidates maintained documentation.
 
 ### Migration from 3.0.1
 
@@ -592,7 +595,8 @@ not separately published.
 - Initialization state management during `begin()` execution
 - Health tracking now correctly excludes validation errors
 
-[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/janhavelka/RV3032-C7/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/janhavelka/RV3032-C7/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/janhavelka/RV3032-C7/compare/v1.6.0...v2.0.0

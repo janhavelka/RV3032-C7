@@ -628,11 +628,10 @@ coverage; inspect individual results and untested conditions.
 
 ## Versioning
 
-The latest published release is **v3.0.1**. Current development is
-**Unreleased**, with **3.1.0** intended as the next release. The
-[changelog](CHANGELOG.md) collects all changes since the published release.
-Existing build metadata is a development identifier and will be aligned when
-the next release is prepared; it does not establish a published version.
+`library.json` declares **3.1.0**. Published releases are identified by matching
+`vX.Y.Z` tags; until `v3.1.0` is published, this commit is the prepared release
+candidate. The [changelog](CHANGELOG.md) contains the complete changes from
+v3.0.1.
 
 `library.json` is the single version source. `include/RV3032/Version.h` is
 generated and must not be edited manually. `scripts/generate_version.py`
