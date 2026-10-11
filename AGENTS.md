@@ -1,6 +1,19 @@
 # AGENTS.md - RV3032-C7 Production Embedded Guidelines
 
-Always synchronize Git with the intended upstream branch before starting work by fetching and fast-forwarding safely, preserving existing local changes and reporting any divergence, conflict, or synchronization failure.
+## Git workflow
+
+- Before editing, fetch and inspect the current branch and upstream; fast-forward
+  only when safe.
+- Keep the whole promptset on its existing branch. Do not create a branch or
+  worktree per prompt or agent unless the user asks.
+- Assume concurrent agents. Preserve unrelated changes; never stash, discard,
+  overwrite, or commit them. A dirty worktree alone is not a blocker.
+- After relevant checks pass, stage only your own files or hunks, then commit
+  and push each meaningful completed chunk, including multiple times within
+  one prompt and before finishing. No further permission is needed.
+- When using subagents, the lead owns Git mutations for their shared work.
+- Confirm upstream synchronization and check applicable CI for the pushed commit.
+  Report conflicts or sync failures; never force-push to resolve them.
 
 ## Role and Target
 You are a professional embedded software engineer building a production-grade RV3032-C7 RTC library.
@@ -12,10 +25,6 @@ You are a professional embedded software engineer building a production-grade RV
 ---
 
 ## PlatformIO
-
-Before editing, fetch remotes and fast-forward the newest intended working
-branch to its upstream. Stop and report dirty, divergent, or conflicted state;
-never overwrite work to force a sync.
 
 On Windows, use `.\scripts\pio.cmd <arguments>`; it selects the current user's
 VS Code-managed installation. Never install another PlatformIO Core; if the
@@ -275,9 +284,8 @@ Release steps:
 1. Update `library.json`.
 2. Update `CHANGELOG.md` (Added/Changed/Fixed/Removed).
 3. Update `README.md` if API or examples changed.
-4. Only with explicit user authorization, commit and tag: `Release vX.Y.Z`.
-   Otherwise stop after the requested edits and verification with the worktree
-   uncommitted and untagged.
+4. Commit and sync verified changes using the Git workflow above. Create a
+   release tag only with explicit user authorization.
 ---
 
 ## Naming Conventions
