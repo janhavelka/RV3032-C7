@@ -217,6 +217,44 @@ class PackageChecks(unittest.TestCase):
             self.assertIn(rel, package.REQUIRED_SOURCE_FILES)
             self.assertTrue(package.forbidden_package_path(rel))
 
+    def test_promptset_is_source_only_and_never_packaged(self):
+        # Permanent: executed promptsets stay as historical requirements.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for rel in package.REQUIRED_SOURCE_FILES:
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("required source fixture\n", encoding="utf-8")
+            for rel in ("Doxyfile", "library.json", "tools/hil_cli_runner.py",
+                        "include/RV3032/RV3032.h"):
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((package.ROOT / rel).read_bytes())
+            prompt = root / "docs/prompts/01_step.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("planned step\n", encoding="utf-8")
+            with patch.object(package, "ROOT", root):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(1, package.source_check())
+                self.assertIn("completed workflow artifact remains: docs/prompts/01_step.md",
+                              output.getvalue())
+                (root / "docs/prompts/README.md").write_text("index\n", encoding="utf-8")
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, package.source_check())
+                for rel in ("docs/prompts/nested/report.md", "docs/prompts/run.log"):
+                    with self.subTest(artifact=rel):
+                        target = root / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text("completed run\n", encoding="utf-8")
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            self.assertEqual(1, package.source_check())
+                        self.assertIn(f"completed workflow artifact remains: {rel}", output.getvalue())
+                        target.unlink()
+        for rel in ("docs/prompts/README.md", "docs/prompts/01_step.md"):
+            self.assertTrue(package.forbidden_package_path(rel))
+
 
 if __name__ == "__main__":
     unittest.main()

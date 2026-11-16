@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
+- Recorded the owner's 2026-11-16 election of native ESP-IDF support as an
+  unexecuted promptset in `docs/prompts/`. It plans an ESP-IDF 6.0.1 component,
+  an `i2c_master` adapter, a shared CLI engine and a native example. The
+  source check permanently admits top-level Markdown in that folder, and
+  packages still exclude it.
+  No library, example or package content has changed yet.
 
 ## [3.1.0] - 2026-09-12
 

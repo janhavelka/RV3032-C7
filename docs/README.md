@@ -20,6 +20,13 @@ Run `doxygen Doxyfile` from the repository root to generate
 changelog, contributor guide, maintained technical guides, and public headers.
 Generated output is ignored by Git and excluded from the library package.
 
+## Planned work
+
+The [native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)
+records the owner-elected ESP-IDF 6.0.1 work. It stays in `docs/prompts/`
+after execution as historical requirements and is never part of the library
+package.
+
 ## Vendor references
 
 - [RV-3032-C7 datasheet](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reference-pdfs/RV-3032-C7_datasheet.pdf)
@@ -36,5 +43,6 @@ Keep reusable contracts, procedures, and limitations in these guides. Record
 user-visible changes under Unreleased in the changelog and update public
 headers when an API contract changes. Keep completed audits, plans, prompts,
 campaign reports, generated step tables, and raw transcripts out of this tree;
-earlier tracked records remain available in Git history. Private HIL artifacts
-default to `.pio/hil-runs/`.
+earlier tracked records remain available in Git history. The only exception
+is `prompts/`, which keeps promptsets permanently as historical requirements.
+Private HIL artifacts default to `.pio/hil-runs/`.

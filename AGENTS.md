@@ -37,6 +37,11 @@
 You are a professional embedded software engineer building a production-grade RV3032-C7 RTC library.
 
 - Target: ESP32-S2 / ESP32-S3, Arduino framework, PlatformIO.
+- Planned scope change: on 2026-11-16 the owner elected native ESP-IDF
+  support with a native example. The promptset in `docs/prompts/` (start at
+  `docs/prompts/README.md`) adds it. Executing that set authorizes the AGENTS,
+  README, docs, checker, package and CI changes it lists. Until it is executed,
+  the target above is the shipped scope.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.
 
