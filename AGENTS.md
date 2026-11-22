@@ -67,9 +67,8 @@ examples/
   01_basic_bringup_cli/
   esp_idf/basic/       - Native bring-up app, fixed-name RV3032 component
                          wrapper and application-owned I2C adapter
-  common/              - Example-only helpers (BoardConfig.h, CliShell.h,
-                         CliStyle.h, CommandHandler.h, I2cScanner.h,
-                         I2cTransport.h, Log.h)
+  common/              - Framework-neutral Rv3032Cli engine and token parsers,
+                         Arduino board, scanner and transport helpers
 test/
   test_native/         - Host unit/integration tests against the bounded fake
   test_native_idf/     - Native adapter and driver integration tests

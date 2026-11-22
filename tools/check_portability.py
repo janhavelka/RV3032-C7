@@ -19,8 +19,8 @@ FORBIDDEN_EXAMPLE_PATTERNS = {
     "parseInt": r"\bparseInt\s*\(",
     "String.toInt": r"\.toInt\s*\(",
     "String.toFloat": r"\.toFloat\s*\(",
-    "parallel tick owner": r"\bg_rtc\s*\.\s*tick\s*\(",
-    "inferred job owner": r"\bg_rtc\s*\.\s*isJobBusy\s*\(",
+    "parallel tick owner": r"(?:\.|->)\s*tick\s*\(",
+    "inferred job owner": r"(?:\.|->)\s*isJobBusy\s*\(",
     "direct EEPROM command": r"\bREG_EE_COMMAND\b",
 }
 HEALTH_UPDATE_OWNERS = {

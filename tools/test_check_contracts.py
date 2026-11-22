@@ -15,6 +15,15 @@ import check_portability as portability
 
 
 class PortabilityChecks(unittest.TestCase):
+    def test_example_owners_are_checked_for_any_receiver(self):
+        for call, label in (("tick(now)", "parallel tick owner"),
+                            ("isJobBusy()", "inferred job owner")):
+            for receiver in ("clockDevice.", "owner->", "devices[0]."):
+                with self.subTest(receiver=receiver, call=call):
+                    pattern = portability.FORBIDDEN_EXAMPLE_PATTERNS[label]
+                    self.assertRegex(portability.mask_non_code(receiver + call), pattern)
+                    self.assertNotRegex(portability.mask_non_code("// " + receiver + call), pattern)
+
     def test_core_stdio_and_parser_regressions(self):
         for text in ('#include <cstdio>', '#include "stdio.h"',
                      'std::sscanf(x, y);', 'atoi(x);', 'strtol(x, y, 10);',

@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Extracted the Arduino bring-up CLI into a fixed-buffer, framework-neutral
+  example engine. Host characterization covers command output, callback
+  counts, pending work and serial input discard.
 - Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
 - The root IDF manifest is tracked and validated by content in source and
   packaged trees. Export excludes generated IDF output, pioarduino's

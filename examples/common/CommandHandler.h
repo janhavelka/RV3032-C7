@@ -8,16 +8,38 @@
 
 #pragma once
 
-#include <Arduino.h>
-
 #include <cerrno>
 #include <cctype>
+#include <cstddef>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
 
 namespace cmd {
+
+// The editor counts physical bytes. NUL inside a token ends its C-string
+// value, but only whitespace separates it from the next token.
+inline char* nextToken(char*& cursor, const char* end) {
+  while (cursor != end && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+  if (cursor == end) return nullptr;
+  char* token = cursor;
+  while (cursor != end && !std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+  if (cursor != end) *cursor++ = '\0';
+  return token;
+}
+
+// Split in place; returned pointers borrow the buffer until its next edit.
+// An extra token reports capacity + 1, so callers can reject excess arguments.
+inline size_t splitTokens(char* text, const char* end, const char** tokens, size_t capacity) {
+  size_t count = 0;
+  while (const char* token = nextToken(text, end)) {
+    if (count == capacity) return capacity + 1;
+    tokens[count++] = token;
+  }
+  return count;
+}
+
 namespace detail {
 
 inline bool hasWhitespace(const char* text) {
@@ -34,16 +56,15 @@ inline bool hasWhitespace(const char* text) {
   return false;
 }
 
-inline bool parseUnsigned(const String& token, int base,
+inline bool parseUnsigned(const char* token, int base,
                           uint64_t maximum, uint64_t& parsed) {
-  const char* text = token.c_str();
-  if (hasWhitespace(text) || text[0] == '-' || text[0] == '+') {
+  if (hasWhitespace(token) || token[0] == '-' || token[0] == '+') {
     return false;
   }
   errno = 0;
   char* end = nullptr;
-  const unsigned long long value = strtoull(text, &end, base);
-  if (errno == ERANGE || end == text || *end != '\0' || value > maximum) {
+  const unsigned long long value = strtoull(token, &end, base);
+  if (errno == ERANGE || end == token || *end != '\0' || value > maximum) {
     return false;
   }
   parsed = static_cast<uint64_t>(value);
@@ -52,7 +73,7 @@ inline bool parseUnsigned(const String& token, int base,
 
 }  // namespace detail
 
-inline bool parseU8Token(const String& token, uint8_t& out) {
+inline bool parseU8Token(const char* token, uint8_t& out) {
   uint64_t parsed = 0;
   if (!detail::parseUnsigned(token, 10, UINT8_MAX, parsed)) {
     return false;
@@ -61,7 +82,7 @@ inline bool parseU8Token(const String& token, uint8_t& out) {
   return true;
 }
 
-inline bool parseU16Token(const String& token, uint16_t& out) {
+inline bool parseU16Token(const char* token, uint16_t& out) {
   uint64_t parsed = 0;
   if (!detail::parseUnsigned(token, 10, UINT16_MAX, parsed)) {
     return false;
@@ -70,7 +91,7 @@ inline bool parseU16Token(const String& token, uint16_t& out) {
   return true;
 }
 
-inline bool parseU32Token(const String& token, uint32_t& out) {
+inline bool parseU32Token(const char* token, uint32_t& out) {
   uint64_t parsed = 0;
   if (!detail::parseUnsigned(token, 10, UINT32_MAX, parsed)) {
     return false;
@@ -79,12 +100,11 @@ inline bool parseU32Token(const String& token, uint32_t& out) {
   return true;
 }
 
-inline bool parseFloatToken(const String& token, float& out) {
-  const char* text = token.c_str();
-  if (detail::hasWhitespace(text)) {
+inline bool parseFloatToken(const char* token, float& out) {
+  if (detail::hasWhitespace(token)) {
     return false;
   }
-  const char* unsignedText = text;
+  const char* unsignedText = token;
   if (*unsignedText == '+' || *unsignedText == '-') {
     ++unsignedText;
   }
@@ -94,9 +114,9 @@ inline bool parseFloatToken(const String& token, float& out) {
   }
   errno = 0;
   char* end = nullptr;
-  const double parsed = strtod(text, &end);
+  const double parsed = strtod(token, &end);
   const double magnitude = std::fabs(parsed);
-  if (errno == ERANGE || end == text || *end != '\0' ||
+  if (errno == ERANGE || end == token || *end != '\0' ||
       !std::isfinite(parsed) ||
       magnitude > static_cast<double>(std::numeric_limits<float>::max()) ||
       (magnitude != 0.0 &&
@@ -107,7 +127,7 @@ inline bool parseFloatToken(const String& token, float& out) {
   return true;
 }
 
-inline bool parseBool01Token(const String& token, bool& out) {
+inline bool parseBool01Token(const char* token, bool& out) {
   uint8_t parsed = 0;
   if (!parseU8Token(token, parsed) || parsed > 1U) {
     return false;
@@ -116,14 +136,13 @@ inline bool parseBool01Token(const String& token, bool& out) {
   return true;
 }
 
-inline bool parseRegisterToken(const String& token, uint8_t& out) {
-  const char* text = token.c_str();
-  if (detail::hasWhitespace(text) || text[0] == '-' || text[0] == '+') {
+inline bool parseRegisterToken(const char* token, uint8_t& out) {
+  if (detail::hasWhitespace(token) || token[0] == '-' || token[0] == '+') {
     return false;
   }
   int base = 10;
-  if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-    if (text[2] == '\0') {
+  if (token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+    if (token[2] == '\0') {
       return false;
     }
     base = 16;

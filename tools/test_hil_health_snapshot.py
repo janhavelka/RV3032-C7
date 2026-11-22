@@ -7,7 +7,7 @@ import hil_cli_runner as runner
 
 
 # Field names, order and boolean spellings come from
-# examples/01_basic_bringup_cli/main.cpp::cmd_drv. Values are synthetic.
+# examples/common/Rv3032Cli.cpp, Engine::cmdDrv(). Values are synthetic.
 HEALTHY_SNAPSHOT = """
 === Driver Health ===
 State: READY

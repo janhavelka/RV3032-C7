@@ -6,7 +6,7 @@
 #include <unity.h>
 
 #include "examples/common/I2cTransport.h"
-#include "examples/common/CliShell.h"
+#include "examples/common/Rv3032Cli.h"
 #include "examples/common/CommandHandler.h"
 #include "FakeRv3032.h"
 #include "RV3032/RV3032.h"
@@ -18,6 +18,7 @@
 #undef setup
 
 using test_rv3032::FakeRv3032;
+using rv3032cli::PendingSurface;
 
 static FakeRv3032* hilPhysicalChip = nullptr;
 static uint32_t hilFailWriteOneAt = 0;
@@ -10023,8 +10024,7 @@ void test_phase4_late_cleanup_write_requires_semantic_cleanup_failure() {
 
 void beginCliHarness(FakeRv3032& fake, bool enableEepromWrites) {
   g_rtc.end();
-  g_pendingOperation = PendingOperation{};
-  g_verbose = false;
+  g_cli.reset();
   Serial.resetInput();
   Serial.resetOutput();
   arduinoStubMillis = 0;
@@ -10038,17 +10038,17 @@ void driveCliPending(
     uint32_t pollCap = 5000U) {
   for (uint32_t poll = 0;
        poll < pollCap &&
-       g_pendingOperation.surface != stopAt;
+       g_cli.pending().surface != stopAt;
        ++poll) {
     const uint32_t callbacksBefore = fake.callbackCount;
-    pollPendingOperation(fake.nowMs);
+    g_cli.pollPendingOperation(fake.nowMs);
     TEST_ASSERT_LESS_OR_EQUAL_UINT32(
         1U, fake.callbackCount - callbacksBefore);
     ++fake.nowMs;
     arduinoStubMillis = fake.nowMs;
   }
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(stopAt),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
   if (stopAt == PendingSurface::NONE) {
     TEST_ASSERT_FALSE(g_rtc.isJobBusy());
     TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
@@ -10061,6 +10061,708 @@ void stageCliEepromQueue(FakeRv3032& fake) {
   status = pollJobToCompletion(g_rtc, fake, 1);
   TEST_ASSERT_TRUE(status.ok());
   TEST_ASSERT_TRUE(g_rtc.isEepromBusy());
+}
+
+// Exercise commands through the same bounded serial entry point as the sketch.
+void runCharacterizationInput(FakeRv3032& fake, const char* input, bool discard = false) {
+  beginCliHarness(fake, true);
+  Wire.reset();
+  fake.setCalendar(2026, 7, 13, 12, 34, 56, 1);
+  RV3032::Config cfg = fake.config(true);
+  cfg.nowMs = [](void* user) {
+    auto& chip = *static_cast<FakeRv3032*>(user);
+    chip.nowMs = arduinoStubMillis;
+    return chip.nowMs;
+  };
+  cfg.waitMs = [](uint32_t ms, void* user) {
+    delay(ms);
+    static_cast<FakeRv3032*>(user)->nowMs = arduinoStubMillis;
+  };
+  g_rtc.end();
+  TEST_ASSERT_TRUE(g_rtc.begin(cfg).ok());
+  Serial.inject(std::string(input) + "\n");
+  loop();
+  if (discard) {
+    Serial.inject(std::string(256, '\n') + "verbose 1\nclear_porf");
+    loop();
+  }
+  bool injectedInEeprom = false;
+  for (unsigned pass = 0;
+       g_cli.pending().surface != PendingSurface::NONE && pass < 1000U; ++pass) {
+    const uint32_t before = fake.callbackCount;
+    if (discard && !injectedInEeprom && g_cli.pending().surface == PendingSurface::EEPROM) {
+      Serial.inject("\nverbose 1\nclear_porf");
+      loop();
+      injectedInEeprom = true;
+    } else {
+      g_cli.pollPendingOperation(arduinoStubMillis);
+    }
+    TEST_ASSERT_TRUE(fake.callbackCount - before <= 1U);
+    delay(1);
+  }
+  TEST_ASSERT_TRUE(g_cli.pending().surface == PendingSurface::NONE);
+  if (discard) {
+    TEST_ASSERT_TRUE(injectedInEeprom);
+    Serial.inject("\nverbose 0\n");
+    loop();
+    TEST_ASSERT_FALSE(g_cli.verbose());
+    TEST_ASSERT_TRUE(Serial.available() == 0);
+  }
+}
+
+// Exact transcripts captured with the original sketch and a deterministic RTC.
+void test_cli_command_transcripts_and_callback_counts() {
+  static constexpr char HELP_OUTPUT[] =
+      "\n"
+      "\033[36m=== RV3032-C7 CLI Help ===\033[0m\n"
+      "Version: " RV3032_VERSION_STRING "\n"
+      "Built:   " RV3032_BUILD_TIMESTAMP "\n"
+      "Commit:  " RV3032_GIT_COMMIT " (" RV3032_GIT_STATUS ")\n"
+      "\n"
+      "\033[32m[Common]\033[0m\n"
+      "  \033[36mhelp / ?                        \033[0m - Show this help\n"
+      "  \033[36mversion / ver                   \033[0m - Print firmware and library version info\n"
+      "  \033[36mscan                            \033[0m - Scan I2C bus\n"
+      "  \033[36mread                            \033[0m - Alias of time\n"
+      "  \033[36mcfg / settings                  \033[0m - Alias of drv\n"
+      "  \033[36mtime                            \033[0m - Read current time\n"
+      "  \033[36mset [YYYY MM DD HH MM SS]       \033[0m - Set time (no args = show)\n"
+      "  \033[36msetbuild                        \033[0m - Set time to build timestamp\n"
+      "  \033[36munix [ts]                       \033[0m - Read or set Unix timestamp\n"
+      "  \033[36mtemp                            \033[0m - Read temperature\n"
+      "\n"
+      "\033[32m[Alarm And Timer]\033[0m\n"
+      "  \033[36malarm                           \033[0m - Show alarm configuration\n"
+      "  \033[36malarm_set [MM HH DD]            \033[0m - Set alarm time (no args = show)\n"
+      "  \033[36malarm_match [M H D]             \033[0m - Set alarm match flags (no args = show)\n"
+      "  \033[36malarm_int [0|1]                 \033[0m - Disable/enable alarm interrupt (no args = show)\n"
+      "  \033[36malarm_clear                     \033[0m - Clear alarm flag\n"
+      "  \033[36mtimer                           \033[0m - Show timer config\n"
+      "  \033[36mtimer <ticks 0..4095> <freq 0..3> <en 0|1>\033[0m - Set timer; ticks=0 requires en=0\n"
+      "\n"
+      "\033[32m[Clock And Event]\033[0m\n"
+      "  \033[36mclkout [0|1]                    \033[0m - Disable/enable clock output (no args = show)\n"
+      "  \033[36mclkout_freq [0..3]              \033[0m - Set clock frequency (no args = show)\n"
+      "  \033[36moffset [ppm]                    \033[0m - Read or set frequency offset\n"
+      "  \033[36mevi                             \033[0m - Show EVI config\n"
+      "  \033[36mevi edge [0|1]                  \033[0m - Set/read EVI edge (0=falling,1=rising)\n"
+      "  \033[36mevi debounce [0..3]             \033[0m - Set/read EVI debounce\n"
+      "  \033[36mevi overwrite [0|1]             \033[0m - Set/read EVI overwrite\n"
+      "  \033[36mts <tlow|thigh|evi>             \033[0m - Read decoded timestamp block\n"
+      "  \033[36mts_reset <tlow|thigh|evi>       \033[0m - Reset timestamp block\n"
+      "\n"
+      "\033[32m[Status And Registers]\033[0m\n"
+      "  \033[36mstatus                          \033[0m - Read status register\n"
+      "  \033[36mstatusf                         \033[0m - Read decoded status flags\n"
+      "  \033[36mstatus_clear <mask 0..255>      \033[0m - Clear status flags by explicit decimal mask\n"
+      "  \033[36mvalidity                        \033[0m - Read PORF/VLF/BSF validity flags\n"
+      "  \033[36mram [offset len]                \033[0m - Dump user RAM (default all 16 bytes)\n"
+      "  \033[36mram_write <offset> <byte...>    \033[0m - Write decimal user RAM bytes\n"
+      "  \033[36mreg <addr>                      \033[0m - Read register byte\n"
+      "  \033[36mreg <addr> <val> [confirm]      \033[0m - Write register byte; confirm required outside user RAM\n"
+      "  \033[36meeprom                          \033[0m - EEPROM stats and user EEPROM dump\n"
+      "  \033[36mbackup [status|off|direct|level]\033[0m - Show or cooperatively configure backup PMU\n"
+      "  \033[36mprimary-cell ensure CONFIRM-PRIMARY-CELL\033[0m - Explicit one-shot primary-cell provisioning\n"
+      "  \033[36mclear_porf                      \033[0m - Clear power-on reset flag\n"
+      "  \033[36mclear_vlf                       \033[0m - Clear voltage low flag\n"
+      "  \033[36mclear_bsf                       \033[0m - Clear backup switchover flag\n"
+      "\n"
+      "\033[32m[Diagnostics]\033[0m\n"
+      "  \033[36mdrv                             \033[0m - Show driver state and health\n"
+      "  \033[36mprobe                           \033[0m - Read 0x51 Status register without health tracking\n"
+      "  \033[36mrecover                         \033[0m - Manual recovery attempt\n"
+      "  \033[36mverbose [0|1]                   \033[0m - Detailed status for time, clear_vlf, and recover\n"
+      "  \033[36mstress [N]                      \033[0m - Run N iterations stress test (default 100)\n"
+      "  \033[36mstress_mix [N]                  \033[0m - Run N iterations mixed operations test\n"
+      "  \033[36mselftest                        \033[0m - Run safe command self-test report\n"
+      "\n"
+      "> ";
+
+  static constexpr char VERSION_OUTPUT[] =
+      "=== Version Info ===\n"
+      "  Example firmware build: <built-at>\n"
+      "  MCU: native ESP32 stub rev 0, flash 0 bytes, PSRAM not available (0 bytes)\n"
+      "  Arduino-ESP32: stub\n"
+      "  ESP-IDF: stub\n"
+      "  RV3032 library version: " RV3032_VERSION_STRING "\n"
+      "  RV3032 library full: " RV3032_VERSION_FULL "\n"
+      "  RV3032 library build: " RV3032_BUILD_TIMESTAMP "\n"
+      "  RV3032 library commit: " RV3032_GIT_COMMIT " (" RV3032_GIT_STATUS ")\n"
+      "> ";
+
+  static constexpr char READ_OUTPUT[] =
+      "Current time: 2026-07-13 12:34:56 (weekday=1)\n"
+      "\033[33m[W]\033[0m RTC time may be invalid (PORF=1, VLF=1, BSF=0)\n"
+      "> ";
+
+  static constexpr char CFG_OUTPUT[] =
+      "\n"
+      "=== Driver Health ===\n"
+      "State: \033[32mREADY\033[0m\n"
+      "isInitialized: \033[32myes\033[0m\n"
+      "Config: addr=0x51 i2cTimeout=5 offlineThreshold=3 nowMs=yes\n"
+      "EEPROM: busy=no generic_persistence=yes timeout=100 queue=0 queue_ok=0 queue_fail=0\n"
+      "\n"
+      "=== Counters ===\n"
+      "Consecutive Failures: \033[32m0\033[0m\n"
+      "Total Successes: \033[33m0\033[0m\n"
+      "Total Failures: \033[32m0\033[0m\n"
+      "Success rate: \033[31m0.0%\033[0m\n"
+      "\n"
+      "=== Timestamps ===\n"
+      "Last OK: never\n"
+      "Last Error: never\n"
+      "\n"
+      "=== Last Error Details ===\n"
+      "Code: \033[32mOK\033[0m (0)\n"
+      "Detail: 0\n"
+      "Message: OK\n"
+      "\n"
+      "=== EEPROM State ===\n"
+      "Busy: \033[32mfalse\033[0m\n"
+      "Status: \033[32mOK\033[0m\n"
+      "\n"
+      "> ";
+
+  static constexpr char EVI_EDGE_OUTPUT[] =
+      "\033[31m[E]\033[0m Usage: evi <edge|debounce|overwrite> <value>\n"
+      "> ";
+
+  static constexpr char BACKUP_OUTPUT[] =
+      "\n"
+      "=== Battery Backup ===\n"
+      "PMU 0xC0: 0x20\n"
+      "Backup mode: \033[32mlevel\033[0m\n"
+      "EEPROM persistence: yes busy=no queue=0\n"
+      "CLKOUT disabled bit: no\n"
+      "Trickle charger bits: 0x0 (off)\n"
+      "Flags: PORF=set VLF=set BSF=clear time=invalid\n"
+      "Time is held by the RTC counter while VBACKUP is present; it is not stored in EEPROM.\n"
+      "Primary-cell provisioning is separate: primary-cell ensure CONFIRM-PRIMARY-CELL\n"
+      "> ";
+
+  static constexpr char OFFSET_NAN_OUTPUT[] =
+      "\033[31m[E]\033[0m Usage: offset [finite-ppm]\n"
+      "> ";
+
+  static constexpr char TIMER_0_2_1_OUTPUT[] =
+      "\033[31m[E]\033[0m Usage: timer <ticks 0..4095> <freq 0..3> <en 0|1>; ticks=0 requires en=0\n"
+      "> ";
+
+  struct Case {
+    const char* input;
+    uint32_t callbacks;
+    uint32_t scanProbes;
+    const char* output;
+    bool discard = false;
+  };
+  static const Case cases[] = {
+      {"help", 0, 0, HELP_OUTPUT},
+      {"?", 0, 0, HELP_OUTPUT},
+      {"version", 0, 0, VERSION_OUTPUT},
+      {"ver", 0, 0, VERSION_OUTPUT},
+      {"scan", 0, 112,
+       "\033[36m[I]\033[0m Scanning I2C bus (timeout=50ms)...\n"
+       "\033[36m[I]\033[0m      0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F\n"
+       "00:                         08 09 0A 0B 0C 0D 0E 0F \n"
+       "10: 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F \n"
+       "20: 20 21 22 23 24 25 26 27 28 29 2A 2B 2C 2D 2E 2F \n"
+       "30: 30 31 32 33 34 35 36 37 38 39 3A 3B 3C 3D 3E 3F \n"
+       "40: 40 41 42 43 44 45 46 47 48 49 4A 4B 4C 4D 4E 4F \n"
+       "50: 50 51 52 53 54 55 56 57 58 59 5A 5B 5C 5D 5E 5F \n"
+       "60: 60 61 62 63 64 65 66 67 68 69 6A 6B 6C 6D 6E 6F \n"
+       "70: 70 71 72 73 74 75 76 77                         \n"
+       "\033[36m[I]\033[0m Scan complete. Found 112 device(s).\n"
+       "\033[36m[I]\033[0m Common addresses: 0x3C/0x3D=OLED, 0x48-0x4B=ADS1115, 0x51=RV3032, 0x76/0x77=BME280\n"
+       "> "},
+      {"read", 2, 0, READ_OUTPUT},
+      {"cfg", 0, 0, CFG_OUTPUT},
+      {"settings", 0, 0, CFG_OUTPUT},
+      {"time", 2, 0, READ_OUTPUT},
+      {"set", 2, 0, READ_OUTPUT},
+      {"set 2026 4 25 10 12 44", 1, 0,
+       "\033[36m[I]\033[0m Calendar set completed\n"
+       "2026-04-25 10:12:44 (weekday=6)\n"
+       "> "},
+      {"setbuild", 1, 0,
+       "\033[36m[I]\033[0m Build timestamp calendar set completed\n"
+       "<calendar-built-at>\n"
+       "> "},
+      {"unix", 2, 0,
+       "Unix timestamp: 1783946096\n"
+       "\033[33m[W]\033[0m RTC time may be invalid (PORF=1, VLF=1, BSF=0)\n"
+       "> "},
+      {"unix 1000000000", 1, 0,
+       "\033[36m[I]\033[0m Unix timestamp 1000000000 set completed\n"
+       "> "},
+      {"temp", 1, 0,
+       "Temperature: 0.00 C\n"
+       "> "},
+      {"alarm", 3, 0,
+       "Alarm time: 00:00 (date=00)\n"
+       "Match: minute=1 hour=1 date=1\n"
+       "Interrupt: disabled\n"
+       "Flag: clear\n"
+       "> "},
+      {"alarm_set", 1, 0,
+       "Alarm time: 00:00 (date=00)\n"
+       "> "},
+      {"alarm_set 30 12 3", 3, 0,
+       "\033[36m[I]\033[0m Alarm time accepted: 12:30 (date=03)\n"
+       "\033[36m[I]\033[0m alarm time terminal status: OK\n"
+       "> "},
+      {"alarm_match", 1, 0,
+       "Match: minute=1 hour=1 date=1\n"
+       "> "},
+      {"alarm_match 1 0 1", 3, 0,
+       "\033[36m[I]\033[0m Alarm match accepted: minute=1 hour=0 date=1\n"
+       "\033[36m[I]\033[0m alarm match terminal status: OK\n"
+       "> "},
+      {"alarm_int", 1, 0,
+       "Alarm interrupt: disabled\n"
+       "> "},
+      {"alarm_int 1", 2, 0,
+       "\033[36m[I]\033[0m Alarm interrupt enable accepted\n"
+       "\033[36m[I]\033[0m alarm interrupt terminal status: OK\n"
+       "> "},
+      {"alarm_clear", 1, 0,
+       "\033[36m[I]\033[0m Alarm flag clear accepted\n"
+       "\033[36m[I]\033[0m alarm flag clear terminal status: OK\n"
+       "> "},
+      {"timer", 1, 0,
+       "Timer: ticks=0 freq=4096Hz enabled=0\n"
+       "> "},
+      {"timer 50 2 1", 6, 0,
+       "\033[36m[I]\033[0m Timer accepted: ticks=50 freq=2 enable=1\n"
+       "\033[36m[I]\033[0m timer configuration terminal status: OK\n"
+       "timer configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=yes operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"clkout", 1, 0,
+       "Clock output: enabled\n"
+       "> "},
+      {"clkout 0", 48, 0,
+       "\033[36m[I]\033[0m Clock output disable accepted\n"
+       "\033[36m[I]\033[0m CLKOUT disable terminal status: OK\n"
+       "CLKOUT disable persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"clkout_freq", 1, 0,
+       "Clock output frequency: 32768Hz\n"
+       "> "},
+      {"clkout_freq 3", 105, 0,
+       "\033[36m[I]\033[0m Clock output frequency 1Hz accepted\n"
+       "\033[36m[I]\033[0m CLKOUT configuration terminal status: OK\n"
+       "CLKOUT configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=yes operation=OK detail=0 cleanup=OK detail=0\n"
+       "CLKOUT configuration persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"offset", 1, 0,
+       "Frequency offset: 0.00 ppm\n"
+       "> "},
+      {"offset 1.0", 50, 0,
+       "\033[36m[I]\033[0m Frequency offset 1.00 ppm accepted\n"
+       "\033[36m[I]\033[0m frequency offset terminal status: OK\n"
+       "frequency offset persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"evi", 1, 0,
+       "EVI: edge=falling debounce=None overwrite=0\n"
+       "> "},
+      {"evi edge", 0, 0, EVI_EDGE_OUTPUT},
+      {"evi edge 1", 3, 0,
+       "\033[36m[I]\033[0m EVI edge rising accepted\n"
+       "\033[36m[I]\033[0m EVI edge terminal status: OK\n"
+       "> "},
+      {"evi debounce", 0, 0, EVI_EDGE_OUTPUT},
+      {"evi debounce 2", 3, 0,
+       "\033[36m[I]\033[0m EVI debounce 2 accepted\n"
+       "\033[36m[I]\033[0m EVI debounce terminal status: OK\n"
+       "> "},
+      {"evi overwrite", 0, 0, EVI_EDGE_OUTPUT},
+      {"evi overwrite 1", 3, 0,
+       "\033[36m[I]\033[0m EVI overwrite 1 accepted\n"
+       "\033[36m[I]\033[0m EVI overwrite terminal status: OK\n"
+       "> "},
+      {"ts tlow", 1, 0,
+       "TLow timestamp: count=0\n"
+       "  Time: empty/unset\n"
+       "> "},
+      {"ts thigh", 1, 0,
+       "THigh timestamp: count=0\n"
+       "  Time: empty/unset\n"
+       "> "},
+      {"ts evi", 1, 0,
+       "EVI timestamp: count=0 hundredths=0\n"
+       "  Time: empty/unset\n"
+       "> "},
+      {"ts_reset tlow", 2, 0,
+       "\033[36m[I]\033[0m TLow timestamp reset accepted\n"
+       "\033[36m[I]\033[0m timestamp reset terminal status: OK\n"
+       "> "},
+      {"ts_reset thigh", 2, 0,
+       "\033[36m[I]\033[0m THigh timestamp reset accepted\n"
+       "\033[36m[I]\033[0m timestamp reset terminal status: OK\n"
+       "> "},
+      {"ts_reset evi", 3, 0,
+       "\033[36m[I]\033[0m EVI timestamp reset accepted\n"
+       "\033[36m[I]\033[0m timestamp reset terminal status: OK\n"
+       "> "},
+      {"status", 1, 0,
+       "Status register: 0x03 (binary: 00000011)\n"
+       "> "},
+      {"statusf", 1, 0,
+       "Status flags:\n"
+       "  tempHigh=0 tempLow=0 update=0 timer=0\n"
+       "  alarm=0 event=0 porf=1 vlf=1\n"
+       "> "},
+      {"status_clear 2", 2, 0,
+       "\033[36m[I]\033[0m Status clear mask=0x02 accepted\n"
+       "\033[36m[I]\033[0m Status flag clear terminal status: OK\n"
+       "> "},
+      {"validity", 1, 0,
+       "PORF: set\n"
+       "VLF:  set\n"
+       "BSF:  clear\n"
+       "Time: invalid\n"
+       "> "},
+      {"ram", 1, 0,
+       "User RAM offset 0 len 16:\n"
+       "  0x00: 00 00 00 00 00 00 00 00 \n"
+       "  0x08: 00 00 00 00 00 00 00 00 \n"
+       "> "},
+      {"ram 1 2", 1, 0,
+       "User RAM offset 1 len 2:\n"
+       "  0x01: 00 00 \n"
+       "> "},
+      {"ram_write 0 4 3", 1, 0,
+       "\033[36m[I]\033[0m User RAM write of 2 byte(s) at offset 0 completed\n"
+       "> "},
+      {"reg 0x0D", 1, 0,
+       "reg[0x0D] = 0x03\n"
+       "> "},
+      {"reg 0x40 1", 1, 0,
+       "\033[36m[I]\033[0m reg[0x40] <= 0x01\n"
+       "> "},
+      {"reg 0x0D 1 confirm", 0, 0,
+       "\033[31m[E]\033[0m writeRegister(0x0D) failed: Register is not publicly writable\n"
+       "> "},
+      {"eeprom", 476, 0,
+       "\n"
+       "=== EEPROM ===\n"
+       "Busy: false\n"
+       "Status: \033[32mOK\033[0m\n"
+       "Generic queue items: 0 succeeded (0 failed)\n"
+       "Queue depth: 0\n"
+       "Active configuration mirrors (not persistent EEPROM):\n"
+       "  PMU (0xC0): 0x20\n"
+       "  OFFSET (0xC1): 0x00\n"
+       "  CLKOUT1 (0xC2): 0x00\n"
+       "  CLKOUT2 (0xC3): 0x00\n"
+       "  TREF0 (0xC4): 0x00\n"
+       "  TREF1 (0xC5): 0x00\n"
+       "User EEPROM (0xCB..0xEA):\n"
+       "  0xCB: 00 00 00 00 00 00 00 00 \n"
+       "  0xD3: 00 00 00 00 00 00 00 00 \n"
+       "  0xDB: 00 00 00 00 00 00 00 00 \n"
+       "  0xE3: 00 00 00 00 00 00 00 00 \n"
+       "Non-0xFF bytes: 32/32 (heuristic)\n"
+       "> "},
+      {"backup", 2, 0, BACKUP_OUTPUT},
+      {"backup status", 2, 0, BACKUP_OUTPUT},
+      {"backup off", 49, 0,
+       "\033[36m[I]\033[0m Backup mode off accepted\n"
+       "\033[36m[I]\033[0m backup configuration terminal status: OK\n"
+       "backup configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=yes operation=OK detail=0 cleanup=OK detail=0\n"
+       "backup configuration persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"backup direct", 50, 0,
+       "\033[36m[I]\033[0m Backup mode direct accepted\n"
+       "\033[36m[I]\033[0m backup configuration terminal status: OK\n"
+       "backup configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=yes operation=OK detail=0 cleanup=OK detail=0\n"
+       "backup configuration persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"backup level", 27, 0,
+       "\033[36m[I]\033[0m Backup mode level accepted\n"
+       "\033[36m[I]\033[0m backup configuration terminal status: OK\n"
+       "backup configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=no operation=OK detail=0 cleanup=OK detail=0\n"
+       "backup configuration persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> "},
+      {"primary-cell ensure CONFIRM-PRIMARY-CELL", 20, 0,
+       "\033[33m[W]\033[0m Proceed only after proving primary-cell chemistry, stable VDD >=1.6 V, \n"
+       "\033[33m[W]\033[0m VDD >=2.0 V at 400 kHz, VDD >2.2 V through level-switch settle, and safe backfeed topology\n"
+       "Primary-cell ensure: ALREADY_CONFIGURED status=OK stage=NONE before=0x20 target=0x20 after=0x20 cleanup=verified\n"
+       "  operation=OK detail=0 cleanup_status=OK detail=0 write_attempted=no durable=no persistent_target_verified=yes active_target_verified=yes active_after=0x20 control1_after=0x00 auto_refresh_held=no\n"
+       "> "},
+      {"clear_porf", 2, 0,
+       "\033[36m[I]\033[0m Power-on reset flag clear accepted\n"
+       "\033[36m[I]\033[0m power-on reset flag clear terminal status: OK\n"
+       "> "},
+      {"clear_vlf", 2, 0,
+       "\033[36m[I]\033[0m Voltage low flag clear accepted\n"
+       "\033[36m[I]\033[0m voltage-low flag clear terminal status: OK\n"
+       "> "},
+      {"clear_bsf", 1, 0,
+       "\033[36m[I]\033[0m Backup switchover flag clear accepted\n"
+       "\033[36m[I]\033[0m backup flag clear terminal status: OK\n"
+       "> "},
+      {"drv", 0, 0, CFG_OUTPUT},
+      {"probe", 1, 0,
+       "Probing address 0x51 Status-register communication (no health tracking)...\n"
+       "\033[36m[I]\033[0m Probe OK - address 0x51 responded for this transaction; chip identity is not proven\n"
+       "Health tracking: \033[32munchanged (correct)\033[0m\n"
+       "> "},
+      {"recover", 1, 0,
+       "Attempting recovery...\n"
+       "\033[36m[I]\033[0m Recovery successful\n"
+       "State: \033[32mREADY\033[0m -> \033[32mREADY\033[0m\n"
+       "Consecutive failures: \033[32m0\033[0m -> \033[32m0\033[0m\n"
+       "> "},
+      {"verbose", 0, 0,
+       "Verbose mode: \033[0mOFF\033[0m\n"
+       "> "},
+      {"verbose 1", 0, 0,
+       "\033[36m[I]\033[0m Verbose mode: \033[32mON\033[0m\n"
+       "> "},
+      {"verbose 0", 0, 0,
+       "\033[36m[I]\033[0m Verbose mode: \033[0mOFF\033[0m\n"
+       "> "},
+      {"stress", 100, 0,
+       "\n"
+       "=== Stress Test: 100 iterations ===\n"
+       "  Progress: 10%\n"
+       "  Progress: 20%\n"
+       "  Progress: 30%\n"
+       "  Progress: 40%\n"
+       "  Progress: 50%\n"
+       "  Progress: 60%\n"
+       "  Progress: 70%\n"
+       "  Progress: 80%\n"
+       "  Progress: 90%\n"
+       "  Progress: 100%\n"
+       "\n"
+       "--- Results ---\n"
+       "\033[32mOK\033[0m: 100, \033[32mFAIL\033[0m: 0 (100.00% \033[32msuccess\033[0m)\n"
+       "Total time: 0 ms (0.0 ops/sec)\n"
+       "Per-op timing: min=0 us, max=0 us, avg=0 us\n"
+       "\n"
+       "--- Health Tracking ---\n"
+       "Total success: 0 -> 100 (expected 100) \033[32mOK\033[0m\n"
+       "Total failures: 0 -> 0 (expected 0) \033[32mOK\033[0m\n"
+       "Driver state: \033[32mREADY\033[0m -> \033[32mREADY\033[0m\n"
+       "Consecutive failures: 0\n"
+       "\n"
+       "> "},
+      {"stress 1", 1, 0,
+       "\n"
+       "=== Stress Test: 1 iterations ===\n"
+       "  Progress: 100%\n"
+       "\n"
+       "--- Results ---\n"
+       "\033[32mOK\033[0m: 1, \033[32mFAIL\033[0m: 0 (100.00% \033[32msuccess\033[0m)\n"
+       "Total time: 0 ms (0.0 ops/sec)\n"
+       "Per-op timing: min=0 us, max=0 us, avg=0 us\n"
+       "\n"
+       "--- Health Tracking ---\n"
+       "Total success: 0 -> 1 (expected 1) \033[32mOK\033[0m\n"
+       "Total failures: 0 -> 0 (expected 0) \033[32mOK\033[0m\n"
+       "Driver state: \033[32mREADY\033[0m -> \033[32mREADY\033[0m\n"
+       "Consecutive failures: 0\n"
+       "\n"
+       "> "},
+      {"stress_mix", 50, 0,
+       "\n"
+       "=== Mixed Operations Stress Test: 50 iterations ===\n"
+       "  Progress: 24%\n"
+       "  Progress: 48%\n"
+       "  Progress: 72%\n"
+       "  Progress: 96%\n"
+       "\n"
+       "--- Results ---\n"
+       "Total: \033[32mOK\033[0m=50, \033[32mFAIL\033[0m=0 (100.00% \033[32msuccess\033[0m)\n"
+       "Time: 0 ms (0.0 ops/sec)\n"
+       "\n"
+       "Per-operation breakdown:\n"
+       "  readTime    : \033[32mOK\033[0m=8, \033[32mFAIL\033[0m=0\n"
+       "  readUnix    : \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "  readTemp    : \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "  readStatus  : \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "  getOffset   : \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "  getClkout   : \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "  readValidity: \033[32mOK\033[0m=7, \033[32mFAIL\033[0m=0\n"
+       "\n"
+       "--- Health Tracking ---\n"
+       "Success delta: \033[32m+50\033[0m (ops had 50 \033[32mOK\033[0m results)\n"
+       "Failure delta: \033[32m+0\033[0m (ops had 0 \033[32mFAIL\033[0m results)\n"
+       "Driver state: \033[32mREADY\033[0m\n"
+       "Consecutive failures: 0\n"
+       "\n"
+       "> "},
+      {"stress_mix 1", 1, 0,
+       "\n"
+       "=== Mixed Operations Stress Test: 1 iterations ===\n"
+       "  Progress: 100%\n"
+       "\n"
+       "--- Results ---\n"
+       "Total: \033[32mOK\033[0m=1, \033[32mFAIL\033[0m=0 (100.00% \033[32msuccess\033[0m)\n"
+       "Time: 0 ms (0.0 ops/sec)\n"
+       "\n"
+       "Per-operation breakdown:\n"
+       "  readTime    : \033[32mOK\033[0m=1, \033[32mFAIL\033[0m=0\n"
+       "  readUnix    : \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "  readTemp    : \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "  readStatus  : \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "  getOffset   : \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "  getClkout   : \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "  readValidity: \033[32mOK\033[0m=0, \033[32mFAIL\033[0m=0\n"
+       "\n"
+       "--- Health Tracking ---\n"
+       "Success delta: \033[32m+1\033[0m (ops had 1 \033[32mOK\033[0m results)\n"
+       "Failure delta: \033[32m+0\033[0m (ops had 0 \033[32mFAIL\033[0m results)\n"
+       "Driver state: \033[32mREADY\033[0m\n"
+       "Consecutive failures: 0\n"
+       "\n"
+       "> "},
+      {"selftest", 12, 0,
+       "\n"
+       "=== RV3032 Selftest (safe commands) ===\n"
+       "  [\033[32mPASS\033[0m] probe responds\n"
+       "  [\033[32mPASS\033[0m] probe no-health-side-effects\n"
+       "  [\033[32mPASS\033[0m] readTime\n"
+       "  [\033[32mPASS\033[0m] time fields plausible\n"
+       "  [\033[32mPASS\033[0m] readUnix\n"
+       "  [\033[32mPASS\033[0m] readTemperatureC\n"
+       "  [\033[32mPASS\033[0m] temperature plausible\n"
+       "  [\033[32mPASS\033[0m] readStatus\n"
+       "  [\033[32mPASS\033[0m] readValidity\n"
+       "  [\033[32mPASS\033[0m] getAlarmConfig\n"
+       "  [\033[32mPASS\033[0m] getAlarmInterruptEnabled\n"
+       "  [\033[32mPASS\033[0m] getAlarmFlag\n"
+       "  [\033[32mPASS\033[0m] getClkoutEnabled\n"
+       "  [\033[32mPASS\033[0m] getClkoutFrequency\n"
+       "  [\033[32mPASS\033[0m] getOffsetPpm\n"
+       "  [\033[32mPASS\033[0m] driver state initialized\n"
+       "Selftest result: pass=\033[32m16\033[0m fail=\033[32m0\033[0m skip=\033[0m0\033[0m\n"
+       "\n"
+       "> "},
+      {"reg 0x40 1 confirm", 0, 0,
+       "\033[31m[E]\033[0m User RAM writes do not use confirm: reg <addr> <value>\n"
+       "> "},
+      {"set 2026 1 1 0 0 0 trailing", 0, 0,
+       "\033[31m[E]\033[0m Invalid format. Usage: set YYYY MM DD HH MM SS\n"
+       "> "},
+      {"set 2026 2 30 0 0 0", 0, 0,
+       "\033[31m[E]\033[0m Invalid date: Invalid Gregorian date\n"
+       "> "},
+      {"setbuild trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: setbuild\n"
+       "> "},
+      {"unix -1", 0, 0,
+       "\033[31m[E]\033[0m Usage: unix [timestamp]\n"
+       "> "},
+      {"ts_reset tlow trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: ts_reset <tlow|thigh|evi>\n"
+       "> "},
+      {"alarm_set 256 1 1", 0, 0,
+       "\033[31m[E]\033[0m Invalid format. Usage: alarm_set MM HH DD\n"
+       "> "},
+      {"alarm_match 1 0 2", 0, 0,
+       "\033[31m[E]\033[0m Invalid format. Usage: alarm_match M H D (1=on, 0=off)\n"
+       "> "},
+      {"alarm_int 2", 0, 0,
+       "\033[31m[E]\033[0m Usage: alarm_int [0|1]\n"
+       "> "},
+      {"alarm_clear trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: alarm_clear\n"
+       "> "},
+      {"clkout 2", 0, 0,
+       "\033[31m[E]\033[0m Usage: clkout [0|1]\n"
+       "> "},
+      {"clkout_freq 4", 0, 0,
+       "\033[31m[E]\033[0m Invalid frequency. Range: 0..3\n"
+       "> "},
+      {"offset nan", 0, 0, OFFSET_NAN_OUTPUT},
+      {"offset 0x1p0", 0, 0, OFFSET_NAN_OUTPUT},
+      {"timer 0 2 1", 0, 0, TIMER_0_2_1_OUTPUT},
+      {"timer 1 2 0 trailing", 0, 0, TIMER_0_2_1_OUTPUT},
+      {"evi edge 2", 0, 0,
+       "\033[31m[E]\033[0m Usage: evi edge [0|1]\n"
+       "> "},
+      {"evi debounce 4", 0, 0,
+       "\033[31m[E]\033[0m Usage: evi debounce [0..3]\n"
+       "> "},
+      {"evi overwrite 2", 0, 0,
+       "\033[31m[E]\033[0m Usage: evi overwrite [0|1]\n"
+       "> "},
+      {"status_clear 0x0F", 0, 0,
+       "\033[31m[E]\033[0m Usage: status_clear <decimal mask 0..255>\n"
+       "> "},
+      {"reg +5", 0, 0,
+       "\033[31m[E]\033[0m Register address out of range\n"
+       "> "},
+      {"reg 0x0D 1", 0, 0,
+       "\033[31m[E]\033[0m Register writes outside user RAM require: reg <addr> <value> confirm\n"
+       "> "},
+      {"reg 0x0D 1 confirm trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: reg <addr> [value] [confirm]\n"
+       "> "},
+      {"ram_write 0 256", 0, 0,
+       "\033[31m[E]\033[0m Usage: ram_write <offset 0..15> <byte...>\n"
+       "> "},
+      {"backup direct trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: backup [status|off|direct|level]\n"
+       "> "},
+      {"primary-cell ensure CONFIRM-PRIMARY-CELL trailing", 0, 0,
+       "\033[31m[E]\033[0m Exact confirmation required: primary-cell ensure CONFIRM-PRIMARY-CELL\n"
+       "> "},
+      {"clear_porf trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: clear_porf\n"
+       "> "},
+      {"clear_vlf trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: clear_vlf\n"
+       "> "},
+      {"clear_bsf trailing", 0, 0,
+       "\033[31m[E]\033[0m Usage: clear_bsf\n"
+       "> "},
+      {"verbose 2", 0, 0,
+       "\033[31m[E]\033[0m Usage: verbose [0|1]\n"
+       "> "},
+      {"stress 0", 0, 0,
+       "\033[31m[E]\033[0m Usage: stress [1..100000]\n"
+       "> "},
+      {"stress_mix 100001", 0, 0,
+       "\033[31m[E]\033[0m Usage: stress_mix [1..100000]\n"
+       "> "},
+      {"clkout_freq 3", 105, 0,
+       "\033[36m[I]\033[0m Clock output frequency 1Hz accepted\n"
+       "\033[36m[I]\033[0m CLKOUT configuration terminal status: OK\n"
+       "CLKOUT configuration evidence: final=REQUESTED_VERIFIED mutation_attempted=yes operation=OK detail=0 cleanup=OK detail=0\n"
+       "CLKOUT configuration persistence: terminal=OK detail=0 operation=OK detail=0 cleanup=OK detail=0\n"
+       "> \033[36m[I]\033[0m Verbose mode: \033[0mOFF\033[0m\n"
+       "> ", true},
+  };
+  for (const Case& item : cases) {
+    FakeRv3032 fake;
+    runCharacterizationInput(fake, item.input, item.discard);
+    std::string text = Serial.output();
+    if (std::strcmp(item.input, "version") == 0 || std::strcmp(item.input, "ver") == 0) {
+      // Only the compiler's date/time may differ between translation units.
+      const std::string prefix = "=== Version Info ===\n  Example firmware build: ";
+      TEST_ASSERT_TRUE(text.compare(0, prefix.size(), prefix) == 0);
+      const size_t end = text.find('\n', prefix.size());
+      TEST_ASSERT_EQUAL_UINT(20U, end - prefix.size());
+      text.replace(prefix.size(), 20, "<built-at>");
+    } else if (std::strcmp(item.input, "setbuild") == 0) {
+      RV3032::DateTime build{};
+      TEST_ASSERT_TRUE(RV3032::RV3032::parseBuildTime(build).ok());
+      char timestamp[48];
+      std::snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02d %02d:%02d:%02d (weekday=%d)",
+                    build.year, build.month, build.day, build.hour, build.minute,
+                    build.second, build.weekday);
+      const size_t start = text.find(timestamp);
+      TEST_ASSERT_TRUE(start != std::string::npos);
+      text.replace(start, std::strlen(timestamp), "<calendar-built-at>");
+    }
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(item.output, text.c_str(), item.input);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(item.callbacks, fake.callbackCount, item.input);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(item.scanProbes, Wire.physicalAttemptCalls, item.input);
+  }
 }
 
 void test_phase3_cli_invalid_mutating_commands_are_zero_io() {
@@ -10103,28 +10805,29 @@ void test_phase3_cli_invalid_mutating_commands_are_zero_io() {
 
   for (const char* command : invalidCommands) {
     const uint32_t callbacksBefore = fake.callbackCount;
-    process_command(String(command));
+    g_cli.dispatch(command);
     TEST_ASSERT_EQUAL_UINT32(callbacksBefore, fake.callbackCount);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::NONE),
-                            static_cast<uint8_t>(g_pendingOperation.surface));
+                            static_cast<uint8_t>(g_cli.pending().surface));
     TEST_ASSERT_FALSE(g_rtc.isJobBusy());
     TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
   }
 
   Serial.resetOutput();
-  process_command(String("reg 0x40 1 confirm"));
+  g_cli.dispatch("reg 0x40 1 confirm");
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
       Serial.output().find("User RAM writes do not use confirm"));
   TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
 
-  String confirmation[2];
-  TEST_ASSERT_TRUE(parseExactTokens(
-      String("ensure\t  CONFIRM-PRIMARY-CELL"), confirmation, 2));
-  TEST_ASSERT_TRUE(confirmation[0] == "ensure");
-  TEST_ASSERT_TRUE(confirmation[1] == "CONFIRM-PRIMARY-CELL");
-  process_command(String("verbose\t 1"));
-  TEST_ASSERT_TRUE(g_verbose);
+  char arguments[] = "ensure\t  CONFIRM-PRIMARY-CELL";
+  const char* confirmation[2];
+  TEST_ASSERT_TRUE(cmd::splitTokens(arguments, arguments + sizeof(arguments) - 1,
+                                    confirmation, 2) == 2);
+  TEST_ASSERT_TRUE(std::strcmp(confirmation[0], "ensure") == 0);
+  TEST_ASSERT_TRUE(std::strcmp(confirmation[1], "CONFIRM-PRIMARY-CELL") == 0);
+  g_cli.dispatch("verbose\t 1");
+  TEST_ASSERT_TRUE(g_cli.verbose());
   TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
 }
 
@@ -10132,7 +10835,7 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
   FakeRv3032 fake;
   beginCliHarness(fake, false);
 
-  process_command(String("ts tlow"));
+  g_cli.dispatch("ts tlow");
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos, Serial.output().find("timestamp: count=0"));
   TEST_ASSERT_NOT_EQUAL(
@@ -10140,10 +10843,10 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
   TEST_ASSERT_EQUAL(std::string::npos, Serial.output().find("Time: 2000-"));
 
   Serial.resetOutput();
-  process_command(String(
-      "ram_write 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"));
+  g_cli.dispatch(
+      "ram_write 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15");
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::ORDINARY_JOB),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
   TEST_ASSERT_NOT_EQUAL(std::string::npos, Serial.output().find("accepted"));
   TEST_ASSERT_EQUAL(std::string::npos,
                     Serial.output().find("terminal status"));
@@ -10156,8 +10859,8 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
 
   FakeRv3032 failing;
   beginCliHarness(failing, false);
-  process_command(String(
-      "ram_write 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"));
+  g_cli.dispatch(
+      "ram_write 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15");
   failing.failOrdinal = failing.callbackCount + 1U;
   driveCliPending(failing);
   TEST_ASSERT_NOT_EQUAL(
@@ -10168,9 +10871,9 @@ void test_phase3_cli_ram_and_timestamp_terminal_output() {
 void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
   FakeRv3032 toggle;
   beginCliHarness(toggle, false);
-  process_command(String("clkout 0"));
+  g_cli.dispatch("clkout 0");
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::ORDINARY_JOB),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
   driveCliPending(toggle);
   TEST_ASSERT_NOT_EQUAL(
       std::string::npos,
@@ -10181,14 +10884,14 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
 
   FakeRv3032 success;
   beginCliHarness(success, true);
-  process_command(String("clkout_freq 3"));
+  g_cli.dispatch("clkout_freq 3");
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::ORDINARY_JOB),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
 
   driveCliPending(success, PendingSurface::EEPROM, 100U);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::EEPROM),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
-  TEST_ASSERT_TRUE(g_pendingOperation.ordinaryStatus.ok());
+                          static_cast<uint8_t>(g_cli.pending().surface));
+  TEST_ASSERT_TRUE(g_cli.pending().ordinaryStatus.ok());
 
   Serial.inject("status\n");
   const uint32_t callbacksBeforeBlockedLoop = success.callbackCount;
@@ -10207,9 +10910,9 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
 
   FakeRv3032 persistentFailure;
   beginCliHarness(persistentFailure, true);
-  process_command(String("clkout_freq 3"));
+  g_cli.dispatch("clkout_freq 3");
   driveCliPending(persistentFailure, PendingSurface::EEPROM);
-  TEST_ASSERT_TRUE(g_pendingOperation.ordinaryStatus.ok());
+  TEST_ASSERT_TRUE(g_cli.pending().ordinaryStatus.ok());
   persistentFailure.failOrdinal = persistentFailure.callbackCount + 1U;
   driveCliPending(persistentFailure);
   TEST_ASSERT_NOT_EQUAL(
@@ -10224,15 +10927,15 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
     beginCliHarness(ordinaryFailure, true);
     stageCliEepromQueue(ordinaryFailure);
     Serial.resetOutput();
-    process_command(String("offset 2.0"));
+    g_cli.dispatch("offset 2.0");
     ordinaryFailure.failOrdinal = ordinaryFailure.callbackCount + 1U;
     driveCliPending(ordinaryFailure, PendingSurface::EEPROM);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(RV3032::Err::I2C_BUS),
                             static_cast<uint8_t>(
-                                g_pendingOperation.ordinaryStatus.code));
+                                g_cli.pending().ordinaryStatus.code));
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::EEPROM),
                             static_cast<uint8_t>(
-                                g_pendingOperation.surface));
+                                g_cli.pending().surface));
     if (failPersistence) {
       ordinaryFailure.failOrdinal = ordinaryFailure.callbackCount + 1U;
     }
@@ -10250,7 +10953,7 @@ void test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status() {
 
 void test_phase3_cli_persistent_helper_deadline_does_not_orphan() {
   g_rtc.end();
-  g_pendingOperation = PendingOperation{};
+  g_cli.reset();
   Serial.resetInput();
   Serial.resetOutput();
   Wire.reset();
@@ -10269,12 +10972,12 @@ void test_phase3_cli_persistent_helper_deadline_does_not_orphan() {
   uint8_t invalidValue = 0;
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
-      static_cast<uint8_t>(read_user_eeprom_chunk(
+      static_cast<uint8_t>(g_cli.readUserEepromChunk(
           0, RV3032::USER_EEPROM_JOB_MAX_BYTES + 1U,
           &invalidValue).code));
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(RV3032::Err::INVALID_PARAM),
-      static_cast<uint8_t>(read_user_eeprom_chunk(0, 1, nullptr).code));
+      static_cast<uint8_t>(g_cli.readUserEepromChunk(0, 1, nullptr).code));
   TEST_ASSERT_EQUAL_UINT32(callbacksBeforeInvalidBounds,
                            Wire.beginTransmissionCalls);
 
@@ -10284,7 +10987,7 @@ void test_phase3_cli_persistent_helper_deadline_does_not_orphan() {
   // cannot leave cooperative work behind.
   Wire.requestDurationMs = 1001U;
   uint8_t value = 0xA5;
-  const RV3032::Status status = read_user_eeprom_chunk(0, 1, &value);
+  const RV3032::Status status = g_cli.readUserEepromChunk(0, 1, &value);
   TEST_ASSERT_FALSE(status.inProgress());
   TEST_ASSERT_FALSE(status.ok());
   TEST_ASSERT_FALSE(g_rtc.isJobBusy());
@@ -10701,7 +11404,8 @@ void test_phase3_wire_short_stage_release_and_initialization() {
   scannerWire.queueEndResult(5);
   scannerWire.queueEndResult(2);
   Serial.resetOutput();
-  i2c_scanner::scan(scannerWire, 5);
+  rv3032cli::Engine scanner(g_rtc, makeHooks(scannerWire));
+  scanner.scan(5);
   TEST_ASSERT_EQUAL_UINT32(112, scannerWire.beginTransmissionCalls);
   TEST_ASSERT_EQUAL_UINT32(112, scannerWire.endTransmissionCalls);
   TEST_ASSERT_EQUAL_UINT32(112, scannerWire.physicalAttemptCalls);
@@ -10715,74 +11419,74 @@ void test_phase3_wire_short_stage_release_and_initialization() {
 
 void test_phase3_strict_cli_numeric_tokens_preserve_outputs() {
   TEST_ASSERT_EQUAL_STRING(
-      "unknown", clkout_frequency_name(
+      "unknown", rv3032cli::clkoutFrequencyName(
                      static_cast<RV3032::ClkoutFrequency>(0xFF)));
 
   uint8_t u8 = 77;
-  TEST_ASSERT_TRUE(cmd::parseU8Token(String("255"), u8));
+  TEST_ASSERT_TRUE(cmd::parseU8Token("255", u8));
   TEST_ASSERT_EQUAL_UINT8(255, u8);
   const char* invalidU8[] = {"", "256", "-1", "+1", "1x", " 1", "01 ",
                              "999999999999999999999999"};
   for (const char* token : invalidU8) {
     u8 = 77;
-    TEST_ASSERT_FALSE(cmd::parseU8Token(String(token), u8));
+    TEST_ASSERT_FALSE(cmd::parseU8Token(token, u8));
     TEST_ASSERT_EQUAL_UINT8(77, u8);
   }
 
   uint16_t u16 = 33;
-  TEST_ASSERT_TRUE(cmd::parseU16Token(String("65535"), u16));
+  TEST_ASSERT_TRUE(cmd::parseU16Token("65535", u16));
   TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, u16);
-  TEST_ASSERT_FALSE(cmd::parseU16Token(String("65536"), u16));
+  TEST_ASSERT_FALSE(cmd::parseU16Token("65536", u16));
   TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, u16);
   u16 = 33;
-  TEST_ASSERT_FALSE(cmd::parseU16Token(String("+1"), u16));
+  TEST_ASSERT_FALSE(cmd::parseU16Token("+1", u16));
   TEST_ASSERT_EQUAL_UINT16(33, u16);
 
   uint32_t u32 = 99;
-  TEST_ASSERT_TRUE(cmd::parseU32Token(String("4294967295"), u32));
+  TEST_ASSERT_TRUE(cmd::parseU32Token("4294967295", u32));
   TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, u32);
   u32 = 99;
-  TEST_ASSERT_FALSE(cmd::parseU32Token(String("4294967296"), u32));
+  TEST_ASSERT_FALSE(cmd::parseU32Token("4294967296", u32));
   TEST_ASSERT_EQUAL_UINT32(99, u32);
-  TEST_ASSERT_FALSE(cmd::parseU32Token(String("+1"), u32));
+  TEST_ASSERT_FALSE(cmd::parseU32Token("+1", u32));
   TEST_ASSERT_EQUAL_UINT32(99, u32);
 
   float value = 12.5f;
-  TEST_ASSERT_TRUE(cmd::parseFloatToken(String("-1.25"), value));
+  TEST_ASSERT_TRUE(cmd::parseFloatToken("-1.25", value));
   TEST_ASSERT_FLOAT_WITHIN(0.0001f, -1.25f, value);
   const char* invalidFloat[] = {"", "nan", "NaN", "inf", "-inf", "1.0x",
                                 "1e9999", "3.5e38", "1e-50", "0x1p0",
                                 "+0X1p1", "-0x1p0"};
   for (const char* token : invalidFloat) {
     value = 12.5f;
-    TEST_ASSERT_FALSE(cmd::parseFloatToken(String(token), value));
+    TEST_ASSERT_FALSE(cmd::parseFloatToken(token, value));
     TEST_ASSERT_FLOAT_WITHIN(0.0001f, 12.5f, value);
   }
 
   bool boolean = true;
-  TEST_ASSERT_TRUE(cmd::parseBool01Token(String("0"), boolean));
+  TEST_ASSERT_TRUE(cmd::parseBool01Token("0", boolean));
   TEST_ASSERT_FALSE(boolean);
-  TEST_ASSERT_TRUE(cmd::parseBool01Token(String("1"), boolean));
+  TEST_ASSERT_TRUE(cmd::parseBool01Token("1", boolean));
   TEST_ASSERT_TRUE(boolean);
   for (const char* token : {"2", "-1", "+1", "true", "01x"}) {
     boolean = true;
-    TEST_ASSERT_FALSE(cmd::parseBool01Token(String(token), boolean));
+    TEST_ASSERT_FALSE(cmd::parseBool01Token(token, boolean));
     TEST_ASSERT_TRUE(boolean);
   }
 
   uint8_t reg = 0xAA;
-  TEST_ASSERT_TRUE(cmd::parseRegisterToken(String("10"), reg));
+  TEST_ASSERT_TRUE(cmd::parseRegisterToken("10", reg));
   TEST_ASSERT_EQUAL_HEX8(0x0A, reg);
-  TEST_ASSERT_TRUE(cmd::parseRegisterToken(String("010"), reg));
+  TEST_ASSERT_TRUE(cmd::parseRegisterToken("010", reg));
   TEST_ASSERT_EQUAL_HEX8(0x0A, reg);
-  TEST_ASSERT_TRUE(cmd::parseRegisterToken(String("0x10"), reg));
+  TEST_ASSERT_TRUE(cmd::parseRegisterToken("0x10", reg));
   TEST_ASSERT_EQUAL_HEX8(0x10, reg);
-  TEST_ASSERT_TRUE(cmd::parseRegisterToken(String("0Xff"), reg));
+  TEST_ASSERT_TRUE(cmd::parseRegisterToken("0Xff", reg));
   TEST_ASSERT_EQUAL_HEX8(0xFF, reg);
   reg = 0xAA;
   for (const char* token : {"0x", "0x100", "-1", "+5", "+0x10",
                             "09junk"}) {
-    TEST_ASSERT_FALSE(cmd::parseRegisterToken(String(token), reg));
+    TEST_ASSERT_FALSE(cmd::parseRegisterToken(token, reg));
     TEST_ASSERT_EQUAL_HEX8(0xAA, reg);
   }
 }
@@ -10792,20 +11496,20 @@ void test_cli_pending_warning_and_serial_discard_preserve_owner() {
   beginCliHarness(fake, false);
   arduinoStubMillis = UINT32_MAX - 10000U;
   const uint32_t startMs = arduinoStubMillis;
-  TEST_ASSERT_TRUE(operationAccepted("timer configuration",
+  TEST_ASSERT_TRUE(g_cli.operationAccepted("timer configuration",
       g_rtc.setTimer(50, RV3032::TimerFrequency::Hz1, true)));
-  TEST_ASSERT_EQUAL_UINT32(startMs, g_pendingOperation.startedMs);
+  TEST_ASSERT_EQUAL_UINT32(startMs, g_cli.pending().startedMs);
   Serial.inject("verbose 1\nclear_porf");
-  arduinoStubMillis = startMs + PENDING_WARNING_MS - 1U;
+  arduinoStubMillis = startMs + rv3032cli::PENDING_WARNING_MS - 1U;
   loop();
   TEST_ASSERT_EQUAL_INT(0, Serial.available());
-  TEST_ASSERT_FALSE(g_verbose);
+  TEST_ASSERT_FALSE(g_cli.verbose());
   TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
   TEST_ASSERT_EQUAL_UINT32(1, fake.callbackCount);
   TEST_ASSERT_TRUE(Serial.output().find("exceeded 15 s") == std::string::npos);
   loop();
   TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
-  TEST_ASSERT_TRUE(g_pendingOperation.overdueReported);
+  TEST_ASSERT_TRUE(g_cli.pending().overdueReported);
   const std::string warning = Serial.output();
   TEST_ASSERT_TRUE(warning.find("Pending ordinary job operation 'timer configuration'")
                    != std::string::npos);
@@ -10816,9 +11520,33 @@ void test_cli_pending_warning_and_serial_discard_preserve_owner() {
   const uint32_t before = fake.callbackCount;
   Serial.inject("\nverbose 1\n");
   loop();
-  TEST_ASSERT_TRUE(g_verbose);
+  TEST_ASSERT_TRUE(g_cli.verbose());
   TEST_ASSERT_EQUAL_UINT32(before, fake.callbackCount);
-  TEST_ASSERT_FALSE(g_pendingOperation.overdueReported);
+  TEST_ASSERT_FALSE(g_cli.pending().overdueReported);
+}
+
+void test_cli_embedded_nul_and_backspace_match_serial_transcripts() {
+  using namespace std::string_literals;
+  struct Case {
+    std::string bytes;
+    const char* output;
+    uint32_t callbacks;
+  };
+  const Case cases[] = {
+    {"set 2026 01 01 00 00 00\0suffix\n"s,
+     "\033[36m[I]\033[0m Calendar set completed\n2026-01-01 00:00:00 (weekday=4)\n> ", 1},
+    {"time \0\n"s, "\033[31m[E]\033[0m Usage: time\n> ", 0},
+    {"verbose 1\0\b\n"s, "\033[36m[I]\033[0m Verbose mode: \033[32mON\033[0m\n> ", 0},
+  };
+  for (const auto& example : cases) {
+    FakeRv3032 fake;
+    beginCliHarness(fake, true);
+    Serial.inject(example.bytes);
+    loop();
+    driveCliPending(fake);
+    TEST_ASSERT_EQUAL_STRING(example.output, Serial.output().c_str());
+    TEST_ASSERT_EQUAL_UINT32(example.callbacks, fake.callbackCount);
+  }
 }
 
 void test_phase3_cli_line_reader_discards_overflow_through_terminator() {
@@ -10835,16 +11563,16 @@ void test_phase3_cli_line_reader_discards_overflow_through_terminator() {
   // "clear_porf". The sole reader must instead discard the entire overlength
   // line through its terminator, then execute only the following valid line.
   std::string input("clear_porf");
-  input.append(cli_shell::MAX_LINE_LENGTH + 5U - input.length(), ' ');
+  input.append(rv3032cli::MAX_LINE_LENGTH + 5U - input.length(), ' ');
   input += "\n\tverbose  1\t\n";
   Serial.inject(input);
 
   loop();
-  TEST_ASSERT_TRUE(g_verbose);
+  TEST_ASSERT_TRUE(g_cli.verbose());
   TEST_ASSERT_EQUAL_INT(0, Serial.available());
   TEST_ASSERT_EQUAL_UINT32(0, fake.callbackCount);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::NONE),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
   TEST_ASSERT_FALSE(g_rtc.isJobBusy());
   TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
 }
@@ -10867,7 +11595,7 @@ void test_cli_terminal_callback_input_is_discarded_on_both_surfaces() {
   };
   for (bool genericEeprom : {false, true}) {
     for (size_t oldBacklog : {size_t{0},
-                             2U * cli_shell::MAX_INPUT_BYTES_PER_POLL}) {
+                             2U * rv3032cli::MAX_INPUT_BYTES_PER_POLL}) {
       InputInjectingFake fake;
       beginCliHarness(fake, genericEeprom);
       RV3032::Config config = fake.config(genericEeprom);
@@ -10875,19 +11603,19 @@ void test_cli_terminal_callback_input_is_discarded_on_both_surfaces() {
       g_rtc.end();
       TEST_ASSERT_TRUE(g_rtc.begin(config).ok());
       if (genericEeprom) {
-        TEST_ASSERT_TRUE(operationAccepted(
+        TEST_ASSERT_TRUE(g_cli.operationAccepted(
             "frequency offset", g_rtc.setOffsetPpm(1.0f)));
         driveCliPending(fake, PendingSurface::EEPROM);
         // The first generic read failure is terminal with no cleanup needed.
         fake.failOrdinal = fake.callbackCount + 1U;
       } else {
-        TEST_ASSERT_TRUE(operationAccepted("timer configuration",
+        TEST_ASSERT_TRUE(g_cli.operationAccepted("timer configuration",
             g_rtc.setTimer(50, RV3032::TimerFrequency::Hz1, true)));
-        for (uint8_t i = 0; i < 5; ++i) pollPendingOperation(fake.nowMs);
+        for (uint8_t i = 0; i < 5; ++i) g_cli.pollPendingOperation(fake.nowMs);
       }
       TEST_ASSERT_EQUAL_INT(static_cast<int>(genericEeprom
           ? PendingSurface::EEPROM : PendingSurface::ORDINARY_JOB),
-          static_cast<int>(g_pendingOperation.surface));
+          static_cast<int>(g_cli.pending().surface));
       fake.callbackInput = "verbose 1\nclear_porf";
       Serial.inject(std::string(oldBacklog, '\n'));
       const size_t injectedLength = std::strlen(fake.callbackInput);
@@ -10895,28 +11623,28 @@ void test_cli_terminal_callback_input_is_discarded_on_both_surfaces() {
       loop();
       TEST_ASSERT_EQUAL_UINT32(before + 1U, fake.callbackCount);
       TEST_ASSERT_EQUAL_INT(static_cast<int>(PendingSurface::NONE),
-                            static_cast<int>(g_pendingOperation.surface));
+                            static_cast<int>(g_cli.pending().surface));
       TEST_ASSERT_FALSE(g_rtc.isJobBusy());
       TEST_ASSERT_FALSE(g_rtc.isEepromBusy());
       // Completion only marks input: the loop still consumes at most 256 bytes.
-      const size_t oldRemaining = oldBacklog > cli_shell::MAX_INPUT_BYTES_PER_POLL
-          ? oldBacklog - cli_shell::MAX_INPUT_BYTES_PER_POLL : 0U;
+      const size_t oldRemaining = oldBacklog > rv3032cli::MAX_INPUT_BYTES_PER_POLL
+          ? oldBacklog - rv3032cli::MAX_INPUT_BYTES_PER_POLL : 0U;
       TEST_ASSERT_EQUAL_UINT32(oldRemaining + injectedLength, Serial.available());
       for (uint8_t drain = 0; Serial.available() != 0 && drain < 4U; ++drain) {
         const int bytesBefore = Serial.available();
         loop();
-        TEST_ASSERT_LESS_OR_EQUAL_UINT32(cli_shell::MAX_INPUT_BYTES_PER_POLL,
+        TEST_ASSERT_LESS_OR_EQUAL_UINT32(rv3032cli::MAX_INPUT_BYTES_PER_POLL,
             static_cast<uint32_t>(bytesBefore - Serial.available()));
-        TEST_ASSERT_FALSE(g_verbose);
+        TEST_ASSERT_FALSE(g_cli.verbose());
         TEST_ASSERT_EQUAL_UINT32(before + 1U, fake.callbackCount);
         TEST_ASSERT_EQUAL_INT(static_cast<int>(PendingSurface::NONE),
-                              static_cast<int>(g_pendingOperation.surface));
+                              static_cast<int>(g_cli.pending().surface));
       }
       TEST_ASSERT_EQUAL_INT(0, Serial.available());
       // Terminate the discarded partial line, then accept a fresh complete line.
       Serial.inject("\nverbose 1\n");
       loop();
-      TEST_ASSERT_TRUE(g_verbose);
+      TEST_ASSERT_TRUE(g_cli.verbose());
       TEST_ASSERT_EQUAL_INT(0, Serial.available());
       TEST_ASSERT_EQUAL_UINT32(before + 1U, fake.callbackCount);
     }
@@ -10926,11 +11654,11 @@ void test_cli_terminal_callback_input_is_discarded_on_both_surfaces() {
 void test_cli_busy_backlog_is_discarded_after_terminal_poll() {
   FakeRv3032 fake;
   beginCliHarness(fake, false);
-  TEST_ASSERT_TRUE(operationAccepted("timer configuration",
+  TEST_ASSERT_TRUE(g_cli.operationAccepted("timer configuration",
       g_rtc.setTimer(50, RV3032::TimerFrequency::Hz1, true)));
-  for (uint8_t i = 0; i < 5; ++i) pollPendingOperation(fake.nowMs);
+  for (uint8_t i = 0; i < 5; ++i) g_cli.pollPendingOperation(fake.nowMs);
   TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
-  Serial.inject(std::string(cli_shell::MAX_INPUT_BYTES_PER_POLL, '\n') +
+  Serial.inject(std::string(rv3032cli::MAX_INPUT_BYTES_PER_POLL, '\n') +
                 "verbose 1\nclear_porf");
   loop();
   TEST_ASSERT_FALSE(g_rtc.isOrdinaryJobBusy());
@@ -10940,11 +11668,11 @@ void test_cli_busy_backlog_is_discarded_after_terminal_poll() {
   // while both the old complete command and partial tail remain discarded.
   Serial.inject("\nverbose 0\n");
   loop();
-  TEST_ASSERT_FALSE(g_verbose);
+  TEST_ASSERT_FALSE(g_cli.verbose());
   TEST_ASSERT_EQUAL_INT(0, Serial.available());
   TEST_ASSERT_EQUAL_UINT32(completedCallbacks, fake.callbackCount);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PendingSurface::NONE),
-                          static_cast<uint8_t>(g_pendingOperation.surface));
+                          static_cast<uint8_t>(g_cli.pending().surface));
 }
 
 }  // namespace
@@ -11095,6 +11823,7 @@ int main(int, char**) {
   RUN_TEST(test_phase2_typed_persistence_mixed_failure_and_getter_matrix);
   RUN_TEST(test_phase2_generic_batch_evidence_precedence_and_reset);
   RUN_TEST(test_phase4_late_cleanup_write_requires_semantic_cleanup_failure);
+  RUN_TEST(test_cli_command_transcripts_and_callback_counts);
   RUN_TEST(test_phase3_cli_invalid_mutating_commands_are_zero_io);
   RUN_TEST(test_phase3_cli_ram_and_timestamp_terminal_output);
   RUN_TEST(test_phase3_cli_owner_handoff_is_single_callback_and_preserves_status);
@@ -11104,6 +11833,7 @@ int main(int, char**) {
   RUN_TEST(test_phase3_wire_short_stage_release_and_initialization);
   RUN_TEST(test_wire_bus_clear_releases_lines_and_bounds_stuck_bus);
   RUN_TEST(test_phase3_strict_cli_numeric_tokens_preserve_outputs);
+  RUN_TEST(test_cli_embedded_nul_and_backspace_match_serial_transcripts);
   RUN_TEST(test_phase3_cli_line_reader_discards_overflow_through_terminator);
   RUN_TEST(test_cli_pending_warning_and_serial_discard_preserve_owner);
   RUN_TEST(test_cli_busy_backlog_is_discarded_after_terminal_poll);

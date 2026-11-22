@@ -32,10 +32,10 @@ REQUIRED_PACKAGE_FILES = (
     "include/RV3032/Config.h", "include/RV3032/Status.h",
     "include/RV3032/CommandTable.h", "src/RV3032.cpp",
     "examples/01_basic_bringup_cli/main.cpp",
-    "examples/common/I2cTransport.h", "examples/common/CliShell.h",
+    "examples/common/I2cTransport.h", "examples/common/Rv3032Cli.h",
     "examples/common/CommandHandler.h", "examples/common/BoardConfig.h",
-    "examples/common/CliStyle.h", "examples/common/I2cScanner.h",
-    "examples/common/Log.h", "docs/README.md", "docs/ARCHITECTURE.md",
+    "examples/common/Rv3032Cli.cpp", "examples/common/I2cScanner.h",
+    "docs/README.md", "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md", "docs/IDF_PORT.md",
     "docs/VERIFICATION.md",
 )

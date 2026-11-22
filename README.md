@@ -564,7 +564,10 @@ the supplied CLI never calls this startup helper from a runtime command.
 
 ## CLI ownership
 
-The bring-up CLI uses one overflow-discarding line reader and strict numeric
+The example engine in `examples/common/Rv3032Cli.cpp` owns command dispatch,
+help, boot messages and pending work. The Arduino shell supplies console,
+clock and scanner callbacks and owns the driver and bus. The engine uses one
+overflow-discarding line reader and strict numeric
 tokens with exact argument counts. Invalid input starts no RTC/I2C work. One
 fixed `PendingOperation` owns accepted asynchronous work, advances at most one
 callback per loop iteration, and retains the ordinary terminal status through
@@ -595,12 +598,10 @@ an old command cannot execute as a new command after the completion prompt.
 - `tools/` — repository check scripts and the device-free HIL runner
 - `scripts/` — version generator and the PlatformIO wrapper
 
-The maintained example glue is intentionally small: `BoardConfig.h`,
-`CliShell.h`, `CliStyle.h`, `CommandHandler.h`, `I2cScanner.h`,
-`I2cTransport.h`, and `Log.h`. The CLI composes those owners directly; there is
-no parallel transport, bus-diagnostic, or health facade. The scanner applies a
-temporary bounded Wire timeout and restores the application's previous value;
-it does not perform bus recovery.
+`Rv3032Cli.h` and `Rv3032Cli.cpp` implement the command engine.
+`CommandHandler.h` supplies its strict token parsers. The Arduino shell
+uses `BoardConfig.h`, `I2cTransport.h` and `I2cScanner.h`. Each scan probe
+applies a bounded Wire timeout and restores the application's previous value.
 
 ## Verification
 
