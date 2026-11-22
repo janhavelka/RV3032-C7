@@ -51,7 +51,6 @@ docs/reports/
 # tools/check_package.py and non-PlatformIO consumers all require it to be
 # present without running scripts/generate_version.py.
 docs/doxygen/
-idf_component.yml
 idf_component.yml.orig
 
 # ESP-IDF build output that idf.py writes next to any example or project.

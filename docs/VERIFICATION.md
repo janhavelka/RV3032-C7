@@ -27,11 +27,20 @@ python -S tools/test_hil_health_snapshot.py
 python -S tools/hil_cli_runner.py --dry-run
 python tools/check_package.py source
 doxygen Doxyfile
+C:\esp\idf.cmd 6.0.1 --version
+C:\esp\idf.cmd 6.0.1 -C examples\esp_idf\basic -B C:\esp\build\rv3032-esp32s3-6.0.1 -D SDKCONFIG=C:\esp\build\rv3032-esp32s3-6.0.1.sdkconfig set-target esp32s3 build
+C:\esp\idf.cmd 6.0.1 -C examples\esp_idf\basic -B C:\esp\build\rv3032-esp32s2-6.0.1 -D SDKCONFIG=C:\esp\build\rv3032-esp32s2-6.0.1.sdkconfig set-target esp32s2 build
+# Remove generated dependencies.lock and managed_components/ from the example before packing.
 .\scripts\pio.cmd pkg pack -o RV3032-C7.tar.gz .
 python tools/check_package.py package RV3032-C7.tar.gz
 ```
 
-These commands match the CI gate and perform no flashing or physical HIL.
+CI runs the Arduino, host, static and package checks. Run the native ESP-IDF
+builds locally. To verify the exported example, unpack the validated archive
+in a fresh directory, point `-C` at that copy's example and repeat both IDF
+builds with fresh external build and sdkconfig paths. A linked image proves
+compilation and linking for that target. Physical HIL and console operation
+require a board.
 Open `docs/doxygen/html/index.html` to inspect the generated API reference.
 The native suite covers callback budgets, deadlines and wraparound, ambiguous
 writes, cleanup, status/result retention, register masks, and example transport
@@ -40,9 +49,14 @@ framing, payload, and health validation without opening a serial port.
 
 The package includes maintained guides and public headers. Vendor PDFs remain
 in the repository for offline reference. Generated docs, reports, prompts,
-tests, and build products are excluded. PIOArduino can create temporary root
-`idf_component.yml` files during framework repair; those files are ignored and
-rejected by package validation because this is an Arduino library.
+tests, and build products are excluded. Both source and archive checks require
+the quoted version, supported targets and ESP-IDF constraint in the committed
+root `idf_component.yml`. After each PlatformIO build, check
+`git status --porcelain --ignored` for a changed manifest or its generated
+`.orig` backup. If pioarduino rewrites the manifest, stop and restore the
+committed file with `git restore -- idf_component.yml`. Remove the generated
+backup before packing. A missing Arduino framework manifest can trigger this
+fallback because the project uses `src_dir = .`.
 
 ## Hardware test surfaces
 

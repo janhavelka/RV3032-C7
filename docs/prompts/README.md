@@ -1,23 +1,23 @@
 # RV3032-C7 native ESP-IDF promptset
 
 Prepared 2026-11-16 on `main` after `e0d3f1f573bc62efddf84072edf7296a4e02029c`.
-Line citations refer to the tree that adds this folder. **Status: NOT
-STARTED.** These prompts are plans, not evidence. Writing them changed no
-library, example, package or workflow. The only tooling change is a
+Line citations refer to the tree that adds this folder. **Status: IN
+PROGRESS.** The table below tracks execution. Writing the prompts changed no
+library, example, package or workflow. Their preparation added one
 permanent, tested source-check exception that admits this folder
 (`tools/check_package.py:70-82`); packages still reject it. The SHA is an
 evidence anchor, not an instruction to reset the tree. If `main` has moved,
 re-read the cited sources and follow the source where it differs.
 
-## Why the work is needed
+## Starting point on 2026-11-16
 
 On 2026-11-16 the owner elected pure ESP-IDF support with a native example,
 built like the owner's other libraries. The core is already framework-neutral
 (`include/RV3032/Config.h:8-11,35-82`; `docs/IDF_PORT.md:7-23`). The repository
-still ships no ESP-IDF component, adapter, native example or IDF CI
-(`README.md:514`, `docs/IDF_PORT.md:3-5`). It ignores and rejects a root
+then shipped no ESP-IDF component, adapter, native example or IDF CI
+(`README.md:514`, `docs/IDF_PORT.md:3-5`). It ignored and rejected a root
 `idf_component.yml` (`.gitignore:54-55`, `library.json:65-66`,
-`tools/check_package.py:44,170`, `docs/VERIFICATION.md:43-45`). Its only CLI is
+`tools/check_package.py:44,170`, `docs/VERIFICATION.md:43-45`). Its only CLI was
 an Arduino sketch with no framework-neutral engine
 (`examples/01_basic_bringup_cli/main.cpp:16-31,2190-2369`). The unmerged branches
 `origin/feature/rv3032-idf-port` (`4b97264`) and
@@ -137,7 +137,7 @@ prompt that cannot meet its acceptance criteria and report why".
 
 | # | Prompt | Requires | Delivers | Status |
 |---|---|---|---|---|
-| 01 | [Component, manifest and I2C adapter](01_COMPONENT_MANIFEST_AND_ADAPTER.md) | none | Scope election, root component, committed manifest with a content check, `i2c_master` adapter with host tests, S2/S3 bring-up builds | NOT STARTED |
+| 01 | [Component, manifest and I2C adapter](01_COMPONENT_MANIFEST_AND_ADAPTER.md) | none | Scope election, root component, committed manifest with a content check, `i2c_master` adapter with host tests, S2/S3 bring-up builds | DONE |
 | 02 | [Shared CLI engine and native example](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md) | 01 DONE | Framework-neutral CLI engine with unchanged Arduino behavior, native shell with full parity, identity, sdkconfig, contract checker | NOT STARTED |
 | 03 | [CI, package and closeout](03_CI_PACKAGE_AND_CLOSEOUT.md) | 02 DONE | IDF CI jobs (in-tree and packaged consumer), package and consumer gates, `espidf` framework, final docs, marking this set executed, the single remote-CI checkpoint | NOT STARTED |
 

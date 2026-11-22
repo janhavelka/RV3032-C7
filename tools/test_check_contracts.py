@@ -1,8 +1,10 @@
 """Mutation probes for the maintained source/ABI contract checks."""
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import re
+import tarfile
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -177,6 +179,17 @@ class AbiChecks(unittest.TestCase):
 
 
 class PackageChecks(unittest.TestCase):
+    def make_fixture(self, root):
+        for rel in set(package.REQUIRED_SOURCE_FILES + package.REQUIRED_PACKAGE_FILES):
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("required file fixture\n", encoding="utf-8")
+        for rel in ("Doxyfile", "library.json", "idf_component.yml", "tools/hil_cli_runner.py",
+                    "include/RV3032/RV3032.h", "include/RV3032/Version.h"):
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((package.ROOT / rel).read_bytes())
+
     def test_completed_reports_cannot_return_to_source_or_package(self):
         artifacts = (
             "docs/CODE_AUDIT.md", "docs/CODE_AUDIT_RESOLUTION.md",
@@ -186,15 +199,7 @@ class PackageChecks(unittest.TestCase):
         )
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            for rel in package.REQUIRED_SOURCE_FILES:
-                target = root / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("required source fixture\n", encoding="utf-8")
-            for rel in ("Doxyfile", "library.json", "tools/hil_cli_runner.py",
-                        "include/RV3032/RV3032.h"):
-                target = root / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((package.ROOT / rel).read_bytes())
+            self.make_fixture(root)
             with patch.object(package, "ROOT", root):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(0, package.source_check())
@@ -221,15 +226,7 @@ class PackageChecks(unittest.TestCase):
         # Permanent: executed promptsets stay as historical requirements.
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            for rel in package.REQUIRED_SOURCE_FILES:
-                target = root / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("required source fixture\n", encoding="utf-8")
-            for rel in ("Doxyfile", "library.json", "tools/hil_cli_runner.py",
-                        "include/RV3032/RV3032.h"):
-                target = root / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((package.ROOT / rel).read_bytes())
+            self.make_fixture(root)
             prompt = root / "docs/prompts/01_step.md"
             prompt.parent.mkdir(parents=True)
             prompt.write_text("planned step\n", encoding="utf-8")
@@ -254,6 +251,52 @@ class PackageChecks(unittest.TestCase):
                         target.unlink()
         for rel in ("docs/prompts/README.md", "docs/prompts/01_step.md"):
             self.assertTrue(package.forbidden_package_path(rel))
+
+    def test_idf_manifest_in_source_and_archive(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            self.make_fixture(root)
+            # Use a different version to catch accidental comparisons against
+            # the checkout instead of the source or archive under test.
+            library = root / "library.json"
+            metadata = json.loads(library.read_text(encoding="utf-8"))
+            old_version = metadata["version"]
+            metadata["version"] = "91.2.3"
+            library.write_text(json.dumps(metadata), encoding="utf-8")
+            header = root / "include/RV3032/Version.h"
+            header.write_text(header.read_text(encoding="utf-8").replace(old_version, "91.2.3"),
+                              encoding="utf-8")
+            manifest = root / "idf_component.yml"
+            valid = manifest.read_text(encoding="utf-8").replace(
+                f'version: "{old_version}"', 'version: "91.2.3"')
+            for name, contents, error in (
+                ("valid", valid, ""),
+                ("missing file", None, "idf_component.yml"),
+                ("missing target", valid.replace('  - "esp32s2"\n', ''), "targets"),
+                ("edited dependency", valid.replace('">=6.0.1"', '">=5.0"'), "dependencies"),
+                ("unquoted re-dump", valid.replace('"', ''), "version"),
+                ("version mismatch", valid.replace('version: "91.2.3"', 'version: "1.0.0"'), "version"),
+                ("backup", valid, "git restore -- idf_component.yml"),
+            ):
+                with self.subTest(name=name):
+                    if contents is None:
+                        manifest.unlink()
+                    else:
+                        manifest.write_text(contents, encoding="utf-8")
+                    if name == "backup":
+                        (root / "idf_component.yml.orig").write_text(valid, encoding="utf-8")
+                    archive = Path(directory) / "fixture.tar"
+                    with tarfile.open(archive, "w") as tar:
+                        for rel in (*package.REQUIRED_PACKAGE_FILES, "idf_component.yml.orig"):
+                            if (root / rel).is_file():
+                                tar.add(root / rel, arcname=rel)
+                    with patch.object(package, "ROOT", root), redirect_stdout(io.StringIO()) as source:
+                        self.assertEqual(int(bool(error)), package.source_check())
+                    with redirect_stdout(io.StringIO()) as packed:
+                        self.assertEqual(int(bool(error)), package.package_check(archive))
+                    if error:
+                        self.assertIn(error, source.getvalue())
+                        self.assertIn(error, packed.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 # 01: ESP-IDF component, committed manifest and example-owned I2C adapter
 
-**Status: NOT STARTED.** Prerequisite: none. Next:
-[02](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md). Anchor: `e0d3f1f`; record the
-fetched HEAD at execution.
+**Status: DONE.** Prerequisite: none. Next:
+[02](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md). Planning anchor: `e0d3f1f`.
+Fetched execution base: `a1338bb13933c6ac08a721998492df52362705b3`.
 
 ## Outcome and scope
 

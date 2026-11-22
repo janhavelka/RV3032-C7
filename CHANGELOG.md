@@ -7,15 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native C++17 ESP-IDF component with a version-matched manifest declaring
+  ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. Local 6.0.1 builds linked the
+  example from both the checkout and the PlatformIO archive on each target.
+  A separate S3 application linked the packaged root component.
+- Native bring-up example with an application-owned, single-attempt
+  `i2c_master` adapter. Host tests exercise the adapter and driver together
+  against the RTC fake, including calendar access and primary-cell ensure.
+
 ### Changed
 
 - Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
-- Recorded the owner's 2026-11-16 election of native ESP-IDF support as an
-  unexecuted promptset in `docs/prompts/`. It plans an ESP-IDF 6.0.1 component,
-  an `i2c_master` adapter, a shared CLI engine and a native example. The
-  source check permanently admits top-level Markdown in that folder, and
-  packages still exclude it.
-  No library, example or package content has changed yet.
+- The root IDF manifest is tracked and validated by content in source and
+  packaged trees. Export excludes generated IDF output, pioarduino's
+  `.orig` backup and the repository-only promptset.
 
 ## [3.1.0] - 2026-09-12
 

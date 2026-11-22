@@ -36,12 +36,10 @@
 ## Role and Target
 You are a professional embedded software engineer building a production-grade RV3032-C7 RTC library.
 
-- Target: ESP32-S2 / ESP32-S3, Arduino framework, PlatformIO.
-- Planned scope change: on 2026-11-16 the owner elected native ESP-IDF
-  support with a native example. The promptset in `docs/prompts/` (start at
-  `docs/prompts/README.md`) adds it. Executing that set authorizes the AGENTS,
-  README, docs, checker, package and CI changes it lists. Until it is executed,
-  the target above is the shipped scope.
+- Targets are ESP32-S2 and ESP32-S3 with Arduino on PlatformIO and native
+  ESP-IDF. Build the native component and bring-up example with ESP-IDF 6.0.1.
+- Follow the owner-elected scope and checkpoint order in
+  `docs/prompts/README.md` for the shared CLI and ESP-IDF CI work.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.
 
@@ -67,11 +65,15 @@ include/RV3032/        - Public API headers only (Doxygen)
 src/                   - Implementation (.cpp)
 examples/
   01_basic_bringup_cli/
+  esp_idf/basic/       - Native bring-up app, fixed-name RV3032 component
+                         wrapper and application-owned I2C adapter
   common/              - Example-only helpers (BoardConfig.h, CliShell.h,
                          CliStyle.h, CommandHandler.h, I2cScanner.h,
                          I2cTransport.h, Log.h)
 test/
   test_native/         - Host unit/integration tests against the bounded fake
+  test_native_idf/     - Native adapter and driver integration tests
+  fake_idf/            - Host-only SDK declarations for the adapter suite
   test_hil/            - On-device harness (env esp32s3hil)
   test_hil_persistence/- On-device EEPROM power-cycle harness
   stubs/               - Arduino/Wire stubs for the native build
@@ -81,6 +83,8 @@ docs/                  - Architecture, device reference, IDF notes, vendor PDFs
 .github/workflows/     - CI
 platformio.ini
 library.json
+CMakeLists.txt         - Native component registration
+idf_component.yml      - Committed ESP-IDF component metadata
 Doxyfile
 README.md
 CHANGELOG.md

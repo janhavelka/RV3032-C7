@@ -1,8 +1,74 @@
-# RV3032-C7 ESP-IDF adapter notes
+# RV3032-C7 ESP-IDF integration
 
-Primary support is PlatformIO with Arduino. The core remains portable because
-all hardware access is injected; this repository does not ship a native
-ESP-IDF component or example.
+The repository root is a C++17 ESP-IDF component. Add it to a project's
+component directory to use the public headers under `RV3032/`. The manifest
+declares ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. The reference build uses
+6.0.1. The core needs only standard headers and the application's callbacks.
+
+## Native bring-up example
+
+Build `examples/esp_idf/basic` for either target using the commands in the
+[verification guide](VERIFICATION.md). Its local `components/RV3032` wrapper
+registers the same source and public headers under a fixed dependency name,
+including when the package is unpacked into an arbitrarily named directory.
+The defaults select USB Serial/JTAG on S3 and USB CDC on S2. Both request
+no secondary console. ESP-IDF 6.0.1 applies that choice on S3 and omits it
+from the generated S2 sdkconfig because S2 lacks the Serial/JTAG peripheral.
+[Console Kconfig](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_stdio/Kconfig#L20-L50)
+
+One task owns I2C port 0, SDA GPIO8 and SCL GPIO9 at 400 kHz. Fit external
+pull-ups sized for the bus. Internal pull-ups are insufficient at this speed.
+Startup releases the open-drain lines, clocks SCL nine times with a bounded
+stretch wait, generates STOP and checks both lines before installing the bus
+and the 7-bit device at 0x51. Teardown removes the device before the bus and
+retains any handle whose removal failed. The task binds the callbacks with
+generic EEPROM writes disabled, explicitly probes the Status register, then
+prints one calendar read per second.
+
+## ESP-IDF 6.0.1 transport behavior
+
+The example uses synchronous transfers with a zero transaction queue depth
+and no event callbacks. Each admitted write calls `i2c_master_transmit` once.
+Each admitted register read calls `i2c_master_transmit_receive` once.
+The adapter never retries, probes the address separately, or requests a bus
+reset inside a callback. This also satisfies the single-attempt rule during
+`ensurePrimaryCellConfiguration()`. The ordinary callback timeout is
+1..100 ms (default 50 ms), and the primary-cell timeout is 1..5 ms.
+
+| SDK transfer result | Callback status before the deadline |
+|---|---|
+| `ESP_OK` | `OK` |
+| `ESP_ERR_TIMEOUT` | `I2C_TIMEOUT` |
+| `ESP_ERR_INVALID_RESPONSE` or any other SDK error | `I2C_ERROR`, with the original `esp_err_t` in `detail` |
+
+- The API takes a signed millisecond timeout. Passing `-1` waits forever.
+  Internally the driver converts milliseconds to whole RTOS ticks. A positive
+  sub-tick interval can become zero. The adapter requires a 1000 Hz tick.
+  It reserves the exclusive deadline, skips dispatch with 1 ms or less left,
+  and always supplies a positive finite SDK timeout. [Transfer declarations](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/include/driver/i2c_master.h#L167-L215)
+  [Tick conversion](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L671-L679)
+- A stalled SDK call can consume its timeout more than once. The SDK waits
+  for the bus lock, then for each command batch and the completion event.
+  Lock expiry returns `ESP_ERR_TIMEOUT`. The adapter measures the whole call
+  with `esp_timer_get_time()` and returns `I2C_TIMEOUT` at or after its
+  deadline, even for SDK success. It cannot cancel the transfer, undo a write,
+  or guarantee the calling task returns within budget on a stalled bus.
+  [Bus lock](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L999-L1007)
+  [Command and completion waits](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L534-L602)
+- Synchronous transfer completion maps every non-DONE state, including NACK
+  and controller timeout, to `ESP_ERR_INVALID_RESPONSE`. There is no byte
+  count or phase to distinguish address from data NACK. The SDK address-only
+  probe has a separate `ESP_ERR_NOT_FOUND` mapping. The library's `probe()`
+  uses the ordinary register-read callback. [Completion status](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L715-L724)
+  [Address-only probe](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L1389-L1397)
+- After a transaction error the SDK resets the controller FSM. At the next
+  transaction start, a timeout state or busy bus triggers a reset with bus
+  clear. The SDK can also clear the bus during a hardware timeout or stuck
+  STOP. These paths do not replay the application transfer. The adapter never
+  calls `i2c_master_bus_reset()`. [Error exit](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L1026-L1030)
+  [Transaction start](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L675-L680)
+  [In-transfer resets](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L545-L595)
+  [Explicit bus reset](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c#L1241-L1247)
 
 ## Adapter boundary
 

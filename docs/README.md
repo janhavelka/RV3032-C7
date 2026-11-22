@@ -12,7 +12,7 @@ records release history.
 | [Changelog](../CHANGELOG.md) | Published release history and changes under Unreleased. |
 | [Architecture](ARCHITECTURE.md) | Ownership, lifecycle, health, cooperative execution, timing, and persistence. |
 | [Device reference](DEVICE_REFERENCE.md) | Register behavior, flags, memory, EEPROM protocol, and electrical prerequisites. |
-| [ESP-IDF adapter notes](IDF_PORT.md) | Callback and owner-loop guidance for application-managed ports. |
+| [ESP-IDF integration](IDF_PORT.md) | Native component, S2/S3 bring-up example, adapter error mapping and timing limits. |
 | [Verification](VERIFICATION.md) | CI commands, HIL surfaces, restoration procedures, and evidence limits. |
 
 Run `doxygen Doxyfile` from the repository root to generate

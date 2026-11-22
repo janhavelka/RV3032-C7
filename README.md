@@ -511,7 +511,7 @@ The following capabilities are deliberately outside the current library:
 | Capability | Current boundary |
 |---|---|
 | Password management | Password ranges are denied. An already protected device requires out-of-band service. |
-| Native ESP-IDF package | No native component, maintained example, or ESP-IDF-only CI build is shipped. [Adapter notes](docs/IDF_PORT.md) describe the callback integration. |
+| Native ESP-IDF package | Component and read-only bring-up example for ESP32-S2 and ESP32-S3. The manifest requires ESP-IDF 6.0.1 or newer. Local builds target 6.0.1. [Integration guide](docs/IDF_PORT.md) |
 | Dates and civil-time policy | Calendar and Unix conversions cover 2000..2099. The application owns timezone, DST, and clock synchronization policy. |
 | Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
 | Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
