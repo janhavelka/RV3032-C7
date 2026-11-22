@@ -12,6 +12,7 @@ import sys
 from check_portability import CODE_SUFFIXES, mask_non_code, matching_brace
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = Path(".github/workflows/ci.yml")
 EXAMPLE = Path("examples/esp_idf/basic")
 WRAPPER = EXAMPLE / "components/RV3032/CMakeLists.txt"
 ARDUINO = Path("examples/01_basic_bringup_cli/main.cpp")
@@ -24,7 +25,7 @@ SDKCONFIG = {
     "sdkconfig.defaults.esp32s3": ("CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y", "CONFIG_ESP_CONSOLE_SECONDARY_NONE=y"),
 }
 REQUIRED_FILES = (
-    Path("CMakeLists.txt"), Path("idf_component.yml"), Path("platformio.ini"),
+    Path("CMakeLists.txt"), Path("idf_component.yml"), Path("platformio.ini"), WORKFLOW,
     ARDUINO, ENGINE, ENGINE.with_suffix(".h"), PARSER, Path("tools/hil_cli_runner.py"),
     WRAPPER, IDF_MAIN, EXAMPLE / "CMakeLists.txt", EXAMPLE / "README.md",
     EXAMPLE / "main/CMakeLists.txt", EXAMPLE / "main/GenerateBuildIdentity.cmake",
@@ -95,6 +96,73 @@ def compiled_by_pio(config: configparser.ConfigParser, env: str, path: Path) -> 
     return env in config and selected
 
 
+def ci_errors(workflow: str) -> list[str]:
+    """Check job-scoped tokens and artifact handoff in execution order."""
+    matrix = ("runs-on: ubuntu-latest", "fail-fast: false", "target: [esp32s3, esp32s2]")
+    artifact = "name: rv3032-library-package"
+    upload = "uses: actions/upload-artifact@v4"
+    native_build = ("uses: espressif/esp-idf-ci-action@v1.2.0", "esp_idf_version: v6.0.1",
+                    "target: ${{ matrix.target }}", "command: idf.py set-target ${{ matrix.target }} build")
+    pack = "pio pkg pack -o dist/RV3032-C7.tar.gz ."
+    validate = "python tools/check_package.py package dist/RV3032-C7.tar.gz"
+    extract = 'mkdir -p "$GITHUB_WORKSPACE/pkg/RV3032"'
+    unpack = 'tar -xzf RV3032-C7.tar.gz -C "$GITHUB_WORKSPACE/pkg/RV3032"'
+    required = {
+        "validate-library": ((), [
+            ("run: python tools/check_idf_example_contract.py",),
+            (pack, validate),
+            (upload, artifact, "path: dist/RV3032-C7.tar.gz", "if-no-files-found: error"),
+        ]),
+        "esp-idf-basic": (matrix, [
+            ("uses: actions/checkout@v7",),
+            (*native_build, "path: examples/esp_idf/basic"),
+            (upload, "if: always()", "name: esp-idf-build-logs-${{ matrix.target }}",
+             "examples/esp_idf/basic/build/log/**", "if-no-files-found: ignore"),
+        ]),
+        "esp-idf-package": ((*matrix, "needs: validate-library"), [
+            ("uses: actions/download-artifact@v4", artifact, "path: ${{ github.workspace }}"),
+            (extract, unpack, "test -f pkg/RV3032/CMakeLists.txt",
+             "test -f pkg/RV3032/examples/esp_idf/basic/CMakeLists.txt"),
+            (*native_build, "path: pkg/RV3032/examples/esp_idf/basic"),
+            ("working-directory: pkg/RV3032/examples/esp_idf/basic/build/esp-idf/main",
+             """grep -Fx 'inline constexpr char COMMIT[] = "unknown";' Rv3032BuildIdentity.h""",
+             """grep -Fx 'inline constexpr char STATUS[] = "unknown";' Rv3032BuildIdentity.h"""),
+        ]),
+    }
+    errors = []
+    # These jobs use the workflow's existing two-space mapping and named steps.
+    parts = re.split(r"(?m)^  ([\w-]+):[ \t]*$", workflow.partition("\njobs:\n")[2])
+    jobs = dict(zip(parts[1::2], parts[2::2]))
+    for name, (settings, required_steps) in required.items():
+        if name not in jobs:
+            errors.append(f"CI missing job {name}")
+            continue
+        header, *blocks = re.split(r"(?m)^      - name:", jobs[name])
+        header_lines = {line.strip() for line in header.splitlines()}
+        for setting in settings:
+            if setting not in header_lines:
+                errors.append(f"CI {name} missing {setting}")
+        if name == "esp-idf-package" and re.search(r"(?m)^ *uses: actions/checkout@", jobs[name]):
+            errors.append("CI esp-idf-package must build the archive without checkout")
+        steps = iter([line.strip() for line in block.splitlines()] for block in blocks)
+        for first, *tokens in required_steps:
+            step = next((lines for lines in steps if first in lines), None)
+            if step is None:
+                errors.append(f"CI {name} missing or out-of-order step: {first}")
+                break
+            for token in tokens:
+                if token not in step:
+                    errors.append(f"CI {name} step {first} missing {token}")
+            if first in (pack, extract) and any(step.index(token) < step.index(first)
+                                                for token in tokens if token in step):
+                errors.append(f"CI {name} commands out of order after {first}")
+            for line in header_lines.union(step):
+                if ((line.startswith("if:") and line not in tokens) or
+                        line.startswith("continue-on-error: true")):
+                    errors.append(f"CI {name} required step {first} may be skipped or ignored")
+    return errors
+
+
 def contract_errors(root: Path) -> list[str]:
     errors = [f"missing required file: {path.as_posix()}" for path in REQUIRED_FILES
               if not (root / path).is_file()]
@@ -104,6 +172,7 @@ def contract_errors(root: Path) -> list[str]:
     def read(path: Path) -> str:
         return (root / path).read_text(encoding="utf-8")
 
+    errors.extend(ci_errors(read(WORKFLOW)))
     root_cmake = read(Path("CMakeLists.txt"))
     wrapper = read(WRAPPER)
     # Resolve the wrapper's actual paths. Matching just filenames could accept

@@ -77,6 +77,34 @@ jobs:
       - name: Run native tests
         run: pio test -e native
 
+  esp-idf-basic:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32s2]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build the native example
+        uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: v6.0.1
+          target: ${{ matrix.target }}
+          path: examples/esp_idf/basic
+          command: idf.py set-target ${{ matrix.target }} build
+
+      - name: Upload ESP-IDF build logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: esp-idf-build-logs-${{ matrix.target }}
+          path: |
+            examples/esp_idf/basic/build/**/*.log
+            examples/esp_idf/basic/build/log/**
+          if-no-files-found: ignore
+
   validate-library:
     runs-on: ubuntu-latest
     steps:
@@ -110,6 +138,9 @@ jobs:
       - name: Check source and package metadata
         run: python tools/check_package.py source
 
+      - name: Check native ESP-IDF example and CI contracts
+        run: python tools/check_idf_example_contract.py
+
       - name: Build public documentation
         run: doxygen Doxyfile
 
@@ -118,3 +149,45 @@ jobs:
           mkdir -p dist
           pio pkg pack -o dist/RV3032-C7.tar.gz .
           python tools/check_package.py package dist/RV3032-C7.tar.gz
+
+      - name: Upload validated library package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv3032-library-package
+          path: dist/RV3032-C7.tar.gz
+          if-no-files-found: error
+
+  esp-idf-package:
+    needs: validate-library
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32s2]
+    steps:
+      - name: Download validated library package
+        uses: actions/download-artifact@v4
+        with:
+          name: rv3032-library-package
+          path: ${{ github.workspace }}
+
+      - name: Extract the package for the consumer build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/pkg/RV3032"
+          tar -xzf RV3032-C7.tar.gz -C "$GITHUB_WORKSPACE/pkg/RV3032"
+          test -f pkg/RV3032/CMakeLists.txt
+          test -f pkg/RV3032/examples/esp_idf/basic/CMakeLists.txt
+
+      - name: Build the packaged native example
+        uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: v6.0.1
+          target: ${{ matrix.target }}
+          path: pkg/RV3032/examples/esp_idf/basic
+          command: idf.py set-target ${{ matrix.target }} build
+
+      - name: Verify archive build identity
+        working-directory: pkg/RV3032/examples/esp_idf/basic/build/esp-idf/main
+        run: |
+          grep -Fx 'inline constexpr char COMMIT[] = "unknown";' Rv3032BuildIdentity.h
+          grep -Fx 'inline constexpr char STATUS[] = "unknown";' Rv3032BuildIdentity.h

@@ -20,6 +20,7 @@ PlatformIO installation through `scripts/pio.cmd`. On other hosts, replace
 python scripts/generate_version.py check
 python tools/check_portability.py
 python tools/check_abi.py
+python tools/check_idf_example_contract.py
 python -m unittest discover -s tools -p 'test_check_*.py'
 python -S tools/hil_cli_runner.py --parser-self-test
 python -S tools/test_hil_cli_runner.py
@@ -30,33 +31,95 @@ doxygen Doxyfile
 C:\esp\idf.cmd 6.0.1 --version
 C:\esp\idf.cmd 6.0.1 -C examples\esp_idf\basic -B C:\esp\build\rv3032-esp32s3-6.0.1 -D SDKCONFIG=C:\esp\build\rv3032-esp32s3-6.0.1.sdkconfig set-target esp32s3 build
 C:\esp\idf.cmd 6.0.1 -C examples\esp_idf\basic -B C:\esp\build\rv3032-esp32s2-6.0.1 -D SDKCONFIG=C:\esp\build\rv3032-esp32s2-6.0.1.sdkconfig set-target esp32s2 build
-# Remove generated dependencies.lock and managed_components/ from the example before packing.
-.\scripts\pio.cmd pkg pack -o RV3032-C7.tar.gz .
-python tools/check_package.py package RV3032-C7.tar.gz
 ```
 
-CI runs the Arduino, host, static and package checks. Run the native ESP-IDF
-builds locally. To verify the exported example, unpack the validated archive
-in a fresh directory, point `-C` at that copy's example and repeat both IDF
-builds with fresh external build and sdkconfig paths. A linked image proves
-compilation and linking for that target. Physical HIL and console operation
-require a board.
-Open `docs/doxygen/html/index.html` to inspect the generated API reference.
-The native suite covers callback budgets, deadlines and wraparound, ambiguous
+The host suites cover callback budgets, deadlines and wraparound, ambiguous
 writes, cleanup, status/result retention, register masks, and example transport
 and CLI behavior. Host Python tests exercise contract checkers and serial
 framing, payload, and health validation without opening a serial port.
+Open `docs/doxygen/html/index.html` to inspect the generated API reference.
 
-The package includes maintained guides and public headers. Vendor PDFs remain
-in the repository for offline reference. Generated docs, reports, prompts,
-tests, and build products are excluded. Both source and archive checks require
-the quoted version, supported targets and ESP-IDF constraint in the committed
-root `idf_component.yml`. After each PlatformIO build, check
+### Package and consumer builds
+
+Both source and archive checks require the committed `idf_component.yml` to
+match the version in `library.json`, declare `esp32s3` and `esp32s2`, and
+contain `idf: ">=6.0.1"`. Both manifests exclude the same generated files.
+For a directory tree, PlatformIO uses a trailing `/**` and the pinned IDF
+Component Manager uses `/**/*` to include the files in its exclusion.
+The archive must contain the root component, shared engine, complete native
+example, headers and maintained guides. Vendor PDFs, prompts, tests,
+generated documentation, IDF build output and locks are excluded.
+After each PlatformIO build, check
 `git status --porcelain --ignored` for a changed manifest or its generated
 `.orig` backup. If pioarduino rewrites the manifest, stop and restore the
 committed file with `git restore -- idf_component.yml`. Remove the generated
 backup before packing. A missing Arduino framework manifest can trigger this
 fallback because the project uses `src_dir = .`.
+
+Remove any generated `dependencies.lock` and `managed_components/` from
+`examples/esp_idf/basic/` before packing. Start with fresh package and
+consumer directories. From the repository root, validate the flat archive,
+unpack it under the name `RV3032`, and build its own example on both targets.
+
+```powershell
+$packageDir = 'C:\esp\build\rv3032-pkg'
+$componentDir = "$packageDir\RV3032"
+New-Item -ItemType Directory -Path $componentDir -ErrorAction Stop | Out-Null
+.\scripts\pio.cmd pkg pack -o "$packageDir\RV3032-C7.tar.gz" .
+if ($LASTEXITCODE) { throw 'PlatformIO pack failed' }
+python tools/check_package.py package "$packageDir\RV3032-C7.tar.gz"
+if ($LASTEXITCODE) { throw 'Package contract failed' }
+tar -xzf "$packageDir\RV3032-C7.tar.gz" -C $componentDir
+if ($LASTEXITCODE) { throw 'Package extraction failed' }
+foreach ($chip in 'esp32s3', 'esp32s2') {
+  $buildDir = "C:\esp\build\rv3032-pkg-$chip-6.0.1"
+  C:\esp\idf.cmd 6.0.1 -C "$componentDir\examples\esp_idf\basic" -B $buildDir -D "SDKCONFIG=$buildDir.sdkconfig" set-target $chip build
+  if ($LASTEXITCODE) { throw "Packaged $chip build failed" }
+}
+```
+
+CI runs the same two-target build on the checkout in `esp-idf-basic` and on
+the archive from `validate-library` in `esp-idf-package`. The package job
+downloads the validated artifact into an empty workspace and builds without
+a checkout. The example reports `unknown` for its Git commit and tree status
+when built from that extracted copy.
+
+The separate local consumer exercises the root component's CMake registration
+and manifest. Create an S3 application with the extracted `RV3032` directory
+as a Component Manager path dependency, then link a public driver method.
+
+```powershell
+$consumerDir = 'C:\esp\build\rv3032-consumer'
+New-Item -ItemType Directory -Path "$consumerDir\main" -ErrorAction Stop | Out-Null
+@'
+cmake_minimum_required(VERSION 3.16)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+idf_build_set_property(MINIMAL_BUILD ON)
+project(rv3032_consumer)
+'@ | Set-Content "$consumerDir\CMakeLists.txt" -Encoding ascii
+'idf_component_register(SRCS "main.cpp")' | Set-Content "$consumerDir\main\CMakeLists.txt" -Encoding ascii
+@'
+dependencies:
+  RV3032: {path: C:/esp/build/rv3032-pkg/RV3032}
+'@ | Set-Content "$consumerDir\main\idf_component.yml" -Encoding ascii
+@'
+#include "RV3032/RV3032.h"
+extern "C" void app_main() {
+  RV3032::RV3032 rtc;
+  rtc.end();
+}
+'@ | Set-Content "$consumerDir\main\main.cpp" -Encoding ascii
+$buildDir = 'C:\esp\build\rv3032-consumer-esp32s3-6.0.1'
+C:\esp\idf.cmd 6.0.1 -C $consumerDir -B $buildDir -D "SDKCONFIG=$buildDir.sdkconfig" set-target esp32s3 build
+if ($LASTEXITCODE) { throw 'Root component consumer build failed' }
+git diff --check
+```
+
+Record the resolved component name and path, then remove the generated
+consumer and package scratch trees. A linked image establishes compilation
+and linking for that target. Physical HIL, native console input and stack
+high-water measurement remain **NOT RUN**. The ESP-IDF gate uses `idf.py`
+6.0.1. PlatformIO `framework = espidf` builds remain untested.
 
 ## Hardware test surfaces
 

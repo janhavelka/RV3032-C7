@@ -7,6 +7,7 @@
     "esp32-s2",
     "esp32-s3",
     "arduino",
+    "esp-idf",
     "platformio",
     "rtc",
     "real-time-clock",
@@ -37,7 +38,8 @@
   "license": "MIT",
   "homepage": "https://github.com/janhavelka/RV3032-C7",
   "frameworks": [
-    "arduino"
+    "arduino",
+    "espidf"
   ],
   "platforms": [
     "espressif32"
@@ -62,11 +64,12 @@
       "docs/extracted-md/**",
       "docs/prompts/**",
       "docs/reports/**",
-      "examples/esp_idf/basic/build*/**",
-      "examples/esp_idf/basic/managed_components/**",
-      "examples/esp_idf/basic/dependencies.lock",
-      "examples/esp_idf/basic/sdkconfig",
-      "examples/esp_idf/basic/sdkconfig.old",
+      "examples/**/build*/**",
+      "examples/**/managed_components/**",
+      "examples/**/dependencies.lock",
+      "examples/**/sdkconfig",
+      "examples/**/sdkconfig.old",
+      "examples/**/sdkconfig.esp32*",
       "idf_component.yml.orig",
       "tmp/**",
       "docs/reference-pdfs/**",

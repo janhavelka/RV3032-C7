@@ -199,6 +199,96 @@ class PackageChecks(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((package.ROOT / rel).read_bytes())
 
+    def pack_fixture(self, root, archive, omit=None, extras=()):
+        with tarfile.open(archive, "w") as tar:
+            for rel in (*package.REQUIRED_PACKAGE_FILES, *extras):
+                if rel != omit and (root / rel).is_file():
+                    tar.add(root / rel, arcname=rel)
+
+    def test_native_payload_requires_every_component_and_example_file_at_its_path(self):
+        example = package.ROOT / "examples/esp_idf/basic"
+        required = {"CMakeLists.txt", "idf_component.yml", "examples/common/Rv3032Cli.cpp",
+                    "examples/common/Rv3032Cli.h"}
+        for path in example.rglob("*"):
+            if path.is_file() and (path.suffix in (".cpp", ".h", ".cmake") or
+                                   path.name in ("CMakeLists.txt", "README.md") or
+                                   path.name.startswith("sdkconfig.defaults")):
+                rel = path.relative_to(package.ROOT).as_posix()
+                if not package.forbidden_package_path(rel):
+                    required.add(rel)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            archive = Path(directory) / "fixture.tar"
+            self.make_fixture(root)
+            for rel in sorted(required):
+                with self.subTest(path=rel):
+                    self.pack_fixture(root, archive, omit=rel)
+                    # A similarly named file under a different root does not
+                    # help CMake find the actual flat package entry.
+                    with tarfile.open(archive, "a") as tar:
+                        tar.add(package.ROOT / rel, arcname=f"other/{rel}")
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(1, package.package_check(archive))
+                    self.assertIn(f"missing required package file: {rel}", output.getvalue())
+
+    def test_generated_idf_artifacts_cannot_ship_under_any_example(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            archive = Path(directory) / "fixture.tar"
+            self.make_fixture(root)
+            for artifact in ("build/CMakeCache.txt", "build-esp32s3/.ninja_deps",
+                             "build-esp32s3/esp-idf/main/libmain.a",
+                             "managed_components/vendor/driver.cpp", "dependencies.lock",
+                             "sdkconfig", "sdkconfig.old", "sdkconfig.esp32s2"):
+                for prefix in ("examples", "examples/esp_idf/basic", "examples/other/nested/app"):
+                    rel = f"{prefix}/{artifact}"
+                    with self.subTest(path=rel):
+                        target = root / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text("generated\n", encoding="utf-8")
+                        self.pack_fixture(root, archive, extras=(rel,))
+                        with redirect_stdout(io.StringIO()) as output:
+                            self.assertEqual(1, package.package_check(archive))
+                        self.assertIn(f"forbidden package file included: {rel}", output.getvalue())
+
+            # The IDF Component Manager subtracts Path.glob matches from its
+            # list of files; matching only a directory leaves its contents.
+            files = (root / "idf_component.yml").read_text(encoding="utf-8").split("  exclude:\n")[1]
+            excluded = {path for item in files.splitlines()
+                        for path in root.glob(json.loads(item.strip().removeprefix("- ")))}
+            required = {root / rel for rel in package.REQUIRED_PACKAGE_FILES}
+            example_files = {p for p in (root / "examples").rglob("*") if p.is_file()}
+            self.assertEqual(example_files - required, example_files & excluded)
+
+    def test_platform_metadata_and_export_drift_in_source_and_archive(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            archive = Path(directory) / "fixture.tar"
+            self.make_fixture(root)
+            library = root / "library.json"
+            original = library.read_text(encoding="utf-8")
+            for case, error in (("missing framework", "frameworks"), ("missing keyword", "keywords"),
+                                ("extra exclude", "files.exclude"), ("missing exclude", "files.exclude")):
+                with self.subTest(case=case):
+                    metadata = json.loads(original)
+                    if case == "missing framework":
+                        metadata["frameworks"].remove("espidf")
+                    elif case == "missing keyword":
+                        metadata["keywords"].remove("esp-idf")
+                    elif case == "extra exclude":
+                        metadata["export"]["exclude"].append("other/**")
+                    else:
+                        metadata["export"]["exclude"].remove("examples/**/sdkconfig")
+                    library.write_text(json.dumps(metadata), encoding="utf-8")
+                    self.pack_fixture(root, archive)
+                    with patch.object(package, "ROOT", root), redirect_stdout(io.StringIO()) as source:
+                        self.assertEqual(1, package.source_check())
+                    with redirect_stdout(io.StringIO()) as packed:
+                        self.assertEqual(1, package.package_check(archive))
+                    self.assertIn(error, source.getvalue())
+                    self.assertIn(error, packed.getvalue())
+
     def test_completed_reports_cannot_return_to_source_or_package(self):
         artifacts = (
             "docs/CODE_AUDIT.md", "docs/CODE_AUDIT_RESOLUTION.md",
@@ -285,6 +375,10 @@ class PackageChecks(unittest.TestCase):
                 ("edited dependency", valid.replace('">=6.0.1"', '">=5.0"'), "dependencies"),
                 ("unquoted re-dump", valid.replace('"', ''), "version"),
                 ("version mismatch", valid.replace('version: "91.2.3"', 'version: "1.0.0"'), "version"),
+                ("missing manifest exclude", valid.replace('    - "examples/**/sdkconfig.old"\n', ''),
+                 "files.exclude"),
+                ("directories without their contents", valid.replace('"docs/prompts/**/*"', '"docs/prompts/**"'),
+                 "files.exclude"),
                 ("backup", valid, "git restore -- idf_component.yml"),
             ):
                 with self.subTest(name=name):
@@ -295,10 +389,7 @@ class PackageChecks(unittest.TestCase):
                     if name == "backup":
                         (root / "idf_component.yml.orig").write_text(valid, encoding="utf-8")
                     archive = Path(directory) / "fixture.tar"
-                    with tarfile.open(archive, "w") as tar:
-                        for rel in (*package.REQUIRED_PACKAGE_FILES, "idf_component.yml.orig"):
-                            if (root / rel).is_file():
-                                tar.add(root / rel, arcname=rel)
+                    self.pack_fixture(root, archive, extras=("idf_component.yml.orig",))
                     with patch.object(package, "ROOT", root), redirect_stdout(io.StringIO()) as source:
                         self.assertEqual(int(bool(error)), package.source_check())
                     with redirect_stdout(io.StringIO()) as packed:

@@ -20,12 +20,11 @@ Run `doxygen Doxyfile` from the repository root to generate
 changelog, contributor guide, maintained technical guides, and public headers.
 Generated output is ignored by Git and excluded from the library package.
 
-## Planned work
+## Historical requirements
 
-The [native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)
-records the owner-elected ESP-IDF 6.0.1 work. It stays in `docs/prompts/`
-after execution as historical requirements and is never part of the library
-package.
+The repository retains the executed ESP-IDF promptset in `docs/prompts/`
+for the component, shared CLI and CI requirements. Package exports exclude
+this directory. [Executed native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)
 
 ## Vendor references
 

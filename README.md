@@ -1,12 +1,12 @@
 # RV3032-C7
 
-Production-oriented RV-3032-C7 RTC driver for ESP32-S2/S3, Arduino, and
-PlatformIO. The core owns no I2C peripheral, pins, task, lock, logging sink, or
-heap allocation. Applications inject bounded transport and timing callbacks.
+RV-3032-C7 RTC driver for ESP32-S2 and ESP32-S3 with Arduino on PlatformIO
+and native ESP-IDF. Applications own the I2C bus and inject bounded transport
+and timing callbacks. The core uses fixed storage.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
-The maintained integration is Arduino on ESP32-S2/S3. Start with the
+Both maintained examples use the same bring-up CLI. Start with the
 [integration sketch](#integration-sketch), then choose the
 [calendar](#calendar-apis), [persistent storage](#persistent-apis), or
 [configuration](#cooperative-configuration-evidence) contract your owner loop
@@ -113,10 +113,10 @@ void loop() {
 }
 ```
 
-This is a lifecycle sketch: the transport callbacks and application error
-handlers are intentionally project-owned. See
-`examples/01_basic_bringup_cli/main.cpp` and `examples/common/I2cTransport.h`
-for a complete Arduino-ESP32 integration.
+The application supplies the transport callbacks and handles errors. See
+`examples/01_basic_bringup_cli/main.cpp` for Arduino with Wire or
+`examples/esp_idf/basic/main/main.cpp` for native ESP-IDF with `i2c_master`.
+Each shell owns its bus and lends the driver to the shared CLI.
 
 Use `isOrdinaryJobBusy()` and `isEepromPollable()` to select one polling
 surface per owner pass. `isJobBusy()` combines active work; `isEepromBusy()`
@@ -506,15 +506,19 @@ methods for side-effecting features.
 
 ### Support boundaries and known gaps
 
-The following capabilities are deliberately outside the current library:
+The driver and its integrations have the following support boundaries.
 
 | Capability | Current boundary |
 |---|---|
 | Password management | Password ranges are denied. An already protected device requires out-of-band service. |
-| Native ESP-IDF package | Component and interactive bring-up CLI for ESP32-S2 and ESP32-S3. The manifest requires ESP-IDF 6.0.1 or newer. Local builds target 6.0.1. [Integration guide](docs/IDF_PORT.md) |
+| Native ESP-IDF package | The manifest declares ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. The native build gate uses 6.0.1. [Integration guide](docs/IDF_PORT.md) |
 | Dates and civil-time policy | Calendar and Unix conversions cover 2000..2099. The application owns timezone, DST, and clock synchronization policy. |
 | Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
 | Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
+
+`library.json` lists `espidf` because the package ships the ESP-IDF component
+and native example. PlatformIO `framework = espidf` builds are not tested.
+Native verification uses only `idf.py` 6.0.1 for `esp32s3` and `esp32s2`.
 
 For release publication status, see [versioning](#versioning) for the current development and tagged
 versions.
@@ -544,8 +548,9 @@ and wrap from `UINT32_MAX` to zero.
 
 ## Wire example adapter
 
-`examples/common/I2cTransport.h` is application glue, not library code. Its
-Wire adapter, validated with Arduino-ESP32 3.3.11, applies the callback's
+`examples/common/I2cTransport.h` makes one transfer attempt per admitted
+write or register-read callback. Its Wire adapter, validated with
+Arduino-ESP32 3.3.11, applies the callback's
 supplied timeout as one hard, exclusive bound across the complete callback.
 Each blocking Wire phase gets only the remaining interval, and RAII restores
 the application's prior Wire timeout on every exit. A short staging write is
@@ -561,6 +566,16 @@ The example's `initWire()` is startup-only, before Wire owns the pins. It uses
 open-drain bus-clear pulses and one bounded SCL-wait budget, and fails if either
 line remains LOW. Runtime recovery must first detach the existing bus owner;
 the supplied CLI never calls this startup helper from a runtime command.
+
+## Native ESP-IDF example adapter
+
+`examples/esp_idf/basic/main/Rv3032IdfI2c.cpp` makes one synchronous
+`i2c_master_transmit` or `i2c_master_transmit_receive` attempt per admitted
+callback. The application task owns the 400 kHz bus. The ordinary timeout
+defaults to 50 ms within the driver's 1..100 ms range. Primary-cell operations
+use 1..5 ms. The adapter times the complete SDK call and reports a timeout at
+or after its deadline. A stalled ESP-IDF call can return late. The integration
+guide documents error mapping and SDK-internal bus recovery. [ESP-IDF integration](docs/IDF_PORT.md)
 
 ## CLI ownership
 
@@ -586,6 +601,7 @@ an old command cannot execute as a new command after the completion prompt.
 
 - `include/RV3032/` — public Doxygen headers only
 - `src/` — platform-neutral implementation
+- `CMakeLists.txt`, `idf_component.yml` — native component registration, version and target constraints
 - `examples/common/` — shared command engine, parsers and Arduino example helpers
 - `examples/01_basic_bringup_cli/` — Arduino bring-up CLI shell
 - [`examples/esp_idf/basic/`](https://github.com/janhavelka/RV3032-C7/tree/main/examples/esp_idf/basic) — native ESP-IDF bring-up CLI shell, USB console setup and wiring
@@ -593,6 +609,7 @@ an old command cannot execute as a new command after the completion prompt.
   device reference, ESP-IDF adapter notes, verification guidance, and repository-only
   vendor PDFs
 - `test/test_native/` — host unit/integration tests against the bounded fake
+- `test/test_native_idf/`, `test/fake_idf/` — native shell and I2C adapter tests against the host SDK fake
 - `test/test_hil/`, `test/test_hil_persistence/` — on-device harnesses
   (`esp32s3hil`, `esp32s3hil_persistence`)
 - `test/stubs/` — Arduino/Wire stubs for the native build
@@ -606,7 +623,7 @@ applies a bounded Wire timeout and restores the application's previous value.
 
 ## Verification
 
-The embedded environments pin PIOArduino `55.03.311` (Arduino-ESP32 `3.3.11`,
+The Arduino environments pin PIOArduino `55.03.311` (Arduino-ESP32 `3.3.11`,
 ESP-IDF `5.5.5`). The ESP32-S3 environments use the built-in
 `esp32-s3-devkitc1-n16r8` definition for 16 MB QIO flash and 8 MB octal PSRAM.
 Select upload and monitor ports on the command line; machine-local COM ports
@@ -617,10 +634,12 @@ installation can exceed `MAX_PATH` while unpacking bundled headers. Enable
 Windows long-path support or temporarily set `PLATFORMIO_CACHE_DIR` to a short,
 writable path for the PlatformIO install/build command.
 
-Run the complete [software verification gate](docs/VERIFICATION.md), which
-covers native tests, all four embedded builds, host tooling, version/ABI and
-portability contracts, Doxygen, and the release package. These checks require
-no attached RTC and do not flash a device.
+CI runs host tests, all four Arduino builds, the static checks and Doxygen.
+ESP-IDF 6.0.1 builds the native example for both targets from the checkout and
+again from the validated PlatformIO archive in a job without a checkout.
+A separate local S3 consumer uses the extracted root component as a path
+dependency. The verification guide gives the commands and package checks.
+[Software verification](docs/VERIFICATION.md)
 
 The same guide explains the interactive CLI runner, autonomous HIL firmware,
 EEPROM write counts, power-cycle restoration, and evidence limits. Physical

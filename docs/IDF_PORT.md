@@ -1,9 +1,23 @@
 # RV3032-C7 ESP-IDF integration
 
-The repository root is a C++17 ESP-IDF component. Add it to a project's
-component directory to use the public headers under `RV3032/`. The manifest
-declares ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. The reference build uses
-6.0.1. The core needs only standard headers and the application's callbacks.
+The repository root is a C++17 ESP-IDF component. The committed
+`idf_component.yml` declares ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3 and
+matches the version in `library.json`. The core needs only standard headers
+and the application's callbacks.
+
+`library.json` lists `espidf` because the package ships the ESP-IDF component
+and native example. PlatformIO `framework = espidf` builds are not tested.
+Native verification uses only `idf.py` 6.0.1 for `esp32s3` and `esp32s2`.
+
+To use the exported component, unpack the archive into a directory named
+`RV3032`. A consumer can declare that directory as a local dependency in
+its `main/idf_component.yml` and include `RV3032/RV3032.h`.
+
+```yaml
+dependencies:
+  RV3032:
+    path: C:/esp/build/rv3032-pkg/RV3032
+```
 
 ## Native bring-up example
 
@@ -229,8 +243,12 @@ delay therefore needs both upward tick rounding and one entry-phase guard tick.
   `Version.h` and build metadata; an adapter must not turn it into a shared
   application dependency registry.
 
-## Local verification
+## Verification
 
-Use the command list and evidence boundaries in the [verification guide](VERIFICATION.md).
-Those checks do not prove hardware wiring, power-loss behavior, backup-cell
-chemistry, EEPROM endurance, or long-term timing accuracy.
+CI links the example for ESP32-S2 and ESP32-S3 from the checkout and from the
+validated archive. The packaged builds run without a checkout, so the
+example's Git identity is `unknown`. A separate local S3 build exercises
+the archive's root CMake registration and component manifest through the
+consumer dependency above. Physical console I/O and HIL require an
+authorized board and remain **NOT RUN** for the native example.
+[Verification commands and hardware test surfaces](VERIFICATION.md)

@@ -38,8 +38,9 @@ You are a professional embedded software engineer building a production-grade RV
 
 - Targets are ESP32-S2 and ESP32-S3 with Arduino on PlatformIO and native
   ESP-IDF. Build the native component and bring-up example with ESP-IDF 6.0.1.
-- Follow the owner-elected scope and checkpoint order in
-  `docs/prompts/README.md` for the shared CLI and ESP-IDF CI work.
+- Both examples ship the same CLI. Native CI builds the checkout and
+  validated package for both targets. `docs/prompts/README.md` retains
+  the executed historical requirements.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.
 
@@ -78,8 +79,9 @@ test/
   stubs/               - Arduino/Wire stubs for the native build
 tools/                 - Repository check scripts and the device-free HIL runner
 scripts/               - Version generator and the PlatformIO wrapper
-docs/                  - Architecture, device reference, IDF notes, vendor PDFs
-.github/workflows/     - CI
+docs/                  - Architecture, device reference, IDF and verification
+                         guides, vendor PDFs and repository-only prompt history
+.github/workflows/     - Arduino, host, package and native ESP-IDF CI
 platformio.ini
 library.json
 CMakeLists.txt         - Native component registration
@@ -307,7 +309,8 @@ SemVer:
 - PATCH: bug fixes, refactors, docs.
 
 Release steps:
-1. Update `library.json`.
+1. Update `library.json` and set the quoted `idf_component.yml` version
+   to the same value.
 2. Update `CHANGELOG.md` (Added/Changed/Fixed/Removed).
 3. Update `README.md` if API or examples changed.
 4. Commit and sync verified changes using the Git workflow above. Create a

@@ -27,7 +27,7 @@ REQUIRED_SOURCE_FILES = (
 )
 REQUIRED_PACKAGE_FILES = (
     "README.md", "CHANGELOG.md", "Doxyfile", "library.json", "idf_component.yml",
-    "platformio.ini",
+    "platformio.ini", "CMakeLists.txt",
     "include/RV3032/Version.h", "include/RV3032/RV3032.h",
     "include/RV3032/Config.h", "include/RV3032/Status.h",
     "include/RV3032/CommandTable.h", "src/RV3032.cpp",
@@ -36,7 +36,16 @@ REQUIRED_PACKAGE_FILES = (
     "examples/common/CommandHandler.h", "examples/common/BoardConfig.h",
     "examples/common/Rv3032Cli.cpp", "examples/common/I2cScanner.h",
     "examples/esp_idf/basic/README.md",
+    "examples/esp_idf/basic/CMakeLists.txt",
+    "examples/esp_idf/basic/components/RV3032/CMakeLists.txt",
+    "examples/esp_idf/basic/main/CMakeLists.txt",
     "examples/esp_idf/basic/main/GenerateBuildIdentity.cmake",
+    "examples/esp_idf/basic/main/Rv3032IdfI2c.h",
+    "examples/esp_idf/basic/main/Rv3032IdfI2c.cpp",
+    "examples/esp_idf/basic/main/main.cpp",
+    "examples/esp_idf/basic/sdkconfig.defaults",
+    "examples/esp_idf/basic/sdkconfig.defaults.esp32s2",
+    "examples/esp_idf/basic/sdkconfig.defaults.esp32s3",
     "docs/README.md", "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md", "docs/IDF_PORT.md",
     "docs/VERIFICATION.md",
@@ -46,9 +55,9 @@ REQUIRED_EXPORT_EXCLUDES = (
     "docs/CODE_AUDIT*.md", "docs/doxygen/**", "docs/extracted-md/**",
     "docs/prompts/**", "docs/reports/**", "docs/reference-pdfs/**",
     "docs/**/*.pdf", "idf_component.yml.orig", "test/**",
-    "examples/esp_idf/basic/build*/**", "examples/esp_idf/basic/managed_components/**",
-    "examples/esp_idf/basic/dependencies.lock", "examples/esp_idf/basic/sdkconfig",
-    "examples/esp_idf/basic/sdkconfig.old",
+    "examples/**/build*/**", "examples/**/managed_components/**",
+    "examples/**/dependencies.lock", "examples/**/sdkconfig",
+    "examples/**/sdkconfig.old", "examples/**/sdkconfig.esp32*",
     "tmp/**", "*.tar.gz", "*.tgz", "*.zip",
 )
 STATUS_CLEAR_METHODS = (
@@ -66,15 +75,15 @@ def library_manifest() -> dict:
     return json.loads((ROOT / "library.json").read_text(encoding="utf-8"))
 
 
-def idf_manifest_errors(contents: bytes, version: str) -> list[str]:
+def manifest_errors(manifest: dict, idf_contents: bytes) -> list[str]:
     # Check the committed spelling as well as the values. A pioarduino YAML
     # re-dump can preserve the values while stripping their double quotes.
     try:
-        text = contents.decode("utf-8").replace("\r\n", "\n")
+        text = idf_contents.decode("utf-8").replace("\r\n", "\n")
     except UnicodeDecodeError:
         return ["idf_component.yml must be UTF-8 text"]
     expected = (
-        f'version: "{version}"',
+        f'version: "{manifest.get("version", "")}"',
         'targets:\n  - "esp32s2"\n  - "esp32s3"',
         'dependencies:\n  idf: ">=6.0.1"',
     )
@@ -84,6 +93,32 @@ def idf_manifest_errors(contents: bytes, version: str) -> list[str]:
         sections = re.findall(rf"^{key}:[^\n]*(?:\n[ \t]+[^\n]*)*", text, re.MULTILINE)
         if sections != [block]:
             errors.append(f"idf_component.yml must contain the exact {key} declaration {block!r}")
+
+    for field, required in (("frameworks", ("arduino", "espidf")), ("keywords", ("esp-idf",))):
+        values = manifest.get(field)
+        if not isinstance(values, list) or any(value not in values for value in required):
+            errors.append(f"library.json {field} must include {', '.join(required)}")
+
+    export = manifest.get("export")
+    excludes = export.get("exclude") if isinstance(export, dict) else None
+    if not isinstance(excludes, list) or not all(isinstance(p, str) for p in excludes):
+        errors.append("library.json export.exclude must be a list of strings")
+        excludes = []
+    for pattern in REQUIRED_EXPORT_EXCLUDES:
+        if pattern not in excludes:
+            errors.append(f"library.json export.exclude missing {pattern!r}")
+    if "AUDIT.md" in excludes:
+        errors.append("library.json retains stale AUDIT.md exclude")
+
+    # PlatformIO recursively walks each matched directory (including hidden
+    # files). IDF 6.0.1 removes only Path.glob matches, and its Python 3.12
+    # terminal ** matches directories only. Select their files explicitly.
+    idf_patterns = [p + "/*" if p.endswith("/**") else p for p in excludes]
+    sections = re.findall(r"^files:[^\n]*(?:\n[ \t]+[^\n]*)*", text, re.MULTILINE)
+    lines = sections[0].splitlines() if len(sections) == 1 else []
+    items = [f"    - {json.dumps(pattern)}" for pattern in idf_patterns]
+    if lines[:2] != ["files:", "  exclude:"] or sorted(lines[2:]) != sorted(items):
+        errors.append("idf_component.yml files.exclude must match library.json export.exclude")
     return errors
 
 
@@ -122,18 +157,9 @@ def source_check() -> int:
     manifest = library_manifest()
     idf_manifest = ROOT / "idf_component.yml"
     if idf_manifest.is_file():
-        errors.extend(idf_manifest_errors(idf_manifest.read_bytes(), manifest.get("version", "")))
+        errors.extend(manifest_errors(manifest, idf_manifest.read_bytes()))
     if (ROOT / "idf_component.yml.orig").exists():
         errors.append(IDF_BACKUP_ERROR)
-    excludes = manifest.get("export", {}).get("exclude", [])
-    if not isinstance(excludes, list):
-        errors.append("library.json export.exclude must be a list")
-        excludes = []
-    for pattern in REQUIRED_EXPORT_EXCLUDES:
-        if pattern not in excludes:
-            errors.append(f"library.json export.exclude missing {pattern!r}")
-    if "AUDIT.md" in excludes:
-        errors.append("library.json retains stale AUDIT.md exclude")
     for probe in (
         ".github/workflows/ci.yml",
         "docs/doxygen/index.html",
@@ -183,18 +209,14 @@ def source_check() -> int:
     return 0
 
 
-def member_candidates(name: str) -> set[str]:
-    normalized = name.replace("\\", "/").strip("/")
-    candidates = {normalized}
-    if "/" in normalized:
-        candidates.add(normalized.split("/", 1)[1])
-    return candidates
-
-
 def forbidden_package_path(path: str) -> bool:
-    if any(fnmatch.fnmatchcase(path, pattern)
-           for pattern in REQUIRED_EXPORT_EXCLUDES):
-        return True
+    # fnmatch does not give **/ the zero-directory case of PlatformIO's
+    # recursive glob (e.g. examples/build/ as well as examples/demo/build/).
+    for pattern in REQUIRED_EXPORT_EXCLUDES:
+        if fnmatch.fnmatchcase(path, pattern):
+            return True
+        if "/**/" in pattern and fnmatch.fnmatchcase(path, pattern.replace("/**/", "/")):
+            return True
     # Defense in depth for repository metadata and broad generated artifacts.
     if path.endswith(".pdf") or fnmatch.fnmatch(path, "docs/CODE_AUDIT*.md"):
         return True
@@ -222,16 +244,16 @@ def package_check(archive: pathlib.Path) -> int:
             if normalized.startswith("/") or ".." in pathlib.PurePosixPath(normalized).parts:
                 errors.append(f"unsafe package path: {member.name}")
                 continue
-            if not member.isfile():
-                continue
-            for candidate in member_candidates(member.name):
-                seen.add(candidate)
-                if forbidden_package_path(candidate):
-                    errors.append(f"forbidden package file included: {candidate}")
-                if candidate in ("library.json", "idf_component.yml", "include/RV3032/Version.h"):
-                    handle = package.extractfile(member)
-                    if handle is not None:
-                        contents[candidate] = handle.read()
+            path = pathlib.PurePosixPath(normalized).as_posix()
+            # Keep checking forbidden artifacts under an enclosing directory,
+            # but only an actual flat member can satisfy a required path.
+            checked_path = path + "/" if member.isdir() else path
+            if forbidden_package_path(checked_path) or forbidden_package_path(checked_path.partition("/")[2]):
+                errors.append(f"forbidden package file included: {path}")
+            if member.isfile():
+                seen.add(path)
+                if path in ("library.json", "idf_component.yml", "include/RV3032/Version.h"):
+                    contents[path] = package.extractfile(member).read()
 
     for rel in REQUIRED_PACKAGE_FILES:
         if rel not in seen:
@@ -249,7 +271,7 @@ def package_check(archive: pathlib.Path) -> int:
         elif f'#define RV3032_VERSION_STRING "{version}"' not in version_header:
             errors.append("packaged Version.h does not match packaged manifest")
         if "idf_component.yml" in contents:
-            errors.extend(idf_manifest_errors(contents["idf_component.yml"], version))
+            errors.extend(manifest_errors(manifest, contents["idf_component.yml"]))
     except (KeyError, ValueError) as exc:
         errors.append(f"cannot validate packaged version agreement: {exc}")
 

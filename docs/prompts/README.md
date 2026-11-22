@@ -1,8 +1,9 @@
 # RV3032-C7 native ESP-IDF promptset
 
 Prepared 2026-11-16 on `main` after `e0d3f1f573bc62efddf84072edf7296a4e02029c`.
-Line citations refer to the tree that adds this folder. **Status: IN
-PROGRESS.** The table below tracks execution. Writing the prompts changed no
+Line citations refer to the tree that adds this folder.
+**Status: EXECUTED (historical requirements, not open work); hardware NOT RUN.**
+The table below tracks execution. Writing the prompts changed no
 library, example, package or workflow. Their preparation added one
 permanent, tested source-check exception that admits this folder
 (`tools/check_package.py:70-82`); packages still reject it. The SHA is an
@@ -139,7 +140,7 @@ prompt that cannot meet its acceptance criteria and report why".
 |---|---|---|---|---|
 | 01 | [Component, manifest and I2C adapter](01_COMPONENT_MANIFEST_AND_ADAPTER.md) | none | Scope election, root component, committed manifest with a content check, `i2c_master` adapter with host tests, S2/S3 bring-up builds | DONE |
 | 02 | [Shared CLI engine and native example](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md) | 01 DONE | Framework-neutral CLI engine with unchanged Arduino behavior, native shell with full parity, identity, sdkconfig, contract checker | DONE |
-| 03 | [CI, package and closeout](03_CI_PACKAGE_AND_CLOSEOUT.md) | 02 DONE | IDF CI jobs (in-tree and packaged consumer), package and consumer gates, `espidf` framework, final docs, marking this set executed, the single remote-CI checkpoint | NOT STARTED |
+| 03 | [CI, package and closeout](03_CI_PACKAGE_AND_CLOSEOUT.md) | 02 DONE | IDF CI jobs (in-tree and packaged consumer), package and consumer gates, `espidf` framework, final docs, marking this set executed, the single remote-CI checkpoint | DONE |
 
 ## Out of scope
 

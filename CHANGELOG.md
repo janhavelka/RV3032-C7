@@ -22,16 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifies that both shells compile the shared engine and route HIL commands
   to it. Physical console I/O, HIL and stack high-water measurements for the
   native example are **NOT RUN**.
+- CI builds the native CLI with ESP-IDF 6.0.1 on ESP32-S2 and ESP32-S3
+  from both the checkout and the validated, extracted package.
 
 ### Changed
 
-- Extracted the Arduino bring-up CLI into a fixed-buffer, framework-neutral
-  example engine. Host characterization covers command output, callback
-  counts, pending work and serial input discard.
+- Both examples use one fixed-buffer CLI engine, with Arduino behavior
+  unchanged. Host characterization covers command output, callback counts,
+  pending work and serial input discard.
+- PlatformIO package metadata lists `espidf` for the native component and
+  example. PlatformIO `framework = espidf` builds remain untested.
 - Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
 - The root IDF manifest is tracked and validated by content in source and
-  packaged trees. Export excludes generated IDF output, pioarduino's
-  `.orig` backup and the repository-only promptset.
+  packaged trees.
+
+### Fixed
+
+- Package validation rejects a missing native component or example file,
+  generated ESP-IDF output and lock files, pioarduino's manifest backup
+  and the repository-only prompt history. It also checks that the two
+  manifests agree on export exclusions.
 
 ## [3.1.0] - 2026-09-12
 

@@ -8,6 +8,59 @@ import unittest
 import check_idf_example_contract as checks
 
 
+class NativeCiContract(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (checks.ROOT / checks.WORKFLOW).read_text(encoding="utf-8")
+        self.assertEqual([], checks.ci_errors(self.workflow))
+
+    def reject(self, job, original, replacement):
+        # Mutate only one job; identical tokens in the others must not mask it.
+        match = re.search(rf"(?ms)^  {job}:.*?(?=^  [\w-]+:$|\Z)", self.workflow)
+        self.assertIsNotNone(match)
+        start, end = match.span()
+        block = match[0]
+        self.assertIn(original, block)
+        mutated = self.workflow[:start] + block.replace(original, replacement, 1) + self.workflow[end:]
+        self.assertTrue(any(job in error for error in checks.ci_errors(mutated)), f"{job}: {original}")
+
+    def test_idf_matrix_jobs(self):
+        for job, path in (("esp-idf-basic", "examples/esp_idf/basic"),
+                          ("esp-idf-package", "pkg/RV3032/examples/esp_idf/basic")):
+            for token in ("runs-on: ubuntu-latest", "fail-fast: false", "target: [esp32s3, esp32s2]",
+                          "uses: espressif/esp-idf-ci-action@v1.2.0", "esp_idf_version: v6.0.1",
+                          "target: ${{ matrix.target }}", "command: idf.py set-target ${{ matrix.target }} build",
+                          f"path: {path}"):
+                with self.subTest(job=job, token=token):
+                    self.reject(job, token, "# " + token)
+        for token in ("uses: actions/checkout@v7", "uses: actions/upload-artifact@v4", "if: always()",
+                      "name: esp-idf-build-logs-${{ matrix.target }}", "examples/esp_idf/basic/build/log/**",
+                      "if-no-files-found: ignore"):
+            with self.subTest(token=token):
+                self.reject("esp-idf-basic", token, "# " + token)
+
+    def test_validated_artifact_handoff(self):
+        for job, tokens in (
+            ("validate-library", ("run: python tools/check_idf_example_contract.py", "pio pkg pack",
+                                  "python tools/check_package.py package", "uses: actions/upload-artifact@v4",
+                                  "name: rv3032-library-package", "path: dist/RV3032-C7.tar.gz",
+                                  "if-no-files-found: error")),
+            ("esp-idf-package", ("needs: validate-library", "uses: actions/download-artifact@v4",
+                                 "name: rv3032-library-package", "path: ${{ github.workspace }}", "mkdir -p",
+                                 "tar -xzf", "test -f pkg/RV3032/CMakeLists.txt",
+                                 "test -f pkg/RV3032/examples/esp_idf/basic/CMakeLists.txt",
+                                 "working-directory:", "char COMMIT[]", "char STATUS[]")),
+        ):
+            for token in tokens:
+                with self.subTest(job=job, token=token):
+                    self.reject(job, token, "removed")
+        self.reject("esp-idf-package", "    steps:", "    steps:\n      - name: Checkout\n        uses: actions/checkout@v7")
+        self.reject("esp-idf-package", "        uses: espressif", "        if: false\n        uses: espressif")
+        self.reject("esp-idf-package", "    needs:", "    continue-on-error: true\n    needs:")
+        pack = "pio pkg pack -o dist/RV3032-C7.tar.gz ."
+        validate = "python tools/check_package.py package dist/RV3032-C7.tar.gz"
+        self.reject("validate-library", pack + "\n          " + validate, validate + "\n          " + pack)
+
+
 class NativeExampleContract(unittest.TestCase):
     def setUp(self):
         scratch = TemporaryDirectory()
