@@ -138,7 +138,7 @@ prompt that cannot meet its acceptance criteria and report why".
 | # | Prompt | Requires | Delivers | Status |
 |---|---|---|---|---|
 | 01 | [Component, manifest and I2C adapter](01_COMPONENT_MANIFEST_AND_ADAPTER.md) | none | Scope election, root component, committed manifest with a content check, `i2c_master` adapter with host tests, S2/S3 bring-up builds | DONE |
-| 02 | [Shared CLI engine and native example](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md) | 01 DONE | Framework-neutral CLI engine with unchanged Arduino behavior, native shell with full parity, identity, sdkconfig, contract checker | NOT STARTED |
+| 02 | [Shared CLI engine and native example](02_SHARED_CLI_AND_NATIVE_EXAMPLE.md) | 01 DONE | Framework-neutral CLI engine with unchanged Arduino behavior, native shell with full parity, identity, sdkconfig, contract checker | DONE |
 | 03 | [CI, package and closeout](03_CI_PACKAGE_AND_CLOSEOUT.md) | 02 DONE | IDF CI jobs (in-tree and packaged consumer), package and consumer gates, `espidf` framework, final docs, marking this set executed, the single remote-CI checkpoint | NOT STARTED |
 
 ## Out of scope

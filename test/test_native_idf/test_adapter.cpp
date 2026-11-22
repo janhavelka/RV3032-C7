@@ -277,6 +277,9 @@ void test_primary_cell_ensure_through_single_attempt_adapter() {
 }
 }  // namespace
 
+void runIdfCliTests();
+void test_idf_s2_cdc_endpoint_readiness_and_prompt();
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_startup_and_teardown);
@@ -289,5 +292,7 @@ int main() {
   RUN_TEST(test_wait_rechecks_monotonic_time_across_wrap_and_yields);
   RUN_TEST(test_driver_calendar_and_cooperative_snapshot);
   RUN_TEST(test_primary_cell_ensure_through_single_attempt_adapter);
+  runIdfCliTests();
+  RUN_TEST(test_idf_s2_cdc_endpoint_readiness_and_prompt);
   return UNITY_END();
 }

@@ -64,14 +64,14 @@ include/RV3032/        - Public API headers only (Doxygen)
   Version.h            - Auto-generated (do not edit)
 src/                   - Implementation (.cpp)
 examples/
-  01_basic_bringup_cli/
-  esp_idf/basic/       - Native bring-up app, fixed-name RV3032 component
-                         wrapper and application-owned I2C adapter
+  01_basic_bringup_cli/ - Arduino console and I2C owner for the shared CLI
+  esp_idf/basic/       - Native console and I2C owner for the shared CLI,
+                         fixed-name RV3032 component wrapper
   common/              - Framework-neutral Rv3032Cli engine and token parsers,
                          Arduino board, scanner and transport helpers
 test/
   test_native/         - Host unit/integration tests against the bounded fake
-  test_native_idf/     - Native adapter and driver integration tests
+  test_native_idf/     - Native shell, adapter and driver integration tests
   fake_idf/            - Host-only SDK declarations for the adapter suite
   test_hil/            - On-device harness (env esp32s3hil)
   test_hil_persistence/- On-device EEPROM power-cycle harness

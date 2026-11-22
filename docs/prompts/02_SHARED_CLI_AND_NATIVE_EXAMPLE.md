@@ -1,6 +1,6 @@
 # 02: Shared framework-neutral CLI engine and native ESP-IDF example
 
-**Status: NOT STARTED.** Prerequisite: 01 is DONE, and its component, manifest
+**Status: DONE.** Prerequisite: 01 is DONE, and its component, manifest
 check, adapter suite and S2/S3 images pass. Next:
 [03](03_CI_PACKAGE_AND_CLOSEOUT.md).
 

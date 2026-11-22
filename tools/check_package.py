@@ -35,6 +35,8 @@ REQUIRED_PACKAGE_FILES = (
     "examples/common/I2cTransport.h", "examples/common/Rv3032Cli.h",
     "examples/common/CommandHandler.h", "examples/common/BoardConfig.h",
     "examples/common/Rv3032Cli.cpp", "examples/common/I2cScanner.h",
+    "examples/esp_idf/basic/README.md",
+    "examples/esp_idf/basic/main/GenerateBuildIdentity.cmake",
     "docs/README.md", "docs/ARCHITECTURE.md",
     "docs/DEVICE_REFERENCE.md", "docs/IDF_PORT.md",
     "docs/VERIFICATION.md",

@@ -23,7 +23,23 @@ stretch wait, generates STOP and checks both lines before installing the bus
 and the 7-bit device at 0x51. Teardown removes the device before the bus and
 retains any handle whose removal failed. The task binds the callbacks with
 generic EEPROM writes disabled, explicitly probes the Status register, then
-prints one calendar read per second.
+polls the same command engine as the Arduino example every 10 ms. Start with
+`version`, `drv` and `time`. The example README covers wiring, flash and
+monitor commands, and the explicit confirmation for primary-cell ensure.
+[Native CLI instructions](https://github.com/janhavelka/RV3032-C7/blob/main/examples/esp_idf/basic/README.md)
+
+The native shell uses unbuffered, nonblocking standard input and preserves
+individual CR and LF bytes. At job completion it snapshots the unread byte
+count from the installed USB Serial/JTAG driver on S3 or the ROM CDC console
+on S2. The S2 adapter uses ESP-IDF 6.0.1's private USB console declarations
+for that count and its bounded interrupt poll. These counts let the engine
+discard pending-time input even when it spans several loop iterations.
+The S2 ROM CDC VFS can report a full write after accepting fewer bytes.
+The shell uses the ROM's accepted-byte count, yields for at most 25 ticks per
+output fragment under backpressure and flushes the unterminated prompt when
+the endpoint is ready. A stalled or disconnected monitor can miss output.
+The main task has an 8192-byte stack. Its high-water mark and physical USB
+console behavior have not been measured.
 
 ## ESP-IDF 6.0.1 transport behavior
 

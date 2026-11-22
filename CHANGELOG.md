@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native bring-up example with an application-owned, single-attempt
   `i2c_master` adapter. Host tests exercise the adapter and driver together
   against the RTC fake, including calendar access and primary-cell ensure.
+- The native example now runs the full bring-up CLI on the S2 USB CDC or
+  S3 USB Serial/JTAG console. Its `version` command reports the example's
+  build identity separately from the library metadata. A contract checker
+  verifies that both shells compile the shared engine and route HIL commands
+  to it. Physical console I/O, HIL and stack high-water measurements for the
+  native example are **NOT RUN**.
 
 ### Changed
 

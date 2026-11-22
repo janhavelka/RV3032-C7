@@ -430,7 +430,8 @@ def healthy_driver_reason(text: str) -> str | None:
 
     A terminal prompt does not prove that USB delivered the middle of a reply.
     Match every nonblank row in source order, including duplicate-free sections
-    and both EEPROM summaries. This repository ships only the Arduino CLI.
+    and both EEPROM summaries. Both shells use the same CLI engine. Only the
+    Arduino CLI has been run on hardware.
     """
     rows = [line.strip() for line in strip_ansi(text).splitlines() if line.strip()]
     if rows and rows[0] == "drv":

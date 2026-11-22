@@ -511,7 +511,7 @@ The following capabilities are deliberately outside the current library:
 | Capability | Current boundary |
 |---|---|
 | Password management | Password ranges are denied. An already protected device requires out-of-band service. |
-| Native ESP-IDF package | Component and read-only bring-up example for ESP32-S2 and ESP32-S3. The manifest requires ESP-IDF 6.0.1 or newer. Local builds target 6.0.1. [Integration guide](docs/IDF_PORT.md) |
+| Native ESP-IDF package | Component and interactive bring-up CLI for ESP32-S2 and ESP32-S3. The manifest requires ESP-IDF 6.0.1 or newer. Local builds target 6.0.1. [Integration guide](docs/IDF_PORT.md) |
 | Dates and civil-time policy | Calendar and Unix conversions cover 2000..2099. The application owns timezone, DST, and clock synchronization policy. |
 | Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
 | Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
@@ -565,10 +565,10 @@ the supplied CLI never calls this startup helper from a runtime command.
 ## CLI ownership
 
 The example engine in `examples/common/Rv3032Cli.cpp` owns command dispatch,
-help, boot messages and pending work. The Arduino shell supplies console,
-clock and scanner callbacks and owns the driver and bus. The engine uses one
-overflow-discarding line reader and strict numeric
-tokens with exact argument counts. Invalid input starts no RTC/I2C work. One
+help, boot messages and pending work for both shells. Each shell supplies
+console, clock, scanner and platform-version callbacks and owns its driver
+and bus. The engine uses one overflow-discarding line reader and strict
+numeric tokens with exact argument counts. Invalid input starts no RTC/I2C work. One
 fixed `PendingOperation` owns accepted asynchronous work, advances at most one
 callback per loop iteration, and retains the ordinary terminal status through
 optional EEPROM persistence. It prints completion only after terminal ordinary
@@ -586,8 +586,9 @@ an old command cannot execute as a new command after the completion prompt.
 
 - `include/RV3032/` — public Doxygen headers only
 - `src/` — platform-neutral implementation
-- `examples/common/` — example-only board/transport glue, not library code
-- `examples/01_basic_bringup_cli/` — interactive product-neutral bring-up CLI
+- `examples/common/` — shared command engine, parsers and Arduino example helpers
+- `examples/01_basic_bringup_cli/` — Arduino bring-up CLI shell
+- [`examples/esp_idf/basic/`](https://github.com/janhavelka/RV3032-C7/tree/main/examples/esp_idf/basic) — native ESP-IDF bring-up CLI shell, USB console setup and wiring
 - [`docs/`](https://github.com/janhavelka/RV3032-C7/tree/main/docs) — architecture,
   device reference, ESP-IDF adapter notes, verification guidance, and repository-only
   vendor PDFs
