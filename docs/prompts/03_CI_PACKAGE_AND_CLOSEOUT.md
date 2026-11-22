@@ -1,8 +1,6 @@
 # 03: ESP-IDF CI, package and consumer gates, closeout and the remote-CI checkpoint
 
-**Status: DONE.** Prerequisite: 01 and 02 are DONE and pass on current
-`main`. This last prompt is the only one that dispatches and waits for remote
-CI.
+**Status: DONE.**
 
 ## Outcome and scope
 

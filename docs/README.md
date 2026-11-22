@@ -20,12 +20,6 @@ Run `doxygen Doxyfile` from the repository root to generate
 changelog, contributor guide, maintained technical guides, and public headers.
 Generated output is ignored by Git and excluded from the library package.
 
-## Historical requirements
-
-The repository retains the executed ESP-IDF promptset in `docs/prompts/`
-for the component, shared CLI and CI requirements. Package exports exclude
-this directory. [Executed native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)
-
 ## Vendor references
 
 - [RV-3032-C7 datasheet](https://github.com/janhavelka/RV3032-C7/blob/main/docs/reference-pdfs/RV-3032-C7_datasheet.pdf)
@@ -40,8 +34,9 @@ by the driver. PDFs are excluded from the PlatformIO package.
 
 Keep reusable contracts, procedures, and limitations in these guides. Record
 user-visible changes under Unreleased in the changelog and update public
-headers when an API contract changes. Keep completed audits, plans, prompts,
-campaign reports, generated step tables, and raw transcripts out of this tree;
-earlier tracked records remain available in Git history. The only exception
-is `prompts/`, which keeps promptsets permanently as historical requirements.
-Private HIL artifacts default to `.pio/hil-runs/`.
+headers when an API contract changes. Earlier audits and campaign reports
+are available in Git history. Private HIL artifacts default to `.pio/hil-runs/`.
+
+The repository retains the three completed native ESP-IDF prompts as
+historical requirements in `docs/prompts/`. Package exports exclude that
+directory. [Executed native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)

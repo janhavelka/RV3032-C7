@@ -6,12 +6,37 @@ and timing callbacks. The core uses fixed storage.
 
 [![CI](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml/badge.svg)](https://github.com/janhavelka/RV3032-C7/actions/workflows/ci.yml)
 
-Both maintained examples use the same bring-up CLI. Start with the
-[integration sketch](#integration-sketch), then choose the
-[calendar](#calendar-apis), [persistent storage](#persistent-apis), or
-[configuration](#cooperative-configuration-evidence) contract your owner loop
-needs. The [architecture](docs/ARCHITECTURE.md) and
-[device reference](docs/DEVICE_REFERENCE.md) explain the underlying protocol.
+## Run the bring-up CLI
+
+Both examples use SDA GPIO8 and SCL GPIO9 at 400 kHz. Fit external pull-ups,
+connect a common ground and supply the RTC with at least 2.0 V at this speed.
+
+**Arduino on PlatformIO.** Build from the repository root on Windows with the
+first command. To run the example on a board, use the upload and monitor
+commands with your port in place of `COM7`. For ESP32-S2, use `esp32s2dev`
+on each line. On other hosts, use `pio` in place of `.\scripts\pio.cmd`.
+[Arduino example source](https://github.com/janhavelka/RV3032-C7/blob/main/examples/01_basic_bringup_cli/main.cpp)
+
+```powershell
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s3dev -t upload --upload-port COM7
+.\scripts\pio.cmd device monitor -e esp32s3dev --port COM7
+```
+
+**Native ESP-IDF.** Build `examples/esp_idf/basic` with ESP-IDF 6.0.1.
+Use the board's native USB connector. ESP32-S2 uses USB CDC and ESP32-S3
+uses USB Serial/JTAG. The example includes build, flash and monitor commands
+for both targets. [Native example instructions](https://github.com/janhavelka/RV3032-C7/blob/main/examples/esp_idf/basic/README.md)
+
+At the `> ` prompt, use `help` to list commands, `version` to identify the
+build and `probe` to check communication at address `0x51`. Then use
+`validity` to inspect the clock flags and `time` to read the calendar. Wait
+for the next prompt before typing another command. Both shells discard input
+received while a job is pending.
+
+For your own application, see the [integration sketch](#integration-sketch)
+for the callback and polling pattern. The [ESP-IDF integration guide](docs/IDF_PORT.md)
+covers adding the root component as a local dependency.
 
 ## Design contract
 
@@ -113,10 +138,9 @@ void loop() {
 }
 ```
 
-The application supplies the transport callbacks and handles errors. See
-`examples/01_basic_bringup_cli/main.cpp` for Arduino with Wire or
-`examples/esp_idf/basic/main/main.cpp` for native ESP-IDF with `i2c_master`.
-Each shell owns its bus and lends the driver to the shared CLI.
+The application supplies the transport callbacks and handles errors. The
+Arduino shell binds them to Wire and the native shell binds them to
+`i2c_master`. Each shell owns its bus and lends its driver to the shared CLI.
 
 Use `isOrdinaryJobBusy()` and `isEepromPollable()` to select one polling
 surface per owner pass. `isJobBusy()` combines active work; `isEepromBusy()`
@@ -466,8 +490,9 @@ returns `PRIMARY_CELL_ALREADY_ATTEMPTED` with zero callbacks. A later explicit
 attempt requires `end()` followed by a new successful `begin()` and always
 re-reads actual chip state.
 
-The generic CLI example does not provision at startup. It requires the exact
-operator command:
+Both examples leave generic EEPROM writes disabled. To request the separate
+primary-cell operation after verifying the electrical prerequisites, enter
+the exact command below.
 
 ```text
 primary-cell ensure CONFIRM-PRIMARY-CELL
@@ -506,22 +531,13 @@ methods for side-effecting features.
 
 ### Support boundaries and known gaps
 
-The driver and its integrations have the following support boundaries.
-
 | Capability | Current boundary |
 |---|---|
 | Password management | Password ranges are denied. An already protected device requires out-of-band service. |
-| Native ESP-IDF package | The manifest declares ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. The native build gate uses 6.0.1. [Integration guide](docs/IDF_PORT.md) |
+| Native ESP-IDF package | `library.json` lists `espidf` because the package includes the component and native example. The component declares ESP-IDF >=6.0.1 for S2/S3. CI uses `idf.py` 6.0.1. PlatformIO `framework = espidf` builds are untested. [Integration guide](docs/IDF_PORT.md) |
 | Dates and civil-time policy | Calendar and Unix conversions cover 2000..2099. The application owns timezone, DST, and clock synchronization policy. |
 | Atomic multi-byte EEPROM updates | Jobs process at most 16 bytes and report verified partial progress. Applications needing an atomic record must supply their own storage format and commit policy. |
 | Bus and interrupt ownership | The application owns serialization, GPIO interrupt handling, scheduling, bus recovery, and permitted read retry. The library supplies typed operations and observable results. |
-
-`library.json` lists `espidf` because the package ships the ESP-IDF component
-and native example. PlatformIO `framework = espidf` builds are not tested.
-Native verification uses only `idf.py` 6.0.1 for `esp32s3` and `esp32s2`.
-
-For release publication status, see [versioning](#versioning) for the current development and tagged
-versions.
 
 ## Status and health
 
@@ -569,57 +585,31 @@ the supplied CLI never calls this startup helper from a runtime command.
 
 ## Native ESP-IDF example adapter
 
-`examples/esp_idf/basic/main/Rv3032IdfI2c.cpp` makes one synchronous
-`i2c_master_transmit` or `i2c_master_transmit_receive` attempt per admitted
-callback. The application task owns the 400 kHz bus. The ordinary timeout
-defaults to 50 ms within the driver's 1..100 ms range. Primary-cell operations
-use 1..5 ms. The adapter times the complete SDK call and reports a timeout at
-or after its deadline. A stalled ESP-IDF call can return late. The integration
-guide documents error mapping and SDK-internal bus recovery. [ESP-IDF integration](docs/IDF_PORT.md)
+The adapter makes one synchronous SDK transfer per dispatched callback. It
+measures the complete call and reports `I2C_TIMEOUT` at or after the deadline.
+A stalled SDK call can return late. The integration guide covers the timeout
+ranges, error mapping and SDK-internal bus recovery. [ESP-IDF integration](docs/IDF_PORT.md)
 
 ## CLI ownership
 
-The example engine in `examples/common/Rv3032Cli.cpp` owns command dispatch,
-help, boot messages and pending work for both shells. Each shell supplies
-console, clock, scanner and platform-version callbacks and owns its driver
-and bus. The engine uses one overflow-discarding line reader and strict
-numeric tokens with exact argument counts. Invalid input starts no RTC/I2C work. One
-fixed `PendingOperation` owns accepted asynchronous work, advances at most one
-callback per loop iteration, and retains the ordinary terminal status through
-optional EEPROM persistence. It prints completion only after terminal ordinary
-and persistence evidence is available; there is no parallel `tick()` path. An
-item-level persistence failure does not release ownership while later queue
-entries remain, so no queued work is orphaned.
-
-After 15 seconds it prints one pending-work diagnostic and keeps ownership
-until the operation terminates. Each loop discards at most 256 bytes of busy
-serial input; queued lines and partial tails remain marked for discard after
-completion. Input arriving during the terminal callback is also discarded, so
-an old command cannot execute as a new command after the completion prompt.
+Each shell supplies console, clock, scanner and platform-version callbacks.
+The shared engine in `examples/common/Rv3032Cli.cpp` validates the full
+command before dispatch and advances one pending job with a budget of one
+callback per poll. It prints the result after the ordinary job and any queued
+persistence finish. It prints one diagnostic after 15 seconds if work is
+still pending. It drains busy-time input in batches of up to 256 bytes per
+pass. This includes queued commands and partial lines received during the
+final callback.
+[Ownership and polling contracts](docs/ARCHITECTURE.md)
 
 ## Repository and examples
 
-- `include/RV3032/` — public Doxygen headers only
-- `src/` — platform-neutral implementation
-- `CMakeLists.txt`, `idf_component.yml` — native component registration, version and target constraints
-- `examples/common/` — shared command engine, parsers and Arduino example helpers
-- `examples/01_basic_bringup_cli/` — Arduino bring-up CLI shell
-- [`examples/esp_idf/basic/`](https://github.com/janhavelka/RV3032-C7/tree/main/examples/esp_idf/basic) — native ESP-IDF bring-up CLI shell, USB console setup and wiring
-- [`docs/`](https://github.com/janhavelka/RV3032-C7/tree/main/docs) — architecture,
-  device reference, ESP-IDF adapter notes, verification guidance, and repository-only
-  vendor PDFs
-- `test/test_native/` — host unit/integration tests against the bounded fake
-- `test/test_native_idf/`, `test/fake_idf/` — native shell and I2C adapter tests against the host SDK fake
-- `test/test_hil/`, `test/test_hil_persistence/` — on-device harnesses
-  (`esp32s3hil`, `esp32s3hil_persistence`)
-- `test/stubs/` — Arduino/Wire stubs for the native build
-- `tools/` — repository check scripts and the device-free HIL runner
-- `scripts/` — version generator and the PlatformIO wrapper
-
-`Rv3032Cli.h` and `Rv3032Cli.cpp` implement the command engine.
-`CommandHandler.h` supplies its strict token parsers. The Arduino shell
-uses `BoardConfig.h`, `I2cTransport.h` and `I2cScanner.h`. Each scan probe
-applies a bounded Wire timeout and restores the application's previous value.
+| Location | Contents |
+|---|---|
+| `include/RV3032/`, `src/` | Public headers and portable driver. The root `CMakeLists.txt` and `idf_component.yml` expose the driver as an ESP-IDF component. |
+| `examples/01_basic_bringup_cli/`, `examples/esp_idf/basic/` | Arduino and native ESP-IDF shells. Each owns its console and I2C bus. |
+| `examples/common/` | Shared `Rv3032Cli` engine and `CommandHandler.h` parsers. Arduino uses `BoardConfig.h`, `I2cScanner.h` and `I2cTransport.h`. |
+| `test/`, `tools/` | Host suites, on-device harnesses, contract checkers and the HIL runner. |
 
 ## Verification
 
@@ -634,25 +624,19 @@ installation can exceed `MAX_PATH` while unpacking bundled headers. Enable
 Windows long-path support or temporarily set `PLATFORMIO_CACHE_DIR` to a short,
 writable path for the PlatformIO install/build command.
 
-CI runs host tests, all four Arduino builds, the static checks and Doxygen.
-ESP-IDF 6.0.1 builds the native example for both targets from the checkout and
-again from the validated PlatformIO archive in a job without a checkout.
-A separate local S3 consumer uses the extracted root component as a path
-dependency. The verification guide gives the commands and package checks.
-[Software verification](docs/VERIFICATION.md)
-
-The same guide explains the interactive CLI runner, autonomous HIL firmware,
-EEPROM write counts, power-cycle restoration, and evidence limits. Physical
-execution requires authorization for the fixture and mutations involved.
-Build success and a runner exit code alone do not establish complete hardware
-coverage; inspect individual results and untested conditions.
+CI runs host tests, all four Arduino builds, static checks and Doxygen. It
+also compiles and links the native CLI for both targets from the checkout
+and again from the validated PlatformIO archive. Physical validation of the
+native example is pending, including console I/O, hardware-in-the-loop (HIL)
+tests and the main task's stack high-water mark. The verification guide covers
+software checks, a standalone component consumer and physical fixture
+procedures. [Verification guide](docs/VERIFICATION.md)
 
 ## Versioning
 
-`library.json` declares **3.1.0**. Published releases are identified by matching
-`vX.Y.Z` tags; until `v3.1.0` is published, this commit is the prepared release
-candidate. The [changelog](CHANGELOG.md) contains the complete changes from
-v3.0.1.
+`v3.1.0` identifies the tagged 3.1.0 release. The native ESP-IDF component
+and shared CLI are subsequent changes listed under Unreleased in the
+[changelog](CHANGELOG.md).
 
 `library.json` is the single version source. `include/RV3032/Version.h` is
 generated and must not be edited manually. `scripts/generate_version.py`
@@ -663,8 +647,9 @@ or application-version metadata belongs to the consuming project.
 
 Run `doxygen Doxyfile` with Doxygen 1.9.7 or newer from the repository root and open
 `docs/doxygen/html/index.html`. The generated reference uses this README as its
-entry page and includes the changelog, contributor guide, architecture, device
-reference, ESP-IDF notes, and verification guide. The driver reference groups
+entry page. See the [architecture](docs/ARCHITECTURE.md) for ownership and
+timing and the [device reference](docs/DEVICE_REFERENCE.md) for register
+behavior, electrical limits and vendor sources. The driver reference groups
 methods by feature; each operation documents admission, polling, result, and
 device side effects.
 `Config.h` defines transport and timing contracts, `Status.h` defines result

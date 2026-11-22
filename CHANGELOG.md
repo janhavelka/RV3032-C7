@@ -9,44 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Native C++17 ESP-IDF component with a version-matched manifest declaring
-  ESP-IDF >=6.0.1 for ESP32-S2 and ESP32-S3. Local 6.0.1 builds linked the
-  example from both the checkout and the PlatformIO archive on each target.
-  A separate S3 application linked the packaged root component.
-- Native bring-up example with an application-owned, single-attempt
-  `i2c_master` adapter. Host tests exercise the adapter and driver together
-  against the RTC fake, including calendar access and primary-cell ensure.
-- The native example now runs the full bring-up CLI on the S2 USB CDC or
-  S3 USB Serial/JTAG console. Its `version` command reports the example's
-  build identity separately from the library metadata. A contract checker
-  verifies that both shells compile the shared engine and route HIL commands
-  to it. Physical console I/O, HIL and stack high-water measurements for the
-  native example are **NOT RUN**.
-- CI builds the native CLI with ESP-IDF 6.0.1 on ESP32-S2 and ESP32-S3
-  from both the checkout and the validated, extracted package.
+- A C++17 component for ESP32-S2 and ESP32-S3 declares ESP-IDF 6.0.1 or later.
+  CI builds the native example with `idf.py` 6.0.1 from the checkout and the
+  validated PlatformIO archive for both targets. A separate ESP32-S3
+  application also linked the packaged root component.
+- The native example shares the Arduino example's fixed-buffer CLI and
+  exposes it over USB CDC on ESP32-S2 and USB Serial/JTAG on ESP32-S3.
+  Arduino command behavior is unchanged. The native `version` command
+  reports the example build and library version separately.
+  Host tests exercise the driver with the application's single-attempt I2C
+  adapter. Physical console I/O, hardware-in-the-loop tests and stack
+  high-water measurements remain unverified for the native example.
 
 ### Changed
 
-- Both examples use one fixed-buffer CLI engine, with Arduino behavior
-  unchanged. Host characterization covers command output, callback counts,
-  pending work and serial input discard.
-- PlatformIO package metadata lists `espidf` for the native component and
-  example. PlatformIO `framework = espidf` builds remain untested.
-- Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
-- The root IDF manifest is tracked and validated by content in source and
-  packaged trees.
+- The PlatformIO package includes the native component and example and lists
+  `espidf` in its metadata. PlatformIO `framework = espidf` builds remain
+  untested. Package validation checks the component manifest and example
+  files and rejects generated ESP-IDF files and repository-only prompts.
+- Author, copyright and contact metadata now consistently identify
+  THYMOS Solution s.r.o., Jan Havelka and info@thymos.cz.
 
 ### Fixed
 
-- The Arduino CLI accepts fresh commands when the USB receive queue becomes
-  available again after a pending operation completes.
-- The ESP32-S2 native console checks endpoint space before sending output or
-  flushing a prompt. The native I2C adapter measures elapsed microseconds
-  when an EEPROM wait wakes early.
-- Package validation rejects a missing native component or example file,
-  generated ESP-IDF output and lock files, pioarduino's manifest backup
-  and the repository-only prompt history. It also checks that the two
-  manifests agree on export exclusions.
+- The Arduino CLI accepts new commands after a pending operation finishes
+  even if the USB receive queue was temporarily unavailable.
+- The ESP32-S2 native console checks USB endpoint space before writing
+  output or flushing a prompt. The native adapter now sleeps for the
+  remaining EEPROM wait time if its initial delay ends early.
 
 ## [3.1.0] - 2026-09-12
 

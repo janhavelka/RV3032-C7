@@ -35,7 +35,9 @@ Thank you for considering contributing to this project!
 ### Pull Requests
 - Keep PRs focused (one feature/fix per PR)
 - Update public API contracts and maintained guides when behavior changes
-- Keep completed audits, prompts, run reports, and raw transcripts out of docs
+- Keep completed prompts and audit reports out of the maintained guides.
+  Store run reports and raw transcripts in private artifacts. The documentation
+  guide lists the retained historical requirements. [Documentation guide](https://github.com/janhavelka/RV3032-C7/blob/main/docs/README.md#keeping-documentation-current)
 - Add changelog entry under `[Unreleased]`
 - Ensure CI passes
 
