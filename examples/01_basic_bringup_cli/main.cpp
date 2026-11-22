@@ -53,7 +53,10 @@ static rv3032cli::Hooks makeHooks(TwoWire& wire) {
         else Serial.print(text);
       },
       [](void*) { return Serial.read(); },
-      [](void*) { return static_cast<size_t>(Serial.available()); },
+      [](void*) -> size_t {
+        const int count = Serial.available();
+        return count > 0 ? static_cast<size_t>(count) : 0U;
+      },
       rtc_now_ms,
       [](void*) { return static_cast<uint32_t>(micros()); },
       sleepMs,

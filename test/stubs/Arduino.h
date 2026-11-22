@@ -141,17 +141,20 @@ class HardwareSerial {
   void resetInput() {
     _input.clear();
     _readIndex = 0;
+    _rxQueueReady = true;
   }
+  void setRxQueueReady(bool ready) { _rxQueueReady = ready; }
   void inject(const std::string& input) {
     _input.append(input);
   }
   void resetOutput() { _output.clear(); }
   const std::string& output() const { return _output; }
   int available() const {
+    if (!_rxQueueReady) return -1;
     return static_cast<int>(_input.length() - _readIndex);
   }
   int read() {
-    if (_readIndex >= _input.length()) {
+    if (!_rxQueueReady || _readIndex >= _input.length()) {
       return -1;
     }
     return static_cast<unsigned char>(_input[_readIndex++]);
@@ -203,6 +206,7 @@ class HardwareSerial {
   std::string _input;
   std::string _output;
   size_t _readIndex = 0;
+  bool _rxQueueReady = true;
 };
 
 inline HardwareSerial Serial;

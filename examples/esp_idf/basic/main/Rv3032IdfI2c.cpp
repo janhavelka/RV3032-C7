@@ -1,5 +1,7 @@
 #include "Rv3032IdfI2c.h"
 
+#include <unistd.h>
+
 #include "RV3032/CommandTable.h"
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
@@ -170,22 +172,21 @@ uint32_t nowMs(void*) {
 }
 
 void waitMs(uint32_t delayMs, void*) {
-  // At 1000 Hz each whole millisecond is exactly one tick. Add a guard
-  // tick for entry near the next tick, then check for an early wake.
-  uint32_t before = nowMs(nullptr);
-  for (unsigned attempt = 0; delayMs && attempt < 5; ++attempt) {
-    // Keep each wait below half the wrapping clock range, including the
-    // guard. The driver's ensure operation requests at most one second.
-    constexpr uint32_t MAX_SLEEP_MS = 0x7FFFFFFEU;
-    const uint32_t sleepMs = delayMs < MAX_SLEEP_MS ? delayMs : MAX_SLEEP_MS;
-    vTaskDelay(static_cast<TickType_t>(sleepMs + 1));
-    const uint32_t after = nowMs(nullptr);
-    const uint32_t elapsed = after - before;
-    if (elapsed >= delayMs) return;
-    delayMs -= elapsed;
-    before = after;
+  // Keep microseconds representable by usleep(). Driver waits fit one chunk.
+  constexpr uint32_t MAX_CHUNK_MS = UINT32_MAX / 1000;
+  while (delayMs > 0) {
+    const uint32_t chunkMs = delayMs < MAX_CHUNK_MS ? delayMs : MAX_CHUNK_MS;
+    const int64_t startedUs = esp_timer_get_time();
+    vTaskDelay(static_cast<TickType_t>(chunkMs + 1));  // Guard the entry tick.
+    const int64_t remainingUs = static_cast<int64_t>(chunkMs) * 1000 -
+                                (esp_timer_get_time() - startedUs);
+    if (remainingUs > 0) {
+      // IDF usleep rechecks its monotonic deadline after each early wake.
+      // At least one whole tick selects its yielding path.
+      usleep(static_cast<uint32_t>(remainingUs < 1000 ? 1000 : remainingUs));
+    }
+    delayMs -= chunkMs;
   }
-  // ensureWait() checks its own monotonic timestamps and fails an early wait.
 }
 
 }  // namespace rv3032Idf

@@ -25,12 +25,27 @@ void esp_rom_delay_us(uint32_t us) { sdk.nowUs += us; }
 void vTaskDelay(TickType_t ticks) {
   sdk.record(Call::DELAY);
   sdk.taskDelays.push_back(ticks);
-  if (sdk.earlyNextWake) {
-    sdk.earlyNextWake = false;
+  if (!sdk.earlyWakesUs.empty()) {
+    sdk.nowUs += sdk.earlyWakesUs.front();
+    sdk.earlyWakesUs.pop_front();
     return;
   }
   // A relative delay can start just before the next tick.
   sdk.nowUs = (sdk.nowUs / 1000 + ticks) * 1000;
+}
+
+// Model the yielding usleep branch in IDF 6.0.1 esp_libc/src/time.c.
+int fakeIdf::sleepUs(uint32_t us) {
+  sdk.sleepsUs.push_back(us);
+  if (us < 1000) {
+    esp_rom_delay_us(us);
+    return 0;
+  }
+  const int64_t deadlineUs = sdk.nowUs + us;
+  while (sdk.nowUs < deadlineUs) {
+    vTaskDelay(static_cast<TickType_t>((deadlineUs - sdk.nowUs + 999) / 1000));
+  }
+  return 0;
 }
 
 esp_err_t gpio_config(const gpio_config_t* config) {

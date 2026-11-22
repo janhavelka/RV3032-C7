@@ -11651,6 +11651,24 @@ void test_cli_terminal_callback_input_is_discarded_on_both_surfaces() {
   }
 }
 
+void test_cli_accepts_fresh_input_after_usb_rx_queue_returns() {
+  FakeRv3032 fake;
+  beginCliHarness(fake, false);
+  Serial.inject("timer 50 2 1\n");
+  loop();
+  TEST_ASSERT_TRUE(g_rtc.isOrdinaryJobBusy());
+
+  // Both ESP32 USB console drivers return -1 when their RX queue is absent.
+  Serial.setRxQueueReady(false);
+  driveCliPending(fake);
+  const uint32_t callbacks = fake.callbackCount;
+  Serial.setRxQueueReady(true);
+  Serial.inject("verbose 1\n");
+  loop();
+  TEST_ASSERT_TRUE(g_cli.verbose());
+  TEST_ASSERT_EQUAL_UINT32(callbacks, fake.callbackCount);
+}
+
 void test_cli_busy_backlog_is_discarded_after_terminal_poll() {
   FakeRv3032 fake;
   beginCliHarness(fake, false);
@@ -11837,6 +11855,7 @@ int main(int, char**) {
   RUN_TEST(test_phase3_cli_line_reader_discards_overflow_through_terminator);
   RUN_TEST(test_cli_pending_warning_and_serial_discard_preserve_owner);
   RUN_TEST(test_cli_busy_backlog_is_discarded_after_terminal_poll);
+  RUN_TEST(test_cli_accepts_fresh_input_after_usb_rx_queue_returns);
   RUN_TEST(test_cli_terminal_callback_input_is_discarded_on_both_surfaces);
   return UNITY_END();
 }

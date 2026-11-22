@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <vector>
 
@@ -21,7 +22,8 @@ struct State {
   int64_t advanceAfterNextClockReadUs = 0;
   unsigned clockReads = 0;
   uint32_t transferUs = 0;
-  bool earlyNextWake = false;
+  std::deque<uint32_t> earlyWakesUs;
+  std::vector<uint32_t> sleepsUs;
   std::vector<uint32_t> taskDelays;
   std::vector<int> transferTimeouts;
 
@@ -49,5 +51,6 @@ struct State {
 };
 
 extern State sdk;
+int sleepUs(uint32_t us);
 
 }  // namespace fakeIdf

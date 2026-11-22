@@ -26,6 +26,8 @@ class NativeCiContract(unittest.TestCase):
     def test_idf_matrix_jobs(self):
         for job, path in (("esp-idf-basic", "examples/esp_idf/basic"),
                           ("esp-idf-package", "pkg/RV3032/examples/esp_idf/basic")):
+            self.reject(job, "        target: [esp32s3, esp32s2]",
+                        "        target: [esp32s3, esp32s2]\n        exclude:\n          - target: esp32s2")
             for token in ("runs-on: ubuntu-latest", "fail-fast: false", "target: [esp32s3, esp32s2]",
                           "uses: espressif/esp-idf-ci-action@v1.2.0", "esp_idf_version: v6.0.1",
                           "target: ${{ matrix.target }}", "command: idf.py set-target ${{ matrix.target }} build",
@@ -54,6 +56,7 @@ class NativeCiContract(unittest.TestCase):
                 with self.subTest(job=job, token=token):
                     self.reject(job, token, "removed")
         self.reject("esp-idf-package", "    steps:", "    steps:\n      - name: Checkout\n        uses: actions/checkout@v7")
+        self.reject("esp-idf-package", "    steps:", "    steps:\n      - uses: actions/checkout@v7")
         self.reject("esp-idf-package", "        uses: espressif", "        if: false\n        uses: espressif")
         self.reject("esp-idf-package", "    needs:", "    continue-on-error: true\n    needs:")
         pack = "pio pkg pack -o dist/RV3032-C7.tar.gz ."
@@ -120,6 +123,11 @@ class NativeExampleContract(unittest.TestCase):
                             lambda s: s.replace(filename, "other.cpp"), f"compile {filename} once")
         self.reject("platformio.ini", lambda s: s.replace("+<examples/01_basic_bringup_cli/**>", ""),
                     "must compile the Arduino shell")
+        self.reject("platformio.ini", lambda s: s.replace("+<examples/common/**>",
+                                                         "+<examples/common/**>\n  -<examples/common>"),
+                    "must compile Rv3032Cli.cpp")
+        self.reject("platformio.ini", lambda s: s.replace("+<examples/common/**>", "+<examples/*.cpp>"),
+                    "must compile Rv3032Cli.cpp")
         for section in ("env:esp32s2dev", "env:esp32s3dev", "env:native"):
             def exclude_engine(text):
                 start = text.index(f"[{section}]")
@@ -167,6 +175,14 @@ class NativeExampleContract(unittest.TestCase):
             for setting in settings:
                 with self.subTest(filename=filename, setting=setting):
                     self.reject(checks.EXAMPLE / filename, lambda s: s.replace(setting, "# " + setting), setting)
+                    if setting.endswith("=y"):
+                        key = setting.split("=")[0]
+                        self.reject(checks.EXAMPLE / filename, lambda s: s + f"\n# {key} is not set\n", setting)
+            if filename != "sdkconfig.defaults":
+                for setting in checks.SDKCONFIG["sdkconfig.defaults"]:
+                    with self.subTest(filename=filename, override=setting):
+                        key = setting.split("=")[0]
+                        self.reject(checks.EXAMPLE / filename, lambda s: s + f"\n{key}=100\n", setting)
         self.reject("idf_component.yml", lambda s: s.replace(">=6.0.1", ">=5.0"), "quoted ESP-IDF")
         for token in checks.README_TOKENS:
             with self.subTest(token=token):

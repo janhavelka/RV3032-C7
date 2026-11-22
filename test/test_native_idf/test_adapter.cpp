@@ -197,7 +197,8 @@ void test_dispatch_guard_and_late_completion() {
 
 void test_wait_rechecks_monotonic_time_across_wrap_and_yields() {
   sdk.nowUs = (static_cast<int64_t>(UINT32_MAX) - 2) * 1000 + 999;
-  sdk.earlyNextWake = true;
+  // The wake crosses five millisecond boundaries in only 4001 microseconds.
+  sdk.earlyWakesUs = {4001};
   const auto before = idf::nowMs(nullptr);
   const auto startUs = sdk.nowUs;
   idf::waitMs(5, nullptr);
@@ -206,6 +207,15 @@ void test_wait_rechecks_monotonic_time_across_wrap_and_yields() {
   TEST_ASSERT_EQUAL(2, sdk.taskDelays.size());
   TEST_ASSERT_EQUAL_UINT32(6, sdk.taskDelays.front());
   TEST_ASSERT_TRUE(idf::nowMs(nullptr) < before);
+  TEST_ASSERT_TRUE((sdk.sleepsUs == std::vector<uint32_t>{1000}));
+
+  sdk.nowUs = 999;
+  sdk.earlyWakesUs = {4001, 0, 0, 0, 0, 0, 0};
+  sdk.sleepsUs.clear();
+  idf::waitMs(5, nullptr);
+  TEST_ASSERT_TRUE(sdk.nowUs >= 5999);
+  TEST_ASSERT_TRUE(sdk.earlyWakesUs.empty());
+  TEST_ASSERT_TRUE((sdk.sleepsUs == std::vector<uint32_t>{1000}));
 }
 
 RV3032::Config config(idf::Context& ctx) {

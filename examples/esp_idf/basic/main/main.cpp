@@ -20,6 +20,7 @@
 #include "driver/usb_serial_jtag_select.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #elif CONFIG_ESP_CONSOLE_USB_CDC
+#include "esp32s2/rom/usb/usb_device.h"
 #include "esp_private/usb_console.h"
 #include "esp_vfs_cdcacm.h"
 #else
@@ -69,13 +70,20 @@ int readByte(void*) {
 }
 
 #if CONFIG_ESP_CONSOLE_USB_CDC
+bool cdcEndpointWritable() {
+  // The S2 ROM CDC descriptor assigns bulk IN to endpoint 4. Its TX IRQ
+  // flag is consumed by the SDK ISR. Query FIFO space directly.
+  constexpr uint8_t CDC_BULK_IN_ENDPOINT = 0x84;
+  return usb_write_would_block(CDC_BULK_IN_ENDPOINT) == 0;
+}
+
 // The ROM CDC VFS reports full writes even when its endpoint accepts fewer
 // bytes. Honor the actual count and bound waiting for a stalled USB host.
 void writeCdc(const char* text, size_t length) {
   constexpr size_t PACKET_SIZE = 64;
   constexpr unsigned MAX_WAIT_TICKS = 25;
   for (unsigned waits = 0; length && waits < MAX_WAIT_TICKS;) {
-    if (esp_usb_console_write_available()) {
+    if (cdcEndpointWritable()) {
       const size_t chunk = length < PACKET_SIZE ? length : PACKET_SIZE;
       const auto sent = esp_usb_console_write_buf(text, chunk);
       if (sent < 0) return;
@@ -106,7 +114,7 @@ void flushConsole() {
 #if CONFIG_ESP_CONSOLE_USB_CDC
   // The ROM CDC driver buffers short writes even with unbuffered stdio.
   // Flush the unterminated prompt once the previous USB packet has drained.
-  if (esp_usb_console_write_available()) (void)fsync(fileno(stdout));
+  if (cdcEndpointWritable()) (void)fsync(fileno(stdout));
 #endif
 }
 

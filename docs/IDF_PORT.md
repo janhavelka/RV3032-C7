@@ -49,9 +49,11 @@ on S2. The S2 adapter uses ESP-IDF 6.0.1's private USB console declarations
 for that count and its bounded interrupt poll. These counts let the engine
 discard pending-time input even when it spans several loop iterations.
 The S2 ROM CDC VFS can report a full write after accepting fewer bytes.
-The shell uses the ROM's accepted-byte count, yields for at most 25 ticks per
-output fragment under backpressure and flushes the unterminated prompt when
-the endpoint is ready. A stalled or disconnected monitor can miss output.
+The shell checks the bulk IN endpoint for FIFO space before writing or
+flushing an unterminated prompt. The SDK interrupt handler consumes the
+transmit-ready event. Each output fragment advances by the accepted byte
+count and yields for at most 25 ticks under backpressure. A stalled or
+disconnected monitor can miss output.
 The main task has an 8192-byte stack. Its high-water mark and physical USB
 console behavior have not been measured.
 
@@ -134,25 +136,17 @@ byte count when no more specific cause is available. `I2C_NACK_DATA` remains
 distinct from `I2C_NACK_ADDR`, which `probe()`/`recover()` map to
 `DEVICE_NOT_FOUND`.
 
+The native example binds its initialized bus context and yielding wait callback
+as shown below. The context must outlive the driver.
+[Example adapter](../examples/esp_idf/basic/main/Rv3032IdfI2c.cpp)
+
 ```cpp
-static uint32_t idfNowMs(void*) {
-  return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
-}
-
-static void idfWaitMs(uint32_t delayMs, void*) {
-  TickType_t ticks = pdMS_TO_TICKS(delayMs);
-  if (ticks == 0 || ticks * portTICK_PERIOD_MS < delayMs) {
-    ++ticks;  // Round up to the requested duration.
-  }
-  vTaskDelay(ticks + 1U);  // Guard against entering near a tick boundary.
-}
-
 RV3032::Config cfg{};
-cfg.i2cWrite = myI2cWrite;
-cfg.i2cWriteRead = myI2cWriteRead;
-cfg.i2cUser = myContext;
-cfg.nowMs = idfNowMs;
-cfg.waitMs = idfWaitMs;
+cfg.i2cWrite = rv3032Idf::i2cWrite;
+cfg.i2cWriteRead = rv3032Idf::i2cWriteRead;
+cfg.i2cUser = &transport;
+cfg.nowMs = rv3032Idf::nowMs;
+cfg.waitMs = rv3032Idf::waitMs;
 cfg.enableEepromWrites = false;
 
 RV3032::RV3032 rtc;
@@ -171,7 +165,7 @@ does not update health counters or state.
 Admission methods perform no transfer. The I2C owner advances work explicitly:
 
 ```cpp
-const uint32_t now = idfNowMs(nullptr);
+const uint32_t now = rv3032Idf::nowMs(nullptr);
 uint8_t used = 0;
 RV3032::Status pollStatus = RV3032::Status::Ok();
 if (rtc.isOrdinaryJobBusy()) {
@@ -216,7 +210,11 @@ The synchronous primary-cell ensure is a deliberate startup-only boundary. Run
 it in the serialized I2C owner, with no pending job or persistence work. Its
 wait callback must yield the task and must not return before the requested
 monotonic duration; never implement it as a spin loop. A relative RTOS tick
-delay therefore needs both upward tick rounding and one entry-phase guard tick.
+delay needs an entry-phase guard tick. The example measures elapsed
+microseconds after that delay. If the task woke early, it passes the remaining
+time to ESP-IDF's `usleep`, rounded up to at least one tick so it yields and
+rechecks the clock after each wake.
+[ESP-IDF 6.0.1 sleep implementation](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_libc/src/time.c#L201-L233)
 
 ## Porting rules
 

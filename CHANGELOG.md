@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Arduino CLI accepts fresh commands when the USB receive queue becomes
+  available again after a pending operation completes.
+- The ESP32-S2 native console checks endpoint space before sending output or
+  flushing a prompt. The native I2C adapter measures elapsed microseconds
+  when an EEPROM wait wakes early.
 - Package validation rejects a missing native component or example file,
   generated ESP-IDF output and lock files, pioarduino's manifest backup
   and the repository-only prompt history. It also checks that the two

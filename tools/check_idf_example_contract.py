@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import configparser
-from fnmatch import fnmatchcase
+import glob
 from pathlib import Path
 import re
 import sys
@@ -87,11 +87,14 @@ def hil_commands(text: str) -> tuple[set[str], set[str]]:
     return known, unknown
 
 
-def compiled_by_pio(config: configparser.ConfigParser, env: str, path: Path) -> bool:
+def compiled_by_pio(root: Path, config: configparser.ConfigParser, env: str, path: Path) -> bool:
     filters = config.get(env, "build_src_filter", fallback=config["env"]["build_src_filter"])
     selected = False
     for operation, pattern in re.findall(r"([+-])<([^>]+)>", filters):
-        if fnmatchcase(path.as_posix(), pattern):
+        # PlatformIO walks every directory selected by a glob. Matching a
+        # parent selects this source even when the pattern ends at the parent.
+        if any(Path(match) == path or Path(match) in path.parents
+               for match in glob.iglob(pattern, root_dir=root, recursive=True)):
             selected = operation == "+"
     return env in config and selected
 
@@ -142,7 +145,11 @@ def ci_errors(workflow: str) -> list[str]:
         for setting in settings:
             if setting not in header_lines:
                 errors.append(f"CI {name} missing {setting}")
-        if name == "esp-idf-package" and re.search(r"(?m)^ *uses: actions/checkout@", jobs[name]):
+        excluded = re.search(r"(?m)^        exclude:([^\n]*(?:\n        [ -][^\n]*)*)", header)
+        if settings and excluded and re.search(r"""\btarget:\s*["']?esp32s[23]\b""", excluded[1]):
+            errors.append(f"CI {name} excludes a required target")
+        if name == "esp-idf-package" and re.search(
+                r"""(?im)^\s*(?:-\s*)?uses:\s*["']?actions/checkout@""", jobs[name]):
             errors.append("CI esp-idf-package must build the archive without checkout")
         steps = iter([line.strip() for line in block.splitlines()] for block in blocks)
         for first, *tokens in required_steps:
@@ -199,9 +206,9 @@ def contract_errors(root: Path) -> list[str]:
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(root / "platformio.ini", encoding="utf-8")
     for env in ("env:esp32s2dev", "env:esp32s3dev", "env:native"):
-        if not compiled_by_pio(cfg, env, ENGINE):
+        if not compiled_by_pio(root, cfg, env, ENGINE):
             errors.append(f"{env} must compile {ENGINE.name}")
-        if env != "env:native" and not compiled_by_pio(cfg, env, ARDUINO):
+        if env != "env:native" and not compiled_by_pio(root, cfg, env, ARDUINO):
             errors.append(f"{env} must compile the Arduino shell")
 
     manifest = read(Path("idf_component.yml"))
@@ -225,9 +232,12 @@ def contract_errors(root: Path) -> list[str]:
 
     for filename, settings in SDKCONFIG.items():
         lines = read(EXAMPLE / filename).splitlines()
-        for setting in settings:
-            key = setting.split("=")[0] + "="
-            if [line for line in lines if line.startswith(key)] != [setting]:
+        # IDF loads the target defaults after the common defaults.
+        for setting in set(settings) | set(SDKCONFIG["sdkconfig.defaults"]):
+            key = setting.split("=")[0]
+            declarations = [line for line in lines if line.startswith(key + "=")
+                            or line == f"# {key} is not set"]
+            if (setting in settings or declarations) and declarations != [setting]:
                 errors.append(f"{filename} must set {setting}")
     readme = " ".join(read(EXAMPLE / "README.md").lower().split())
     for token in README_TOKENS:

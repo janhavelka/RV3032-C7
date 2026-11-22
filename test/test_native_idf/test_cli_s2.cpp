@@ -8,6 +8,8 @@ namespace {
 ssize_t rxBytes = 0;
 unsigned interruptPolls = 0;
 bool endpointReady = true;
+unsigned endpointChecks = 0;
+uint8_t checkedEndpoint = 0;
 size_t acceptedPerWrite = 7;
 size_t largestWrite = 0;
 std::string pending;
@@ -26,7 +28,13 @@ int syncEndpoint(int fd) {
 
 void esp_usb_console_poll_interrupts() { ++interruptPolls; }
 ssize_t esp_usb_console_available_for_read() { return rxBytes; }
-bool esp_usb_console_write_available() { return endpointReady; }
+// The ROM's TX IRQ indication can already have been consumed by the SDK ISR.
+bool esp_usb_console_write_available() { return false; }
+int usb_write_would_block(uint8_t endpoint) {
+  ++endpointChecks;
+  checkedEndpoint = endpoint;
+  return endpointReady ? 0 : 1;
+}
 ssize_t esp_usb_console_write_buf(const char* text, size_t len) {
   largestWrite = std::max(largestWrite, len);
   const size_t accepted = std::min(len, acceptedPerWrite);
@@ -50,11 +58,13 @@ void test_idf_s2_cdc_endpoint_readiness_and_prompt() {
   TEST_ASSERT_EQUAL_UINT(2, interruptPolls);
 
   writeText(nullptr, "> ", false);
+  TEST_ASSERT_EQUAL_STRING("> ", pending.c_str());
+  TEST_ASSERT_GREATER_THAN_UINT(0, endpointChecks);
+  TEST_ASSERT_EQUAL_HEX8(0x84, checkedEndpoint);
   endpointReady = false;
   flushConsole();
   TEST_ASSERT_EQUAL_UINT(0, syncCalls);
   TEST_ASSERT_TRUE(published.empty());
-  TEST_ASSERT_EQUAL_STRING("> ", pending.c_str());
   endpointReady = true;
   flushConsole();
   TEST_ASSERT_EQUAL_UINT(1, syncCalls);
