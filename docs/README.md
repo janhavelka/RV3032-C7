@@ -37,6 +37,5 @@ user-visible changes under Unreleased in the changelog and update public
 headers when an API contract changes. Earlier audits and campaign reports
 are available in Git history. Private HIL artifacts default to `.pio/hil-runs/`.
 
-The repository retains the three completed native ESP-IDF prompts as
-historical requirements in `docs/prompts/`. Package exports exclude that
-directory. [Executed native ESP-IDF promptset](https://github.com/janhavelka/RV3032-C7/blob/main/docs/prompts/README.md)
+The three completed native ESP-IDF prompts are archived in Git history.
+[Archived ESP-IDF requirements](https://github.com/janhavelka/RV3032-C7/tree/3c894cc84640aadbe9ea0948ae3c3db355f52d16/docs/prompts)

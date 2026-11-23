@@ -135,12 +135,8 @@ def source_check() -> int:
         if not path.is_file() or path.stat().st_size == 0:
             errors.append(f"missing or empty required source file: {rel}")
 
-    # Permanent exception (owner decision 2026-11-16): docs/prompts/ keeps
-    # executed promptsets as historical requirements. While
-    # docs/prompts/README.md exists, Markdown files directly in docs/prompts/
-    # are allowed in the source tree; nested or non-Markdown files still fail.
-    # Packages never accept docs/prompts/** (REQUIRED_EXPORT_EXCLUDES and
-    # forbidden_package_path() below).
+    # An indexed promptset may contain top-level Markdown during development.
+    # Package exports exclude the entire directory.
     prompts_dir = ROOT / "docs/prompts"
     promptset_index = (prompts_dir / "README.md").is_file()
     artifacts = [

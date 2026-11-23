@@ -39,8 +39,7 @@ You are a professional embedded software engineer building a production-grade RV
 - Targets are ESP32-S2 and ESP32-S3 with Arduino on PlatformIO and native
   ESP-IDF. Build the native component and bring-up example with ESP-IDF 6.0.1.
 - Both examples ship the same CLI. Native CI builds the checkout and
-  validated package for both targets. `docs/prompts/README.md` retains
-  the executed historical requirements.
+  validated package for both targets.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.
 
@@ -80,7 +79,7 @@ test/
 tools/                 - Repository check scripts and the device-free HIL runner
 scripts/               - Version generator and the PlatformIO wrapper
 docs/                  - Architecture, device reference, IDF and verification
-                         guides, vendor PDFs and repository-only prompt history
+                         guides, and vendor PDFs
 .github/workflows/     - Arduino, host, package and native ESP-IDF CI
 platformio.ini
 library.json

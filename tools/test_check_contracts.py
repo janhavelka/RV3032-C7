@@ -322,7 +322,6 @@ class PackageChecks(unittest.TestCase):
             self.assertTrue(package.forbidden_package_path(rel))
 
     def test_promptset_is_source_only_and_never_packaged(self):
-        # Permanent: executed promptsets stay as historical requirements.
         with TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_fixture(root)
